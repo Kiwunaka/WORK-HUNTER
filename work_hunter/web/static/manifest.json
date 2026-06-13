@@ -1,0 +1,10 @@
+{
+  "name": "Work Hunter",
+  "short_name": "WH",
+  "description": "Personal local job-search command center with AI helpers",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f7fb",
+  "theme_color": "#111827",
+  "icons": []
+}

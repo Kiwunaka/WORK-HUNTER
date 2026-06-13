@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Work Hunter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111827'/%3E%3Ctext x='32' y='40' font-size='24' text-anchor='middle' fill='white' font-family='Arial'%3EWH%3C/text%3E%3C/svg%3E">
+  <link rel="manifest" href="/manifest.json">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark"><i data-lucide="briefcase"></i></div>
+      <div>
+        <strong>Work Hunter</strong>
+        <span>smart job search</span>
+      </div>
+    </div>
+    <nav>
+      <button class="nav-button active" data-view="inbox"><i data-lucide="inbox"></i>Вакансии</button>
+      <button class="nav-button" data-view="calendar"><i data-lucide="calendar"></i>Календарь</button>
+      <button class="nav-button" data-view="favorites"><i data-lucide="heart"></i>Избранное</button>
+      <button class="nav-button" data-view="chat"><i data-lucide="bot"></i>AI Ассистент</button>
+      <button class="nav-button" data-view="agent"><i data-lucide="radar"></i>HH Агент</button>
+      <button class="nav-button" data-view="settings"><i data-lucide="settings"></i>Настройки</button>
+      <button class="nav-button" data-view="sources"><i data-lucide="database"></i>Источники</button>
+      <button class="nav-button" data-view="stats"><i data-lucide="bar-chart-3"></i>Статистика</button>
+      <button class="nav-button" data-view="trends"><i data-lucide="trending-up"></i>Тренды</button>
+    </nav>
+    <div class="theme-toggle">
+      <button id="theme-toggle-button" title="Переключить тему"><i data-lucide="moon"></i> Тёмная</button>
+    </div>
+    <div class="profile-switch">
+      <span class="meta">Профиль поиска</span>
+      <select id="profile-select"></select>
+    </div>
+    <div class="sidebar-foot">
+      <span id="summary-count">0 вакансий</span>
+    </div>
+  </aside>
+
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>Очередь вакансий</h1>
+        <p id="summary-line">Синхронизируй источники, затем отсортируй по score.</p>
+      </div>
+      <div class="actions">
+        <button id="sync-button" class="primary">Синхронизировать</button>
+        <button id="score-button">Пересчитать score</button>
+      </div>
+    </header>
+
+    <section id="view-inbox" class="view active">
+      <div class="bulk-toolbar" id="bulk-toolbar" style="display:none;">
+        <span id="bulk-count">Выбрано: 0</span>
+        <button onclick="bulkAction('saved')">Сохранить</button>
+        <button onclick="bulkAction('hidden')">Скрыть</button>
+        <button onclick="bulkAction('applied')">Откликнулся</button>
+        <button onclick="clearBulkSelection()">Снять выбор</button>
+      </div>
+
+      <div class="filters" style="flex-wrap:wrap;">
+        <label>Источник
+          <select id="source-filter">
+            <option value="">Все</option>
+            <option value="hh">HH</option>
+            <option value="habr">Habr</option>
+            <option value="geekjob">GeekJob</option>
+            <option value="telegram">Telegram</option>
+          </select>
+        </label>
+        <label>Min score
+          <input id="min-score-filter" type="number" value="0" min="0" max="100">
+        </label>
+        <label>AI-поиск
+          <input id="ai-search-input" type="text" placeholder="Например: удалёнка FastAPI от 200к...">
+        </label>
+        <button id="ai-search-button">Искать</button>
+        <label>
+          <input type="checkbox" id="filter-remote-only"> Только удалёнка
+        </label>
+        <label>
+          <input type="checkbox" id="filter-with-salary"> С зарплатой
+        </label>
+        <label>Уровень
+          <select id="filter-level">
+            <option value="">Все</option>
+            <option value="junior">Junior</option>
+            <option value="middle">Middle</option>
+            <option value="senior">Senior</option>
+            <option value="lead">Lead</option>
+          </select>
+        </label>
+        <button id="refresh-button">Обновить список</button>
+        <button id="export-csv-button" style="margin-left:auto;">Экспорт CSV</button>
+      </div>
+
+      <div class="workspace">
+        <section class="job-list">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:30px;"><input type="checkbox" id="select-all-checkbox" onclick="toggleSelectAll()"></th>
+                <th>Score</th>
+                <th>Вакансия</th>
+                <th>Источник</th>
+                <th>Статус</th>
+              </tr>
+            </thead>
+            <tbody id="jobs-body"></tbody>
+          </table>
+          <div id="jobs-skeleton" style="display:none;" class="skeleton-table">
+            <div class="skeleton-row"></div><div class="skeleton-row"></div><div class="skeleton-row"></div>
+            <div class="skeleton-row"></div><div class="skeleton-row"></div>
+          </div>
+        </section>
+        <div class="detail-panels">
+          <section id="job-detail" class="detail empty">
+            <p>Выбери вакансию слева.</p>
+          </section>
+          <section id="ai-panels" class="detail empty" style="display:none;">
+            <div class="ai-tabs">
+              <button class="ai-tab active" data-ai-panel="resume">Резюме</button>
+              <button class="ai-tab" data-ai-panel="analysis">Анализ</button>
+              <button class="ai-tab" data-ai-panel="interview">Собес</button>
+              <button class="ai-tab" data-ai-panel="letter-panel">Письмо</button>
+              <button class="ai-tab" data-ai-panel="notes">Заметки</button>
+            </div>
+            <div id="ai-panel-resume" class="ai-panel-content active">
+              <div class="ai-sub-section">
+                <h4>Советы для резюме</h4>
+                <button onclick="getResumeTips()">Получить советы</button>
+                <div id="resume-tips-output" class="ai-output"></div>
+              </div>
+              <div class="ai-sub-section">
+                <h4>ATS-резюме</h4>
+                <button onclick="getAtsResume()">Сгенерировать</button>
+                <div id="ats-resume-output" class="ai-output"></div>
+              </div>
+              <div class="ai-sub-section">
+                <h4>ATS-аудит</h4>
+                <textarea id="audit-resume-input" rows="6" placeholder="Вставь своё резюме сюда..." style="width:100%;margin-bottom:4px;"></textarea>
+                <button onclick="getAtsAudit()">Проверить</button>
+                <div id="ats-audit-output" class="ai-output"></div>
+              </div>
+            </div>
+            <div id="ai-panel-analysis" class="ai-panel-content">
+              <div class="ai-sub-section">
+                <h4>AI-fit оценка</h4>
+                <button onclick="getAiFit()">Оценить fit</button>
+                <div id="ai-fit-score" class="ai-fit-badge" style="display:none;"></div>
+                <div id="ai-fit-reasoning" class="ai-output"></div>
+              </div>
+              <div class="ai-sub-section">
+                <h4>Саммари вакансии</h4>
+                <button onclick="getSummary()">Сделать саммари</button>
+                <div id="summary-output" class="ai-output"></div>
+              </div>
+              <div class="ai-sub-section">
+                <h4>Питч опыта (STAR)</h4>
+                <button onclick="getExperiencePitch()">Сгенерировать питч</button>
+                <div id="pitch-output" class="ai-output"></div>
+              </div>
+            </div>
+            <div id="ai-panel-interview" class="ai-panel-content">
+              <div class="ai-sub-section">
+                <h4>Вопросы к собеседованию</h4>
+                <button onclick="getInterviewQuestions()">Сгенерировать вопросы</button>
+                <div id="interview-questions-output" class="ai-output"></div>
+              </div>
+            </div>
+            <div id="ai-panel-letter-panel" class="ai-panel-content">
+              <div class="ai-sub-section">
+                <h4>Сопроводительное письмо</h4>
+                <textarea id="letter-box" class="letter" spellcheck="true" style="width:100%;min-height:190px;"></textarea>
+                <div style="display:flex;gap:8px;margin-top:8px;">
+                  <button onclick="prepareLetter()">Шаблон</button>
+                  <button onclick="prepareLetterAi()" class="primary">AI письмо</button>
+                </div>
+              </div>
+            </div>
+            <div id="ai-panel-notes" class="ai-panel-content">
+              <div class="ai-sub-section">
+                <h4>Мои заметки</h4>
+                <textarea id="job-notes-input" rows="8" placeholder="Заметки об этой вакансии..." style="width:100%;margin-bottom:4px;"></textarea>
+                <button onclick="saveJobNote()">Сохранить заметки</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-favorites" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Избранное</h1>
+      </div>
+      <div class="workspace">
+        <section class="job-list" style="grid-column: 1 / -1;">
+          <table>
+            <thead>
+              <tr>
+                <th>Score</th>
+                <th>Вакансия</th>
+                <th>Источник</th>
+                <th>Заметка</th>
+              </tr>
+            </thead>
+            <tbody id="favorites-body"></tbody>
+          </table>
+        </section>
+      </div>
+    </section>
+
+    <section id="view-calendar" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Календарь</h1>
+        <button id="add-event-button" class="primary" onclick="showEventForm()">+ Событие</button>
+      </div>
+      <div id="event-form" class="panel" style="display:none;margin-bottom:14px;">
+        <h3 id="event-form-title">Новое событие</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <label>Название <input id="event-title-input" style="width:100%;"></label>
+          <label>Тип
+            <select id="event-type-select" style="width:100%;">
+              <option value="interview">Собеседование</option>
+              <option value="follow_up">Follow-up</option>
+              <option value="call">Звонок</option>
+              <option value="other">Другое</option>
+            </select>
+          </label>
+          <label>Дата и время <input type="datetime-local" id="event-date-input" style="width:100%;"></label>
+          <label>Вакансия (ID) <input type="number" id="event-job-input" style="width:100%;" placeholder="не обязательно"></label>
+          <label style="grid-column:1/-1;">Заметки <textarea id="event-notes-input" rows="2" style="width:100%;"></textarea></label>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;">
+          <button id="save-event-button" class="primary" onclick="saveEvent()">Сохранить</button>
+          <button onclick="hideEventForm()">Отмена</button>
+        </div>
+      </div>
+      <div id="events-list" class="source-list"></div>
+    </section>
+
+    <section id="view-chat" class="view">
+      <div class="chat-layout">
+        <div class="chat-main">
+          <div class="chat-header">
+            <h2 id="chat-title">AI Ассистент</h2>
+            <span id="chat-context-info" class="meta"></span>
+          </div>
+          <div id="chat-messages" class="chat-messages">
+            <div class="chat-welcome">
+              <p><strong>Привет!</strong> Я AI-ассистент Work Hunter.</p>
+              <p>Выбери вакансию слева — и я помогу её проанализировать. Или просто спроси меня о поиске работы.</p>
+            </div>
+          </div>
+          <div class="chat-input-bar">
+            <textarea id="chat-input" rows="2" placeholder="Задай вопрос..." wrap="soft"></textarea>
+            <button id="chat-send-button" class="primary">Отправить</button>
+          </div>
+        </div>
+        <div class="chat-sidebar">
+          <div class="panel">
+            <h3>Контекст</h3>
+            <p class="meta" id="chat-context-job">Вакансия не выбрана. Выбери вакансию в списке.</p>
+            <label style="margin-top: 12px;">
+              <input type="checkbox" id="chat-attach-job"> Прикрепить выбранную вакансию
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-agent" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <div>
+          <h1>HH Агент</h1>
+          <p id="agent-status-line">Локальная кабина для запусков, approvals, шаблонов и blacklist.</p>
+        </div>
+        <div class="actions">
+          <button id="agent-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
+          <button id="agent-digest-button" class="primary"><i data-lucide="sparkles"></i>Digest</button>
+        </div>
+      </div>
+
+      <div class="agent-tabs">
+        <button class="agent-tab active" data-agent-panel="dashboard"><i data-lucide="layout-dashboard"></i>Dashboard</button>
+        <button class="agent-tab" data-agent-panel="inbox"><i data-lucide="inbox"></i>Inbox</button>
+        <button class="agent-tab" data-agent-panel="approvals"><i data-lucide="check-check"></i>Approvals</button>
+        <button class="agent-tab" data-agent-panel="runs"><i data-lucide="activity"></i>Runs</button>
+        <button class="agent-tab" data-agent-panel="api-lab"><i data-lucide="flask-conical"></i>API Lab</button>
+        <button class="agent-tab" data-agent-panel="templates"><i data-lucide="file-text"></i>Templates</button>
+        <button class="agent-tab" data-agent-panel="resume-builder"><i data-lucide="layers"></i>Resume</button>
+        <button class="agent-tab" data-agent-panel="blacklist"><i data-lucide="shield-x"></i>Blacklist</button>
+        <button class="agent-tab" data-agent-panel="events"><i data-lucide="calendar-clock"></i>Events</button>
+        <button class="agent-tab" data-agent-panel="settings"><i data-lucide="sliders-horizontal"></i>Settings</button>
+      </div>
+
+      <div id="agent-panel-dashboard" class="agent-panel active">
+        <div class="agent-metrics">
+          <div class="stat-card">
+            <h3>Auth</h3>
+            <div class="stat-number small" id="agent-auth-status">—</div>
+            <p id="agent-auth-note">—</p>
+          </div>
+          <div class="stat-card">
+            <h3>Pending</h3>
+            <div class="stat-number" id="agent-pending-count">0</div>
+            <p>approval queue</p>
+          </div>
+          <div class="stat-card">
+            <h3>Runs</h3>
+            <div class="stat-number" id="agent-runs-count">0</div>
+            <p>MCP / local ops</p>
+          </div>
+          <div class="stat-card">
+            <h3>Decisions</h3>
+            <div class="stat-number" id="agent-decisions-count">0</div>
+            <p>AI audit</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Операции</h2>
+            <span class="meta" id="agent-operation-note"></span>
+          </div>
+          <div class="agent-operation-grid">
+            <button data-agent-operation="preflight"><i data-lucide="shield-check"></i>Preflight</button>
+            <button data-agent-operation="sync-resumes"><i data-lucide="download"></i>Sync resumes</button>
+            <button data-agent-operation="update-resumes"><i data-lucide="upload-cloud"></i>Update resumes</button>
+            <button data-agent-operation="sync-negotiations"><i data-lucide="messages-square"></i>Sync negotiations</button>
+            <button data-agent-operation="clear-skipped"><i data-lucide="eraser"></i>Clear skipped</button>
+            <button data-agent-operation="refresh-token"><i data-lucide="key-round"></i>Refresh token</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Последний digest</h2>
+            <button onclick="loadAgentDigest()"><i data-lucide="refresh-cw"></i>Обновить</button>
+          </div>
+          <div id="agent-digest-list" class="agent-list"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-inbox" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Agent inbox</h2>
+              <p>Outbox, webhooks, pending work and latest digest items.</p>
+            </div>
+          </div>
+          <div id="agent-inbox-list" class="agent-list"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-approvals" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Approval queue</h2>
+            <button onclick="loadAgentApprovals()"><i data-lucide="refresh-cw"></i>Обновить</button>
+          </div>
+          <div id="agent-approvals-list" class="agent-list"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-runs" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Runs и логи</h2>
+            <button onclick="loadAgentOperations()"><i data-lucide="refresh-cw"></i>Обновить</button>
+          </div>
+          <div id="agent-runs-list" class="agent-list"></div>
+          <div class="section-title">Логи</div>
+          <div id="agent-logs-list" class="agent-list compact"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-api-lab" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>HH API Lab</h2>
+            <div class="actions">
+              <button id="hh-lab-run-button" class="primary"><i data-lucide="play"></i>Run</button>
+              <button id="hh-lab-save-snippet-button"><i data-lucide="save"></i>Save snippet</button>
+            </div>
+          </div>
+          <div id="hh-lab-quick-calls" class="agent-operation-grid"></div>
+          <div class="hh-lab-editor">
+            <label>Method
+              <select id="hh-lab-method">
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </label>
+            <label>Path <input id="hh-lab-path" value="/me" placeholder="/me"></label>
+            <label>Snippet name <input id="hh-lab-snippet-name" placeholder="my-call"></label>
+            <label>Params JSON <textarea id="hh-lab-params" rows="7" spellcheck="false">{}</textarea></label>
+            <label>Body JSON <textarea id="hh-lab-body" rows="7" spellcheck="false"></textarea></label>
+          </div>
+          <div class="section-title">Output</div>
+          <pre id="hh-lab-output" class="hh-lab-output">{}</pre>
+          <div class="section-title">Saved snippets</div>
+          <div id="hh-lab-snippets-list" class="agent-list"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-templates" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Letter templates</h2>
+            <button id="agent-save-template-button" class="primary"><i data-lucide="save"></i>Сохранить</button>
+          </div>
+          <div class="agent-form-grid">
+            <label>Название <input id="agent-template-name" placeholder="warm_reply"></label>
+            <label style="grid-column:1/-1;">Текст <textarea id="agent-template-body" rows="6" placeholder="Привет, {name}..."></textarea></label>
+          </div>
+          <div id="agent-templates-list" class="agent-list"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-resume-builder" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Resume template preview</h2>
+              <p>Markdown template + active profile/about -> HH payload draft.</p>
+            </div>
+            <button id="agent-resume-preview-button" class="primary"><i data-lucide="eye"></i>Preview</button>
+          </div>
+          <div class="agent-form-grid">
+            <label style="grid-column:1/-1;">Markdown template
+              <textarea id="agent-resume-template" rows="12" spellcheck="false"></textarea>
+            </label>
+            <label style="grid-column:1/-1;">Extra context JSON
+              <textarea id="agent-resume-context" rows="4" spellcheck="false">{}</textarea>
+            </label>
+          </div>
+          <pre id="agent-resume-preview-output" class="agent-json"></pre>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Batch preset matrix</h2>
+              <p>resumes x search presets x letters x limits, with secrets and local scripts stripped.</p>
+            </div>
+            <button id="agent-batch-matrix-button"><i data-lucide="grid-3x3"></i>Build</button>
+          </div>
+          <label>Matrix JSON
+            <textarea id="agent-batch-matrix-input" rows="10" spellcheck="false"></textarea>
+          </label>
+          <pre id="agent-batch-matrix-output" class="agent-json"></pre>
+        </div>
+      </div>
+
+      <div id="agent-panel-blacklist" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Employer blacklist</h2>
+            <button id="agent-save-blacklist-button" class="primary"><i data-lucide="save"></i>Сохранить</button>
+          </div>
+          <div class="agent-form-grid three">
+            <label>Employer ID <input id="agent-blacklist-id" placeholder="123456"></label>
+            <label>Название <input id="agent-blacklist-name" placeholder="Компания"></label>
+            <label>Причина <input id="agent-blacklist-reason" placeholder="spam, low fit, blacklist"></label>
+          </div>
+          <div id="agent-blacklist-list" class="agent-list"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-events" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Events and tasks</h2>
+              <p>Negotiation-derived interviews, tests, offers, rejections and follow-ups.</p>
+            </div>
+          </div>
+          <div class="agent-split-list">
+            <div>
+              <h3>Events</h3>
+              <div id="agent-events-list" class="agent-list"></div>
+            </div>
+            <div>
+              <h3>Tasks</h3>
+              <div id="agent-tasks-list" class="agent-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="agent-panel-settings" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Agent settings</h2>
+              <p>Read-only local preflight snapshot.</p>
+            </div>
+          </div>
+          <pre id="agent-settings-output" class="agent-json"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-settings" class="view">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Профиль: что ищем</h2>
+          <div>
+            <button id="save-profile-button" class="primary">Сохранить профиль</button>
+            <button id="rescore-after-save" style="margin-left:8px;">Пересчитать score</button>
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div>
+            <label>Поисковые запросы (через запятую)
+              <textarea id="profile-queries" rows="3" style="width:100%;" placeholder="python backend, django, fastapi"></textarea>
+            </label>
+            <label>Желаемые роли (через запятую)
+              <input id="profile-roles" style="width:100%;" placeholder="backend, python, developer">
+            </label>
+            <label>Стоп-слова (через запятую)
+              <textarea id="profile-stopwords" rows="3" style="width:100%;" placeholder="1C, стажер, senior"></textarea>
+            </label>
+          </div>
+          <div>
+            <label>Must-have навыки (через запятую)
+              <textarea id="profile-must-skills" rows="4" style="width:100%;" placeholder="python, fastapi, postgresql"></textarea>
+            </label>
+            <label>Nice-to-have навыки (через запятую)
+              <textarea id="profile-nice-skills" rows="4" style="width:100%;" placeholder="docker, kubernetes, redis"></textarea>
+            </label>
+          </div>
+        </div>
+        <div class="meta" style="margin-top:8px;" id="profile-active-label"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Мои резюме</h2>
+          <button id="add-resume-button" class="primary" onclick="showResumeForm()">+ Резюме</button>
+        </div>
+        <div id="resume-form" style="display:none;margin-bottom:10px;">
+          <label>Название <input id="resume-name-input" style="width:100%;" placeholder="Python Backend"></label>
+          <label>Текст резюме <textarea id="resume-body-input" rows="8" style="width:100%;" placeholder="Вставь текст резюме..."></textarea></label>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button id="save-resume-button" class="primary" onclick="saveResume()">Сохранить</button>
+            <button onclick="hideResumeForm()">Отмена</button>
+          </div>
+        </div>
+        <div id="resumes-list" class="source-list"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>AI backend</h2>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <label>Backend
+            <select id="ai-backend-select" style="width: 100%; padding: 4px;">
+              <option value="direct">Direct OpenAI-compatible</option>
+              <option value="opencode">OpenCode</option>
+            </select>
+          </label>
+          <label>OpenRouter API Key
+            <input type="password" id="ai-key-input" placeholder="sk-or-v1-..." style="width: 100%; padding: 4px;">
+          </label>
+          <label>Модель (OpenRouter model ID)
+            <input type="text" id="ai-model-input" placeholder="google/gemini-2.5-flash" style="width: 100%; padding: 4px;">
+          </label>
+          <label>OpenCode transport
+            <select id="opencode-transport-select" style="width: 100%; padding: 4px;">
+              <option value="cli">CLI: opencode run</option>
+              <option value="server">Server: opencode serve</option>
+            </select>
+          </label>
+          <label>OpenCode command
+            <input type="text" id="opencode-command-input" placeholder="opencode" style="width: 100%; padding: 4px;">
+          </label>
+          <label>OpenCode model
+            <input type="text" id="opencode-model-input" placeholder="provider/model" style="width: 100%; padding: 4px;">
+          </label>
+          <label>OpenCode agent
+            <input type="text" id="opencode-agent-input" placeholder="work-hunter-ai" style="width: 100%; padding: 4px;">
+          </label>
+          <label>OpenCode server URL
+            <input type="text" id="opencode-server-input" placeholder="http://127.0.0.1:4096" style="width: 100%; padding: 4px;">
+          </label>
+          <button id="save-ai-button" class="primary">Сохранить AI настройки</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Авто-синхронизация</h2>
+        <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;">
+          <label>Интервал (минуты, 0 = выкл)
+            <input type="number" id="auto-sync-interval" value="0" min="0" max="1440" style="width:100px;">
+          </label>
+          <button id="save-auto-sync-button">Сохранить</button>
+          <span id="auto-sync-status" class="meta"></span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Ключи и токены HH</h2>
+          <div class="inline-form" style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; gap: 8px;">
+              <input type="password" id="hh-token-input" placeholder="HH Access Token" style="flex: 1; padding: 4px;">
+              <button id="save-token-button">Обновить токен</button>
+            </div>
+            <label style="font-size: 0.9em; cursor: pointer;">
+              <input type="checkbox" id="hh-allow-broad"> Разрешить реальные отклики (allow_broad_apply)
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Сохранённые поиски</h2>
+          <button id="add-search-button" onclick="showSearchForm()">+ Поиск</button>
+        </div>
+        <div id="search-form" style="display:none;margin-bottom:10px;">
+          <label>Название <input id="search-name-input" style="width:100%;" placeholder="FastAPI удалёнка"></label>
+          <label>Поисковый запрос <input id="search-query-input" style="width:100%;" placeholder="python fastapi backend"></label>
+          <label><input type="checkbox" id="search-alert-checkbox"> Включить уведомления</label>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button id="save-search-button" class="primary" onclick="saveSearch()">Сохранить</button>
+            <button onclick="hideSearchForm()">Отмена</button>
+          </div>
+        </div>
+        <div id="searches-list" class="source-list"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Призраки (ghost)</h2>
+          <button id="check-ghost-button" onclick="loadGhostJobs()">Проверить</button>
+        </div>
+        <p class="meta">Вакансии без ответа 7+ дней после отклика.</p>
+        <div id="ghost-jobs-list" class="source-list"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Конфигурация (JSON)</h2>
+          <button id="save-config-button" class="primary">Сохранить JSON</button>
+        </div>
+        <textarea id="config-editor" spellcheck="false"></textarea>
+      </div>
+    </section>
+
+    <section id="view-sources" class="view">
+      <div class="panel">
+        <h2>Источники</h2>
+        <div id="sources-list" class="source-list"></div>
+      </div>
+    </section>
+
+    <section id="view-stats" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Статистика</h1>
+        <button id="refresh-stats-button">Обновить</button>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <h3>Всего вакансий</h3>
+          <div class="stat-number" id="stat-total">—</div>
+        </div>
+        <div class="stat-card">
+          <h3>Новых</h3>
+          <div class="stat-number" id="stat-new">—</div>
+        </div>
+        <div class="stat-card">
+          <h3>Откликов</h3>
+          <div class="stat-number" id="stat-applied">—</div>
+        </div>
+        <div class="stat-card">
+          <h3>Сохранено</h3>
+          <div class="stat-number" id="stat-saved">—</div>
+        </div>
+      </div>
+      <div class="stats-section">
+        <h3>По источникам</h3>
+        <div id="stats-by-source" class="stats-bars"></div>
+      </div>
+      <div class="stats-section">
+        <h3>Распределение Score</h3>
+        <div id="stats-score-dist" class="stats-bars"></div>
+      </div>
+      <div class="stats-section">
+        <h3>Воронка откликов</h3>
+        <div id="stats-funnel" class="stats-funnel"></div>
+      </div>
+    </section>
+
+    <section id="view-trends" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Тренды рынка</h1>
+        <button id="load-trends-button" class="primary" onclick="loadMarketTrends()">Анализировать</button>
+      </div>
+      <div id="trends-output" class="panel">
+        <p class="meta">Нажми «Анализировать» чтобы получить AI-отчёт о трендах рынка на основе последних вакансий.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

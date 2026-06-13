@@ -1,0 +1,49 @@
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+work_hunter.egg-info/
+
+# Virtual environments and local installs
+.venv/
+venv/
+env/
+
+# Local runtime state and secrets
+.work-hunter/
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.har
+*.session
+*.cookies
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local browser/test/research artifacts
+.playwright-mcp/
+.research/
+scratch.py
+
+# Donor/research repos kept out of the first product baseline
+external/
+.codex_compare/
+.compare-forks/
+.compare-hh-applicant-tool/
+
+# OpenCode local state; keep only the safe repo agent prompt
+.opencode/*
+!.opencode/.gitignore
+!.opencode/agents/
+!.opencode/agents/work-hunter-ai.md

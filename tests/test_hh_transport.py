@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from http.cookiejar import Cookie
+
+import pytest
+
+from work_hunter.hh_transport import (
+    ChallengeKind,
+    HHApiSession,
+    HHBrowserSession,
+    HHChallengeHandler,
+    HHIdentity,
+    HHOnlyCookieJar,
+    HHWebActions,
+    build_android_user_agent,
+    extract_xsrf_token,
+)
+from work_hunter.hh_transport.backends import DictConfigBackend, JsonCookieBackend
+
+
+def make_cookie(domain: str, name: str = "sid", value: str = "1") -> Cookie:
+    return Cookie(
+        version=0,
+        name=name,
+        value=value,
+        port=None,
+        port_specified=False,
+        domain=domain,
+        domain_specified=True,
+        domain_initial_dot=domain.startswith("."),
+        path="/",
+        path_specified=True,
+        secure=False,
+        expires=None,
+        discard=True,
+        comment=None,
+        comment_url=None,
+        rest={},
+        rfc2109=False,
+    )
+
+
+def test_android_user_agent_is_hh_android_like():
+    user_agent = build_android_user_agent(app_version="1.2.3", android_version="14", model="Pixel Test")
+
+    assert "ru.hh.android/1.2.3" in user_agent
+    assert "Android 14" in user_agent
+    assert "Pixel Test" in user_agent
+
+
+def test_hh_cookie_jar_rejects_non_hh_domains():
+    jar = HHOnlyCookieJar()
+
+    jar.set_cookie(make_cookie(".hh.ru", "good", "yes"))
+    jar.set_cookie(make_cookie("evil.test", "bad", "no"))
+
+    cookies = list(jar)
+    assert [cookie.name for cookie in cookies] == ["good"]
+
+
+def test_identity_refresh_payload_and_expiry():
+    identity = HHIdentity.from_config(
+        {
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "client_id": "cid",
+            "client_secret": "secret",
+            "access_expires_at": "2030-01-01T00:00:00+00:00",
+        }
+    )
+
+    assert identity.authorization_header() == {"Authorization": "Bearer access"}
+    assert identity.refresh_payload() == {
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh",
+        "client_id": "cid",
+        "client_secret": "secret",
+    }
+    assert identity.is_access_expired(now=datetime(2029, 1, 1, tzinfo=timezone.utc)) is False
+
+
+def test_api_session_refresh_updates_backend(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_at": "2031-01-01T00:00:00+00:00",
+            }
+
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        return Response()
+
+    config = {"refresh_token": "old-refresh", "client_id": "cid", "client_secret": "secret"}
+    backend = DictConfigBackend(config)
+    monkeypatch.setattr("requests.request", fake_request)
+
+    payload = HHApiSession(config, backend=backend).refresh_token()
+
+    assert payload["access_token"] == "new-access"
+    assert config["access_token"] == "new-access"
+    assert config["refresh_token"] == "new-refresh"
+    assert calls[0]["data"]["refresh_token"] == "old-refresh"
+
+
+def test_extract_xsrf_token_prefers_cookie_then_html():
+    assert extract_xsrf_token(cookies=[{"name": "_xsrf", "value": "from-cookie"}]) == "from-cookie"
+    assert extract_xsrf_token('<input name="_xsrf" value="from-html">') == "from-html"
+
+
+def test_browser_session_persists_only_hh_cookies(tmp_path):
+    backend = JsonCookieBackend(tmp_path / "cookies.json")
+    session = HHBrowserSession(cookie_backend=backend)
+
+    session.update_from_playwright_context(
+        [
+            {"name": "_xsrf", "value": "token", "domain": ".hh.ru", "path": "/"},
+            {"name": "x", "value": "bad", "domain": "evil.test", "path": "/"},
+        ]
+    )
+
+    reloaded = HHBrowserSession(cookie_backend=backend)
+    reloaded.load()
+    assert reloaded.xsrf_token == "token"
+    assert [cookie["name"] for cookie in reloaded.cookies] == ["_xsrf"]
+
+
+def test_web_actions_build_xsrf_headers():
+    actions = HHWebActions(user_agent="ua", xsrf_token="xsrf")
+
+    request = actions.response_popup_request(vacancy_id="vac-1", resume_id="res-1", message="Hi")
+
+    assert request.method == "POST"
+    assert request.url.endswith("/applicant/vacancy_response/popup")
+    assert request.headers["X-Xsrftoken"] == "xsrf"
+    assert request.headers["User-Agent"] == "ua"
+    assert request.data["vacancy_id"] == "vac-1"
+
+
+@pytest.mark.parametrize(
+    ("result", "kind"),
+    [
+        ({"status": "error", "error": "captcha_required"}, ChallengeKind.CAPTCHA_REQUIRED),
+        ({"status": "error", "error": "test_required"}, ChallengeKind.TEST_REQUIRED),
+        ({"status": "redirect", "location": "https://hh.ru/applicant/vacancy_response"}, ChallengeKind.MANUAL_FORM_REQUIRED),
+        ({"status": "created"}, ChallengeKind.SOLVED),
+    ],
+)
+def test_challenge_handler_classifies_apply_results(result, kind):
+    outcome = HHChallengeHandler().classify_apply_result(result)
+
+    assert outcome.kind == kind
+    assert outcome.to_dict()["blocked"] is (kind != ChallengeKind.SOLVED)

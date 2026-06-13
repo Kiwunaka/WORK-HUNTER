@@ -1,0 +1,19 @@
+[project]
+name = "work-hunter"
+version = "0.1.0"
+description = "Personal local job-search command center with MCP tools and a local UI."
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.0",
+  "starlette>=0.27,<0.47",
+]
+
+[project.scripts]
+work-hunter = "work_hunter.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["work_hunter*"]
