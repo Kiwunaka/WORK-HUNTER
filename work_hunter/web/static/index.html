@@ -23,10 +23,22 @@
     </div>
     <nav>
       <button class="nav-button active" data-view="inbox"><i data-lucide="inbox"></i>Вакансии</button>
+      <button class="nav-button" data-view="setup"><i data-lucide="list-checks"></i>Setup</button>
+      <button class="nav-button" data-view="onboarding"><i data-lucide="user-check"></i>Onboarding</button>
+      <button class="nav-button" data-view="candidate-map"><i data-lucide="map"></i>Candidate Map</button>
+      <button class="nav-button" data-view="resumes"><i data-lucide="file-text"></i>Resumes</button>
+      <button class="nav-button" data-view="job-detail"><i data-lucide="file-search"></i>Job Detail</button>
       <button class="nav-button" data-view="calendar"><i data-lucide="calendar"></i>Календарь</button>
       <button class="nav-button" data-view="favorites"><i data-lucide="heart"></i>Избранное</button>
       <button class="nav-button" data-view="chat"><i data-lucide="bot"></i>AI Ассистент</button>
       <button class="nav-button" data-view="agent"><i data-lucide="radar"></i>HH Агент</button>
+      <button class="nav-button" data-view="application-preview"><i data-lucide="file-check-2"></i>Application</button>
+      <button class="nav-button" data-view="campaigns"><i data-lucide="send"></i>Campaigns</button>
+      <button class="nav-button" data-view="pipeline"><i data-lucide="route"></i>Pipeline</button>
+      <button class="nav-button" data-view="interview-prep"><i data-lucide="notebook-tabs"></i>Interview Prep</button>
+      <button class="nav-button" data-view="replay"><i data-lucide="history"></i>Replay</button>
+      <button class="nav-button" data-view="audit-security"><i data-lucide="shield-check"></i>Audit</button>
+      <button class="nav-button" data-view="browser-lab"><i data-lucide="monitor-dot"></i>Browser Lab</button>
       <button class="nav-button" data-view="settings"><i data-lucide="settings"></i>Настройки</button>
       <button class="nav-button" data-view="sources"><i data-lucide="database"></i>Источники</button>
       <button class="nav-button" data-view="stats"><i data-lucide="bar-chart-3"></i>Статистика</button>
@@ -55,6 +67,7 @@
         <button id="score-button">Пересчитать score</button>
       </div>
     </header>
+    <div id="ui-error-line" class="ui-error-line" hidden></div>
 
     <section id="view-inbox" class="view active">
       <div class="bulk-toolbar" id="bulk-toolbar" style="display:none;">
@@ -183,6 +196,19 @@
                   <button onclick="prepareLetter()">Шаблон</button>
                   <button onclick="prepareLetterAi()" class="primary">AI письмо</button>
                 </div>
+                <div style="display:flex;gap:8px;margin-top:8px;align-items:end;flex-wrap:wrap;">
+                  <label>Template
+                    <select id="letter-template-select">
+                      <option value="A">A · short</option>
+                      <option value="B">B · technical</option>
+                      <option value="C">C · friendly</option>
+                      <option value="D">D · confident</option>
+                    </select>
+                  </label>
+                  <button id="letter-preview-button" onclick="previewHumanLetter(false)"><i data-lucide="eye"></i>Preview</button>
+                  <button id="letter-use-campaign-button" onclick="previewHumanLetter(true)" class="primary"><i data-lucide="send"></i>Use for campaign</button>
+                </div>
+                <pre id="letter-preview-output" class="agent-json" style="margin-top:8px;"></pre>
               </div>
             </div>
             <div id="ai-panel-notes" class="ai-panel-content">
@@ -194,6 +220,254 @@
             </div>
           </section>
         </div>
+      </div>
+    </section>
+
+    <section id="view-setup" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Setup</h1>
+        <div class="actions">
+          <button id="setup-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
+          <button id="ai-test-button" class="primary"><i data-lucide="zap"></i>AI dry run</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid">
+          <label>AI route <input id="ai-test-route" value="smart"></label>
+          <label>Prompt <input id="ai-test-prompt" value="ping"></label>
+        </div>
+        <div id="ai-readiness-list" class="agent-list"></div>
+        <pre id="setup-summary" class="agent-json"></pre>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>WO/FLOW import</h2>
+          <div class="button-row">
+            <button id="setup-import-wo-preview-button" class="primary" data-label="Preview"><i data-lucide="eye"></i>Preview</button>
+            <button id="setup-import-wo-apply-button" data-label="Apply"><i data-lucide="file-check"></i>Apply</button>
+          </div>
+        </div>
+        <div class="agent-form-grid">
+          <label>Source folder <input id="setup-import-wo-source" placeholder="C:\Users\kiwun\Documents\ai\VPN"></label>
+        </div>
+        <pre id="setup-import-wo-output" class="agent-json"></pre>
+      </div>
+    </section>
+
+    <section id="view-onboarding" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Onboarding</h1>
+        <button id="onboarding-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid">
+          <label>Question <select id="onboarding-question-select"></select></label>
+          <label style="grid-column:1/-1;">Answer <textarea id="onboarding-answer" rows="5"></textarea></label>
+        </div>
+        <button id="onboarding-submit-button" class="primary"><i data-lucide="save"></i>Save answer</button>
+        <div id="onboarding-questions" class="agent-list"></div>
+        <pre id="onboarding-status" class="agent-json"></pre>
+      </div>
+    </section>
+
+    <section id="view-candidate-map" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Candidate Map</h1>
+        <button id="candidate-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
+      </div>
+      <div class="panel">
+        <div id="candidate-facts-list" class="agent-list"></div>
+        <pre id="candidate-map-output" class="agent-json"></pre>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Resume variant</h2>
+          <button id="resume-variant-button" class="primary"><i data-lucide="layers"></i>Build</button>
+        </div>
+        <div class="agent-form-grid">
+          <label>Job ID <input id="resume-variant-job-id" type="number"></label>
+          <label>Resume ID <input id="resume-variant-resume-id" type="number"></label>
+        </div>
+        <pre id="resume-variant-output" class="agent-json"></pre>
+        <div id="resume-variant-diff" class="agent-list"></div>
+      </div>
+    </section>
+
+    <section id="view-application-preview" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Application Preview</h1>
+        <button id="application-preview-button" class="primary"><i data-lucide="eye"></i>Preview</button>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid">
+          <label>Job ID <input id="application-preview-job-id" type="number"></label>
+          <label>Resume variant ID <input id="application-preview-resume-variant-id"></label>
+          <label style="grid-column:1/-1;">Cover letter <textarea id="application-preview-letter" rows="5"></textarea></label>
+          <label style="grid-column:1/-1;">Source payload JSON <textarea id="application-preview-payload" rows="5" spellcheck="false">{}</textarea></label>
+          <label style="grid-column:1/-1;">External form JSON <textarea id="external-apply-form-json" rows="5" spellcheck="false">{"form_url":"","fields":[]}</textarea></label>
+        </div>
+        <div class="button-row" style="justify-content:flex-start;margin-bottom:8px;">
+          <label class="inline-check"><input id="external-apply-submit-certified" type="checkbox"> Submit through certified adapter</label>
+          <button id="external-apply-dry-run-button"><i data-lucide="scan-line"></i>Dry run external</button>
+          <button id="external-apply-confirm-button"><i data-lucide="clipboard-check"></i>Confirm external</button>
+        </div>
+        <pre id="application-preview-output" class="agent-json"></pre>
+      </div>
+    </section>
+
+    <section id="view-campaigns" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Campaigns</h1>
+        <button id="campaign-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Plan HH campaign</h2>
+          <div class="button-row">
+            <span id="campaign-pause-state" class="agent-badge">unknown</span>
+            <button id="campaign-plan-button" class="primary"><i data-lucide="play"></i>Plan</button>
+            <button id="external-campaign-plan-button"><i data-lucide="radio"></i>Plan external</button>
+            <button id="external-campaign-run-button"><i data-lucide="send-horizontal"></i>Confirm external</button>
+            <button id="campaign-confirm-run-button"><i data-lucide="send"></i>Confirm run</button>
+            <button id="campaign-kill-switch-button" data-label="Kill switch"><i data-lucide="octagon-alert"></i>Kill switch</button>
+            <button id="campaign-resume-button" data-label="Resume"><i data-lucide="rotate-ccw"></i>Resume</button>
+          </div>
+        </div>
+        <div class="agent-form-grid three">
+          <label>Limit <input id="campaign-limit" type="number" value="50"></label>
+          <label>Min score <input id="campaign-min-score" type="number" value="70"></label>
+          <label>Daily cap <input id="campaign-daily-cap" type="number" value="10"></label>
+          <label>AI filter <select id="campaign-ai-filter"><option value="off">off</option><option value="light">light</option><option value="heavy">heavy</option></select></label>
+          <label>External source <select id="external-campaign-source"><option value="geekjob">GeekJob</option><option value="habr">Habr</option><option value="getmatch">Getmatch</option><option value="hirehi">hirehi</option><option value="careerspace">careerspace</option><option value="jabka">jabka.work</option></select></label>
+        </div>
+        <pre id="campaign-plan-output" class="agent-json"></pre>
+      </div>
+      <div class="panel">
+        <h2>Runs</h2>
+        <div id="campaign-runs-list" class="agent-list"></div>
+      </div>
+    </section>
+
+    <section id="view-pipeline" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Pipeline</h1>
+        <div class="actions">
+          <button id="pipeline-refresh-button" class="primary"><i data-lucide="refresh-cw"></i>Refresh</button>
+          <button id="pipeline-prep-pack-button"><i data-lucide="notebook-tabs"></i>Prep pack</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid three">
+          <label>Job ID <input id="pipeline-job-id" type="number"></label>
+          <label>Stage
+            <select id="pipeline-stage-select">
+              <option value="hr">HR</option>
+              <option value="tech" selected>Tech</option>
+              <option value="final">Final</option>
+              <option value="offer">Offer</option>
+            </select>
+          </label>
+          <label>Event at <input id="pipeline-event-at" type="datetime-local"></label>
+        </div>
+        <div class="button-row" style="justify-content:flex-start;margin-bottom:8px;">
+          <button id="pipeline-schedule-followup-button"><i data-lucide="calendar-plus"></i>Schedule follow-up</button>
+        </div>
+        <pre id="pipeline-status-output" class="agent-json"></pre>
+      </div>
+      <div class="panel">
+        <h2>Interview prep</h2>
+        <pre id="pipeline-prep-output" class="agent-json"></pre>
+      </div>
+    </section>
+
+    <section id="view-interview-prep" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Interview Prep</h1>
+        <button id="interview-prep-pack-button" class="primary"><i data-lucide="notebook-tabs"></i>Build prep pack</button>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid">
+          <label>Job ID <input id="interview-prep-job-id" type="number"></label>
+          <label>Stage
+            <select id="interview-prep-stage-select">
+              <option value="hr">HR</option>
+              <option value="tech" selected>Tech</option>
+              <option value="final">Final</option>
+              <option value="offer">Offer</option>
+            </select>
+          </label>
+        </div>
+        <pre id="interview-prep-output" class="agent-json"></pre>
+      </div>
+    </section>
+
+    <section id="view-replay" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Replay</h1>
+        <button id="replay-refresh-button" class="primary"><i data-lucide="history"></i>Load</button>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid">
+          <label>Job ID <input id="replay-job-id" type="number"></label>
+          <label>Run ID <input id="replay-run-id" type="number"></label>
+          <label>Source <input id="replay-source-filter" placeholder="hh"></label>
+          <label>Event type <input id="replay-event-type-filter" placeholder="application_pack_built"></label>
+        </div>
+        <button id="replay-export-button"><i data-lucide="download"></i>Export markdown</button>
+        <div id="replay-timeline-list" class="agent-list"></div>
+      </div>
+    </section>
+
+    <section id="view-audit-security" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Audit</h1>
+        <button id="audit-security-refresh-button" class="primary"><i data-lucide="shield-check"></i>Refresh</button>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Redaction scan</h2>
+          <button id="audit-security-redaction-button" class="primary" data-label="Scan"><i data-lucide="scan-line"></i>Scan</button>
+        </div>
+        <textarea id="audit-security-redaction-text" rows="5" spellcheck="false">Authorization: Bearer token
+client_secret=secret</textarea>
+        <pre id="audit-security-redaction-output" class="agent-json"></pre>
+      </div>
+      <div class="panel">
+        <pre id="audit-security-output" class="agent-json"></pre>
+      </div>
+    </section>
+
+    <section id="view-browser-lab" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Browser Lab</h1>
+        <div class="actions">
+          <button id="browser-lab-status-button"><i data-lucide="activity"></i>Status</button>
+          <button id="browser-lab-open-login-button" class="primary"><i data-lucide="log-in"></i>Open login plan</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid">
+          <label>Source <input id="browser-lab-source" value="getmatch"></label>
+          <label>HAR path <input id="browser-lab-har-path" placeholder="C:\path\session.har"></label>
+          <label>Allowed hosts <input id="browser-lab-hosts" placeholder="getmatch.ru"></label>
+        </div>
+        <label class="inline-check"><input id="browser-lab-configure-external-apply" type="checkbox"> Configure external apply target from HAR</label>
+        <button id="browser-lab-import-har-button"><i data-lucide="file-input"></i>Import HAR</button>
+        <pre id="browser-lab-output" class="agent-json"></pre>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Form dry-run</h2>
+          <div class="button-row">
+            <button id="browser-lab-map-form-button"><i data-lucide="map"></i>Map form</button>
+            <button id="browser-lab-dry-run-button" class="primary"><i data-lucide="mouse-pointer-click"></i>Dry run</button>
+            <button id="browser-lab-execute-dry-run-button"><i data-lucide="camera"></i>Fill + screenshot</button>
+          </div>
+        </div>
+        <label>Persona JSON</label>
+        <textarea id="browser-lab-persona-json" rows="4" spellcheck="false">{"facts":{"email":"","summary":""}}</textarea>
+        <label>Form JSON</label>
+        <textarea id="browser-lab-form-json" rows="8" spellcheck="false">{"form_url":"","fields":[{"name":"email","label":"Email","required":true}]}</textarea>
       </div>
     </section>
 
@@ -513,6 +787,45 @@
       </div>
     </section>
 
+    <section id="view-resumes" class="view">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Resumes</h2>
+          <button id="add-resume-button" class="primary" onclick="showResumeForm()">+ Resume</button>
+        </div>
+        <div class="agent-form-grid">
+          <label>Import path <input id="resume-import-path" placeholder="C:\path\resume.md"></label>
+          <label><input id="resume-import-activate" type="checkbox"> Activate imported resume</label>
+        </div>
+        <button id="resume-import-button"><i data-lucide="upload"></i>Import</button>
+        <pre id="resume-import-output" class="agent-json"></pre>
+        <div id="resume-form" style="display:none;margin-bottom:10px;">
+          <label>Название <input id="resume-name-input" style="width:100%;" placeholder="Python Backend"></label>
+          <label>Текст резюме <textarea id="resume-body-input" rows="8" style="width:100%;" placeholder="Вставь текст резюме..."></textarea></label>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button id="save-resume-button" class="primary" onclick="saveResume()">Сохранить</button>
+            <button onclick="hideResumeForm()">Отмена</button>
+          </div>
+        </div>
+        <div id="resumes-list" class="source-list"></div>
+      </div>
+    </section>
+
+    <section id="view-job-detail" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Job Detail</h1>
+        <button id="job-detail-load-button" class="primary"><i data-lucide="refresh-cw"></i>Load</button>
+      </div>
+      <div class="panel">
+        <div class="agent-form-grid">
+          <label>Job ID <input id="job-detail-id-input" type="number"></label>
+        </div>
+      </div>
+      <div id="job-detail-output" class="detail empty">
+        <p>Select a job in Inbox or enter a job ID.</p>
+      </div>
+    </section>
+
     <section id="view-settings" class="view">
       <div class="panel">
         <div class="panel-head">
@@ -544,21 +857,6 @@
           </div>
         </div>
         <div class="meta" style="margin-top:8px;" id="profile-active-label"></div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Мои резюме</h2>
-          <button id="add-resume-button" class="primary" onclick="showResumeForm()">+ Резюме</button>
-        </div>
-        <div id="resume-form" style="display:none;margin-bottom:10px;">
-          <label>Название <input id="resume-name-input" style="width:100%;" placeholder="Python Backend"></label>
-          <label>Текст резюме <textarea id="resume-body-input" rows="8" style="width:100%;" placeholder="Вставь текст резюме..."></textarea></label>
-          <div style="display:flex;gap:8px;margin-top:8px;">
-            <button id="save-resume-button" class="primary" onclick="saveResume()">Сохранить</button>
-            <button onclick="hideResumeForm()">Отмена</button>
-          </div>
-        </div>
-        <div id="resumes-list" class="source-list"></div>
       </div>
       <div class="panel">
         <div class="panel-head">
@@ -658,6 +956,176 @@
     <section id="view-sources" class="view">
       <div class="panel">
         <h2>Источники</h2>
+        <div class="source-row">
+          <div class="agent-row-head">
+            <strong>Source actions</strong>
+            <div class="button-row compact">
+              <button id="source-sync-button" class="primary" data-label="Sync">Sync</button>
+              <button id="source-test-button" data-label="Test">Test</button>
+            </div>
+          </div>
+          <div class="source-form-grid">
+            <label>Source
+              <select id="source-action-source">
+                <option value="geekjob">geekjob</option>
+                <option value="habr">habr</option>
+                <option value="getmatch">getmatch</option>
+                <option value="hirehi" selected>hirehi</option>
+                <option value="careerspace">careerspace</option>
+                <option value="jabka">jabka</option>
+              </select>
+            </label>
+            <label>Limit
+              <input type="number" id="source-action-limit" value="0" min="0">
+            </label>
+          </div>
+          <pre id="source-action-output" class="agent-json"></pre>
+        </div>
+        <div id="source-certification-summary" class="meta"></div>
+        <div id="source-certification-matrix" class="source-list"></div>
+        <div class="source-row">
+          <div class="agent-row-head">
+            <strong>Certification plan</strong>
+            <button id="source-certification-plan-button" class="primary">Plan evidence</button>
+          </div>
+          <div class="source-form-grid">
+            <label>Level
+              <select id="source-certification-level">
+                <option value="5" selected>L5</option>
+                <option value="6">L6</option>
+              </select>
+            </label>
+          </div>
+          <pre id="source-certification-plan-output" class="agent-json"></pre>
+        </div>
+        <div class="source-row">
+          <div class="agent-row-head">
+            <strong>External apply target</strong>
+            <button id="source-external-target-button" class="primary">Configure</button>
+          </div>
+          <div class="source-form-grid">
+            <label>Source
+              <select id="source-external-target-source">
+                <option value="geekjob">geekjob</option>
+                <option value="habr">habr</option>
+                <option value="getmatch">getmatch</option>
+                <option value="hirehi" selected>hirehi</option>
+                <option value="careerspace">careerspace</option>
+                <option value="jabka">jabka</option>
+              </select>
+            </label>
+            <label>Session
+              <input id="source-external-target-session" value="hirehi" autocomplete="off">
+            </label>
+            <label>Method
+              <select id="source-external-target-method">
+                <option value="POST">POST</option>
+                <option value="GET">GET</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+              </select>
+            </label>
+            <label class="source-form-wide">URL
+              <input id="source-external-target-url" placeholder="https://example.com/apply" autocomplete="off">
+            </label>
+            <label class="source-form-wide">Payload template JSON
+              <textarea id="source-external-target-payload-template" rows="4" spellcheck="false">{"jobId":"{source_id}"}</textarea>
+            </label>
+          </div>
+          <pre id="source-external-target-output" class="agent-json"></pre>
+        </div>
+        <div class="source-row">
+          <div class="agent-row-head">
+            <strong>External apply from HAR</strong>
+            <button id="source-external-har-button" class="primary">Configure from HAR</button>
+          </div>
+          <div class="source-form-grid">
+            <label>Source
+              <select id="source-external-har-source">
+                <option value="geekjob">geekjob</option>
+                <option value="habr">habr</option>
+                <option value="getmatch" selected>getmatch</option>
+                <option value="hirehi">hirehi</option>
+                <option value="careerspace">careerspace</option>
+                <option value="jabka">jabka</option>
+              </select>
+            </label>
+            <label class="source-form-wide">HAR path
+              <input id="source-external-har-path" placeholder="C:\path\session.har" autocomplete="off">
+            </label>
+            <label class="source-form-wide">Allowed hosts
+              <input id="source-external-har-hosts" placeholder="getmatch.ru" autocomplete="off">
+            </label>
+          </div>
+          <pre id="source-external-har-output" class="agent-json"></pre>
+        </div>
+        <div class="source-row">
+          <div class="agent-row-head">
+            <strong>Redaction scan</strong>
+            <button id="source-redaction-scan-button" class="primary">Scan</button>
+          </div>
+          <div class="source-form-grid">
+            <label>Source
+              <select id="source-redaction-scan-source">
+                <option value="geekjob">geekjob</option>
+                <option value="habr">habr</option>
+                <option value="getmatch">getmatch</option>
+                <option value="hirehi" selected>hirehi</option>
+                <option value="careerspace">careerspace</option>
+                <option value="jabka">jabka</option>
+              </select>
+            </label>
+            <label class="source-form-wide">Payload JSON
+              <textarea id="source-redaction-scan-payload" rows="4" spellcheck="false">{"headers":{"Authorization":"Bearer ..."}}</textarea>
+            </label>
+            <label class="source-form-wide">Text sample
+              <textarea id="source-redaction-scan-text" rows="3" spellcheck="false">client_secret=...</textarea>
+            </label>
+          </div>
+          <pre id="source-redaction-scan-output" class="agent-json"></pre>
+        </div>
+        <div class="source-row">
+          <div class="agent-row-head">
+            <strong>Certification evidence</strong>
+            <button id="source-certification-evidence-button" class="primary">Record</button>
+          </div>
+          <div style="display:grid;grid-template-columns:180px 1fr;gap:8px;margin-top:8px;align-items:start;">
+            <label>Source
+              <select id="source-certification-source">
+                <option value="geekjob">geekjob</option>
+                <option value="habr">habr</option>
+                <option value="getmatch">getmatch</option>
+                <option value="hirehi">hirehi</option>
+                <option value="careerspace">careerspace</option>
+                <option value="jabka">jabka</option>
+              </select>
+            </label>
+            <label>Evidence JSON
+              <textarea id="source-certification-evidence-json" rows="4" spellcheck="false">{"tests":{"status":"passed","command":"pytest hirehi"}}</textarea>
+            </label>
+          </div>
+          <pre id="source-certification-evidence-output" class="agent-json"></pre>
+        </div>
+        <div class="source-row">
+          <div class="agent-row-head">
+            <strong>Certification promotion</strong>
+            <button id="source-certification-promote-button" class="primary">Promote</button>
+          </div>
+          <div class="source-form-grid">
+            <label>Source
+              <select id="source-certification-promote-source">
+                <option value="geekjob">geekjob</option>
+                <option value="habr">habr</option>
+                <option value="getmatch">getmatch</option>
+                <option value="hirehi" selected>hirehi</option>
+                <option value="careerspace">careerspace</option>
+                <option value="jabka">jabka</option>
+              </select>
+            </label>
+          </div>
+          <pre id="source-certification-promote-output" class="agent-json"></pre>
+        </div>
+        <div id="source-readiness-list" class="source-list"></div>
         <div id="sources-list" class="source-list"></div>
       </div>
     </section>

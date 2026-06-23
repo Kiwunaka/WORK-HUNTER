@@ -1,0 +1,396 @@
+{
+  "WH-US-001": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-002": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-003": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-004": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-005": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: pytest plus browser QA loaded 3 seeded inbox jobs with no console/global UI errors.",
+    "Retest Result": "PASS: post-fix browser reload still rendered 3 jobs.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA verified seeded job queue, row count, summary count, and clean console.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-006": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: browser QA remote+salary filters narrowed 3 seeded jobs to 1 expected job.",
+    "Retest Result": "PASS: full suite retest passed; mobile smoke showed no horizontal overflow.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA verified smart filters and mobile no-overflow behavior.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-007": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-008": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-009": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: browser QA selected a job and populated detail, AI panel, and cross-view job ID controls.",
+    "Retest Result": "PASS: browser retest after fix selected a row and preserved bulk checkbox state.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA verified row selection, details, AI panel visibility, and propagated job IDs.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-010": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-011": {
+    "Status": "Passed retest",
+    "Initial Test Result": "FAIL before fix: rendered QA showed checkbox click selected the row, changed the detail panel, and visually cleared the checked box while bulk count still said 1.",
+    "Retest Result": "PASS: regression test, static UI suite, full pytest (452 passed), and browser retest all passed. Browser retest: checkbox did not select row, stayed checked, bulk count remained accurate after row re-render.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Targeted retest used seeded QA root at http://127.0.0.1:8787.",
+    "Last Updated": "2026-06-23",
+    "Error or Issue": "Bulk checkbox click bubbled to the table row click handler in renderJobs(); both renderJobs() and renderFilteredJobs() failed to render checked state from selectedJobIds after re-render.",
+    "Fix Status": "Fixed in work_hunter/web/static/app.js; added regression test in tests/test_static_ui_roadmap.py."
+  },
+  "WH-US-012": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-013": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-014": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-015": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-016": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-017": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-018": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-019": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-020": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-021": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-022": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-023": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-024": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-025": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-026": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-027": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-028": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-029": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-030": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-031": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-032": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-033": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-034": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-035": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-036": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-037": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-038": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-039": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-040": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-041": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-042": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-043": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-044": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-045": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-046": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-047": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-048": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-049": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-050": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-051": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-052": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-053": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-054": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-055": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Real external side effects were not executed; expected safe dry-run, blocked, confirmation-gated, and redaction behavior is covered by automated tests.",
+    "Last Updated": "2026-06-23"
+  },
+  "WH-US-056": {
+    "Status": "Passed automated",
+    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: full pytest retest passed after fix.",
+    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. The ignored pytest cleanup PermissionError is an environment temp-dir cleanup warning after successful test completion, not an app redaction/storage failure.",
+    "Last Updated": "2026-06-23"
+  }
+}

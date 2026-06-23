@@ -64,6 +64,7 @@ def test_safe_task_runner_runs_whitelisted_tasks_and_writes_json_report(tmp_path
                 "skip_tests": True,
                 "ai_filter_mode": "off",
                 "resume_id": None,
+                "daily_cap": None,
             },
         ),
     ]

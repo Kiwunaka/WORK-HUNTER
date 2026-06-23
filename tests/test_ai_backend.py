@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from work_hunter.config import default_config
 from work_hunter.letters import chat_completion, draft_cover_letter_ai
 from work_hunter.models import Job
 
@@ -136,3 +137,20 @@ def test_ai_cover_letter_uses_opencode_without_direct_api_key(monkeypatch):
 
     assert result == "opencode letter"
     assert calls[0]["ai_config"]["backend"] == "opencode"
+
+
+def test_ai_runtime_registry_package_matches_legacy_backend():
+    from work_hunter import ai_backends
+    from work_hunter.ai import AIRuntimeRegistry, build_ai_request, runtime_routes
+
+    cfg = default_config()["ai"]
+    registry = AIRuntimeRegistry(cfg)
+
+    assert registry.routes()["smart"]["adapter"] == "codex_cli"
+    assert registry.status() == ai_backends.ai_status(cfg)
+    assert runtime_routes(cfg)["openrouter"]["adapter"] == "openrouter"
+
+    dry_run = registry.test(route="smart", prompt="ping", dry_run=True)
+    assert dry_run["status"] == "dry_run"
+    assert dry_run["request"] == build_ai_request(cfg["routes"]["smart"], prompt="ping")
+    assert dry_run["request"]["auth"] == "external_runtime"

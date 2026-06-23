@@ -119,7 +119,7 @@ def test_call_external_session_real_uses_stored_headers_without_printing_them(tm
     assert result["response"]["json_preview"] == {"ok": True}
 
 
-def test_call_external_session_blocks_real_mutating_requests_without_unsafe_lab(tmp_path):
+def test_call_external_session_blocks_apply_like_mutating_requests_even_with_unsafe_lab(tmp_path):
     har_path = tmp_path / "session.har"
     har_path.write_text(json.dumps(_har()), encoding="utf-8")
     import_external_session_from_har(tmp_path, "hirehi", har_path, allowed_hosts={"hirehi.ru"})
@@ -138,7 +138,7 @@ def test_call_external_session_blocks_real_mutating_requests_without_unsafe_lab(
         real=True,
         requester=fake_requester,
     )
-    allowed = call_external_session(
+    blocked_unsafe = call_external_session(
         tmp_path,
         "hirehi",
         "POST",
@@ -151,8 +151,38 @@ def test_call_external_session_blocks_real_mutating_requests_without_unsafe_lab(
 
     assert blocked["status"] == "blocked"
     assert blocked["reason"] == "mutating_real_call_requires_unsafe_lab"
-    assert allowed["status"] == "ok"
-    assert calls == ["https://hirehi.ru/api/applications"]
+    assert blocked_unsafe["status"] == "blocked"
+    assert blocked_unsafe["reason"] == "external_apply_submit_blocked"
+    assert calls == []
+
+
+def test_call_external_session_allows_apply_like_request_only_when_certified(tmp_path):
+    har_path = tmp_path / "session.har"
+    har_path.write_text(json.dumps(_har()), encoding="utf-8")
+    import_external_session_from_har(tmp_path, "hirehi", har_path, allowed_hosts={"hirehi.ru"})
+    calls: list[dict[str, object]] = []
+
+    def fake_requester(method: str, url: str, *, headers: dict[str, str], data: str | None, timeout: int):
+        calls.append({"method": method, "url": url, "headers": headers, "data": data})
+        return ExternalHTTPResponse(status=201, headers={"content-type": "application/json"}, body='{"id":"app-1"}')
+
+    result = call_external_session(
+        tmp_path,
+        "hirehi",
+        "POST",
+        "https://hirehi.ru/api/applications",
+        data='{"jobId":"1","cover_letter":"Hi"}',
+        real=True,
+        unsafe_lab=True,
+        certified_apply=True,
+        requester=fake_requester,
+    )
+
+    assert result["status"] == "ok"
+    assert result["response"]["status"] == 201
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["headers"]["Cookie"] == "sessionid=very-secret-cookie"
+    assert result["request"]["headers"]["Cookie"] == "***"
 
 
 def test_call_external_session_redacts_real_response_and_dry_run_payload(tmp_path):

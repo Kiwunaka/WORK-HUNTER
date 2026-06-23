@@ -4,10 +4,146 @@ import json
 import logging
 from typing import Any
 
-from .ai_backends import chat_completion
+from .ai import backend_requires_api_key, chat_completion
 from .models import Job
 
 logger = logging.getLogger(__name__)
+
+
+HUMAN_COVER_LETTER_TEMPLATES: dict[str, dict[str, str]] = {
+    "A": {"name": "short", "label": "Template A: short"},
+    "B": {"name": "technical", "label": "Template B: technical"},
+    "C": {"name": "friendly", "label": "Template C: friendly"},
+    "D": {"name": "confident", "label": "Template D: confident"},
+}
+
+
+def human_cover_letter_variants(
+    job: Job,
+    profile: dict[str, Any],
+    *,
+    selected_template: str = "A",
+    use_for_campaign: bool = False,
+) -> dict[str, Any]:
+    """Build deterministic human-style cover letter variants."""
+    selected = selected_template if selected_template in HUMAN_COVER_LETTER_TEMPLATES else "A"
+    variants = [
+        {
+            "template": template,
+            "name": meta["name"],
+            "label": meta["label"],
+            "body": _human_cover_letter_body(job, profile, template),
+            "style_rules": [
+                "short",
+                "specific",
+                "2-4 paragraphs",
+                "1-2 concrete matches",
+                "confident CTA",
+            ],
+        }
+        for template, meta in HUMAN_COVER_LETTER_TEMPLATES.items()
+    ]
+    campaign_letter = next(variant for variant in variants if variant["template"] == selected)
+    return {
+        "status": "ready",
+        "job_id": job.id,
+        "source": job.source,
+        "selected_template": selected,
+        "use_for_campaign": bool(use_for_campaign),
+        "variants": variants,
+        "campaign_letter": campaign_letter,
+        "forbidden_phrases": [
+            "Я являюсь",
+            "имею богатый опыт",
+            "позвольте представиться",
+        ],
+    }
+
+
+def _human_cover_letter_body(job: Job, profile: dict[str, Any], template: str) -> str:
+    title = job.title or "роль"
+    company = job.company or "команда"
+    skills = _letter_matches(job, profile)
+    primary = skills[0] if skills else "практическими задачами"
+    secondary = ", ".join(skills[1:3]) if len(skills) > 1 else primary
+    recent = _recent_work(profile, primary=primary, secondary=secondary)
+    cta = f"Готов обсудить, чем могу быть полезен {company}. Резюме приложил."
+
+    if template == "B":
+        paragraphs = [
+            f"Привет! Заинтересовала роль {title}: здесь важны {primary} и {secondary}, это близко к моему текущему стеку.",
+            f"Пример из опыта: {recent}. По описанию вижу совпадение с задачами по {secondary}.",
+            cta,
+        ]
+    elif template == "C":
+        paragraphs = [
+            f"Привет! Роль {title} в {company} выглядит хорошим совпадением по {primary} и {secondary}.",
+            f"Мне комфортен формат, где нужно спокойно разбираться в продукте, писать понятный код и договариваться с командой. Из практики: {recent}.",
+            "Буду рад коротко созвониться и понять, где мой опыт может быть полезен.",
+        ]
+    elif template == "D":
+        paragraphs = [
+            f"Привет! Хочу откликнуться на {title}: у меня есть практический опыт с {primary} и {secondary}.",
+            f"Могу быстро включиться в backend-задачи, где важны надежные API, аккуратная работа с данными и понятная коммуникация. Пример из опыта: {recent}.",
+            cta,
+        ]
+    else:
+        paragraphs = [
+            f"Привет! Заинтересовала роль {title}, потому что у меня есть практический опыт с {primary} и {secondary}.",
+            f"Пример из опыта: {recent}. По описанию вижу совпадение с 1-2 ключевыми задачами роли.",
+            cta,
+        ]
+    return "\n\n".join(_trim_sentence(paragraph) for paragraph in paragraphs if paragraph.strip())
+
+
+def _letter_matches(job: Job, profile: dict[str, Any]) -> list[str]:
+    skills = [
+        str(skill).strip()
+        for skill in (profile.get("must_have_skills") or []) + (profile.get("nice_to_have_skills") or [])
+        if str(skill).strip()
+    ]
+    text = f"{job.title} {job.description}".lower()
+    matched = [skill for skill in skills if skill.lower() in text]
+    if not matched:
+        matched = skills[:3]
+    seen: set[str] = set()
+    result: list[str] = []
+    for skill in matched:
+        key = skill.lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(skill)
+    return result[:3]
+
+
+def _recent_work(profile: dict[str, Any], *, primary: str, secondary: str) -> str:
+    summary = str(profile.get("summary") or "").strip().rstrip(".")
+    if summary and _safe_summary_for_letter(summary):
+        first_sentence = summary.split(".")[0].strip()
+        if first_sentence:
+            return _trim_sentence(first_sentence).removeprefix("I ").removeprefix("Я ")
+    return f"делал backend-функции на {primary}, связывал их с {secondary} и доводил изменения до понятного результата"
+
+
+def _trim_sentence(text: str) -> str:
+    cleaned = " ".join(str(text).split())
+    return cleaned.rstrip(".") + "."
+
+
+def _safe_summary_for_letter(summary: str) -> bool:
+    lowered = summary.lower()
+    blocked = [
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "authorization:",
+        "cookie:",
+        "invented ",
+        "fake ",
+        "unsupported",
+        "unconfirmed",
+    ]
+    return not any(marker in lowered for marker in blocked)
 
 
 def draft_cover_letter(job: Job, profile: dict[str, Any]) -> str:
@@ -40,8 +176,7 @@ def draft_cover_letter_ai(
     base_url = ai_config.get("base_url", "")
     model = ai_config.get("model", "")
 
-    backend = str(ai_config.get("backend") or "direct").lower()
-    if backend != "opencode" and (not api_key or not base_url or not model):
+    if backend_requires_api_key(ai_config) and (not api_key or not base_url or not model):
         logger.warning("AI config incomplete, falling back to template")
         return draft_cover_letter(job, profile)
 

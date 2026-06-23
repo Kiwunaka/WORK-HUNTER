@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-from ..ai_backends import chat_completion
+from ..ai import chat_completion
 
 
 class StructuredLLMError(RuntimeError):

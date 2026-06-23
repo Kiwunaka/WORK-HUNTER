@@ -394,6 +394,9 @@ class Resume:
     profile_id: str = "default"
     is_active: bool = False
     ats_score: int | None = None
+    source_format: str = ""
+    imported_from: str = ""
+    canonical: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
 

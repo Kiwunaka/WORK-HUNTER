@@ -12,6 +12,9 @@ Work Hunter helps with the full job-search loop:
 - score jobs against a local profile;
 - draft cover letters, resume tips, ATS summaries, interview prep, and fit analysis;
 - operate HH flows: auth status, resumes, negotiations, campaigns, API lab, apply plans, approvals, events, templates, and blacklist;
+- plan guarded campaigns with daily caps, kill switch checks, replay events, and manual confirmation before real HH apply;
+- prepare external-source application handoffs through Browser Lab dry-run and manual-submit gates;
+- continue after apply with pipeline status, follow-up suggestions, calendar hooks, and interview prep packs;
 - expose a local web cockpit and MCP tools for agent-driven workflows;
 - research personal API/session adapters from HAR files without printing secrets.
 
@@ -59,12 +62,13 @@ Use Python 3.11+.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .
+pip install -e ".[dev,browser]"
+python -m playwright install chromium
 python -m work_hunter init
 python -m work_hunter config --json
 ```
 
-Current dependency note: `pyproject.toml` is still minimal. If a clean environment fails on imports such as `requests`, install the missing runtime dependency and add it to `pyproject.toml` in the same change.
+Use `pip install -e .` only for the minimal CLI/API surface without browser automation or test tools.
 
 ## Common Commands
 
@@ -106,6 +110,33 @@ Inspect source capabilities:
 python -m work_hunter source-capabilities
 ```
 
+Inspect external apply certification gates:
+
+```powershell
+python -m work_hunter source certification-matrix --level 5
+python -m work_hunter source certification-audit hirehi --level 5
+python -m work_hunter source external-apply-target hirehi --session hirehi --url https://hirehi.example/apply --method POST --payload-template '{"jobId":"{source_id}"}'
+python -m work_hunter source external-apply-from-har getmatch .\session.har --host getmatch.ru
+python -m work_hunter source certification-evidence hirehi --level 5 --evidence '{"tests":{"status":"passed","command":"pytest hirehi"}}'
+python -m work_hunter source redaction-scan hirehi --payload '{"headers":{"Authorization":"Bearer ..."}}' --text 'client_secret=...'
+```
+
+Promote a source only after its evidence package is complete:
+
+```powershell
+python -m work_hunter source certify hirehi --level 5 --evidence '{"tests":{"status":"passed","command":"pytest hirehi"}}'
+```
+
+Promotion stays blocked until the source has session, URL, tests, replay, redaction, and dry-run evidence. The same matrix is available in the Sources UI, `POST /api/sources/certification-matrix`, and the MCP `source_certification_matrix` tool. Incremental target configuration is available through `POST /api/sources/{source}/external-apply-target` and the MCP `source_external_apply_target` tool; HAR-to-target configuration is available through `POST /api/sources/{source}/external-apply-from-har` and the MCP `source_external_apply_from_har` tool, or directly from Browser Lab import with `configure_external_apply`; evidence recording is available through `POST /api/sources/{source}/certification-evidence` and the MCP `source_certification_evidence` tool; source-specific redaction scans are available through `POST /api/sources/{source}/redaction-scan` and the MCP `source_redaction_scan` tool; final gated promotion is available through `POST /api/sources/{source}/certify` and the MCP `source_certify` tool.
+
+GeekJob, Habr, and generic public-board external pages can detect known application forms for Browser Lab preview and dry-run fallback. Detection never promotes maturity by itself: tests, replay, redaction, dry-run evidence, session, target URL, and certification still gate real apply. Certification audit evidence now carries dry-run host and form signature context when a replay event includes it.
+
+Inspect a post-apply pipeline item from the local API:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8787/api/pipeline/jobs/1
+```
+
 ## HH Agent Safety
 
 Real job actions must be treated as sensitive.
@@ -113,6 +144,7 @@ Real job actions must be treated as sensitive.
 - Prefer dry-run, plan, and approval flows first.
 - Real HH apply/reply/cleanup requires explicit user intent and an auditable path.
 - MCP must not silently send real applications.
+- Non-HH real apply requires per-source certification evidence before the source can reach real-submit maturity.
 - Never print access tokens, refresh tokens, cookies, client secrets, Telegram bot tokens, SMTP passwords, or full auth headers.
 - Unknown forms, tests, captcha/challenge states, duplicate companies, blacklist hits, and suspicious failures should block or escalate.
 
@@ -157,6 +189,7 @@ pytest tests/test_config.py tests/test_ai_backend.py -q
 pytest tests/test_sources.py tests/test_public_boards.py -q
 pytest tests/test_hh_auth.py tests/test_hh_transport.py -q
 pytest tests/test_external_sessions.py tests/test_api_recon.py -q
+pytest tests/test_source_adapter_registry.py tests/test_cli_design_surface.py tests/test_mcp_surface.py -q
 ```
 
 For behavior changes, write or update focused tests first. The project already has good coverage around secret masking, HH safety, agent storage, API lab, scheduler reports, and external session redaction.
@@ -175,9 +208,9 @@ Start with these files before making large changes:
 Known important gaps to verify before building on top:
 
 - some MCP HH agent paths are still plan/dry-run oriented and should be checked against tests before claiming true end-to-end automation;
-- `init` is currently basic and should evolve into a richer doctor/bootstrap command;
-- AI backend support exists for direct OpenAI-compatible HTTP and OpenCode, but provider routing needs a clearer registry before adding Codex/OpenCode subscription runtime support;
-- UI source status currently needs richer capability/status aggregation.
+- external non-HH apply is intentionally held at dry-run/manual-submit handoff unless a source adapter is certified with tests, replay, redaction, and dry-run evidence;
+- `init` is richer now, but new WO/FLOW imports should still be previewed with redaction before applying;
+- AI readiness, source readiness, and source certification state are visible in the UI, but live provider checks still depend on local runtime configuration.
 
 ## Git Workflow
 

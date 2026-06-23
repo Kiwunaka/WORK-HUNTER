@@ -8,6 +8,7 @@ const state = {
   autoSyncInterval: null,
   autoSyncMinutes: 0,
   darkTheme: false,
+  selectedCampaignRunId: null,
   agent: {
     preflight: null,
     digest: null,
@@ -24,6 +25,13 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 
+function setUiError(message = "") {
+  const box = $("#ui-error-line");
+  if (!box) return;
+  box.textContent = message;
+  box.hidden = !message;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -31,9 +39,19 @@ async function api(path, options = {}) {
   });
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data.error || response.statusText);
+    const message = data.error || response.statusText;
+    setUiError(message);
+    throw new Error(message);
   }
   return data;
+}
+
+function renderActionError(output, err) {
+  const message = err?.message || String(err || "Action failed");
+  if (output) {
+    output.textContent = JSON.stringify({ ok: false, error: message }, null, 2);
+  }
+  setUiError(message);
 }
 
 async function loadJobs() {
@@ -41,7 +59,7 @@ async function loadJobs() {
   const minScore = $("#min-score-filter").value || "0";
   const params = new URLSearchParams({ limit: "200", min_score: minScore });
   if (source) params.set("source", source);
-  state.jobs = await api(`/api/jobs?${params.toString()}`);
+  state.jobs = await api(`/api/inbox?${params.toString()}`);
   renderJobs();
   updateSummary();
 }
@@ -56,7 +74,7 @@ function renderJobs() {
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="toggleJobSelect(${job.id}, this.checked)"></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" ${selectedJobIds.has(job.id) ? "checked" : ""} onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)"></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
@@ -75,20 +93,38 @@ async function selectJob(id) {
   renderJobs();
   const job = await api(`/api/jobs/${id}`);
   renderDetail(job);
+  fillSelectedJobControls(id);
   updateChatContext();
   loadJobNote();
   try { $("#ai-panels").style.display = "block"; } catch (e) { /* ignore */ }
 }
 
-function renderDetail(job) {
+function fillSelectedJobControls(id) {
+  if (!id) return;
+  const ids = [
+    "resume-variant-job-id",
+    "job-detail-id-input",
+    "application-preview-job-id",
+    "replay-job-id",
+    "pipeline-job-id",
+    "interview-prep-job-id",
+  ];
+  for (const controlId of ids) {
+    const control = $(`#${controlId}`);
+    if (control && !control.value) control.value = String(id);
+  }
+}
+
+function renderJobDetailHtml(job, options = {}) {
+  const includeActions = options.includeActions !== false;
+  const includeLetter = options.includeLetter !== false;
+  const actionOutputId = options.actionOutputId || "action-output";
+  const letterBoxId = options.letterBoxId || "letter-box";
   const score = job.score;
   const reasons = score?.reasons || [];
   const flags = score?.red_flags || [];
   const letter = job.latest_letter?.body || "";
-  $("#job-detail").className = "detail";
-  $("#job-detail").innerHTML = `
-    <h2>${escapeHtml(job.title)}</h2>
-    <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(job.url)}" target="_blank" rel="noreferrer">открыть</a></p>
+  const actions = includeActions ? `
     <div class="detail-actions">
       <button onclick="markSelected('saved')">Сохранить</button>
       <button onclick="markSelected('hidden')">Скрыть</button>
@@ -103,6 +139,16 @@ function renderDetail(job) {
       <button onclick="parseJobStructure()">Структура</button>
       <button onclick="runGapAnalysis()">Gap-анализ</button>
     </div>
+  ` : "";
+  const letterEditor = includeLetter ? `
+    <div class="section-title">Письмо</div>
+    <textarea id="${escapeAttr(letterBoxId)}" class="letter" spellcheck="true">${escapeHtml(letter)}</textarea>
+    <div id="${escapeAttr(actionOutputId)}" class="meta"></div>
+  ` : "";
+  return `
+    <h2>${escapeHtml(job.title)}</h2>
+    <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(job.url)}" target="_blank" rel="noreferrer">открыть</a></p>
+    ${actions}
     <div class="section-title">Score</div>
     <div class="chips">
       <span class="chip">total ${escapeHtml(String(score?.total_score ?? "-"))}</span>
@@ -117,10 +163,32 @@ function renderDetail(job) {
     <div class="chips">${flags.map((item) => `<span class="chip red">${escapeHtml(item)}</span>`).join("") || `<span class="chip">Нет</span>`}</div>
     <div class="section-title">Описание</div>
     <p>${escapeHtml(job.description || "Описание не загружено.")}</p>
-    <div class="section-title">Письмо</div>
-    <textarea id="letter-box" class="letter" spellcheck="true">${escapeHtml(letter)}</textarea>
-    <div id="action-output" class="meta"></div>
+    ${letterEditor}
   `;
+}
+
+function renderDetail(job) {
+  $("#job-detail").className = "detail";
+  $("#job-detail").innerHTML = renderJobDetailHtml(job);
+}
+
+async function loadJobDetailView() {
+  const input = $("#job-detail-id-input");
+  const output = $("#job-detail-output");
+  const jobId = Number(input?.value || state.selectedId || 0);
+  if (!output) return;
+  if (!jobId) {
+    output.className = "detail empty";
+    output.innerHTML = "<p>Select a job in Inbox or enter a job ID.</p>";
+    return;
+  }
+  const job = await api(`/api/jobs/${jobId}`);
+  state.selectedId = jobId;
+  if (input) input.value = String(jobId);
+  fillSelectedJobControls(jobId);
+  renderJobs();
+  output.className = "detail";
+  output.innerHTML = renderJobDetailHtml(job, { includeActions: false, includeLetter: false });
 }
 
 async function syncJobs() {
@@ -178,6 +246,26 @@ async function prepareLetterAi() {
     $("#action-output").textContent = `Ошибка AI: ${err.message}. Проверь API-ключ в настройках.`;
   } finally {
     setBusy("[onclick='prepareLetterAi()']", false);
+  }
+}
+
+async function previewHumanLetter(useForCampaign = false) {
+  if (!state.selectedId) return;
+  const selector = useForCampaign ? "#letter-use-campaign-button" : "#letter-preview-button";
+  const template = $("#letter-template-select")?.value || "A";
+  setBusy(selector, true);
+  try {
+    const preview = await api(`/api/jobs/${state.selectedId}/letter-preview`, {
+      method: "POST",
+      body: JSON.stringify({ template, use_for_campaign: useForCampaign }),
+    });
+    const selected = preview.campaign_letter || preview.variants?.find((item) => item.template === preview.selected_template);
+    if (selected?.body) $("#letter-box").value = selected.body;
+    $("#letter-preview-output").textContent = JSON.stringify(preview, null, 2);
+  } catch (err) {
+    $("#letter-preview-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy(selector, false);
   }
 }
 
@@ -360,7 +448,14 @@ async function saveAiSettings() {
 }
 
 async function loadSources() {
-  const sources = await api("/api/sources");
+  const certificationLevel = sourceCertificationLevel();
+  const [sources, readiness, certification] = await Promise.all([
+    api("/api/sources"),
+    api("/api/source-status"),
+    api("/api/sources/certification-matrix", { method: "POST", body: JSON.stringify({ level: certificationLevel }) }),
+  ]);
+  renderSourceReadiness(readiness);
+  renderSourceCertificationMatrix(certification);
   const box = $("#sources-list");
   box.innerHTML = "";
   if (!sources.length) {
@@ -374,6 +469,220 @@ async function loadSources() {
       <strong>${escapeHtml(source.source)}</strong>
       <div class="meta">last sync: ${escapeHtml(source.last_sync_at || "-")}</div>
       ${source.last_error ? `<div class="error">${escapeHtml(source.last_error)}</div>` : `<div class="meta">ошибок нет</div>`}
+    `;
+    box.appendChild(row);
+  }
+}
+
+function selectedSourceActionName() {
+  return $("#source-action-source")?.value || "hirehi";
+}
+
+async function syncSelectedSource() {
+  const source = selectedSourceActionName();
+  const output = $("#source-action-output");
+  const limit = Number.parseInt($("#source-action-limit")?.value || "0", 10) || 0;
+  try {
+    setBusy("#source-sync-button", true);
+    const result = await api(`/api/sources/${encodeURIComponent(source)}/sync`, {
+      method: "POST",
+      body: JSON.stringify({ limit }),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+    await loadSources();
+  } catch (err) {
+    renderActionError(output, err);
+  } finally {
+    setBusy("#source-sync-button", false);
+  }
+}
+
+async function testSelectedSource() {
+  const source = selectedSourceActionName();
+  const output = $("#source-action-output");
+  try {
+    setBusy("#source-test-button", true);
+    const result = await api(`/api/sources/${encodeURIComponent(source)}/test`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+  } catch (err) {
+    renderActionError(output, err);
+  } finally {
+    setBusy("#source-test-button", false);
+  }
+}
+
+function sourceCertificationLevel() {
+  const value = Number($("#source-certification-level")?.value || 5);
+  return value === 6 ? 6 : 5;
+}
+
+function renderSourceCertificationMatrix(matrix) {
+  const summary = $("#source-certification-summary");
+  const box = $("#source-certification-matrix");
+  if (!summary || !box) return;
+  const counts = matrix?.summary || {};
+  summary.textContent = `Certification L${matrix?.requested_level || 5}: ${counts.ready || 0}/${counts.total || 0} ready, ${counts.blocked || 0} blocked`;
+  box.innerHTML = "";
+  for (const [name, audit] of Object.entries(matrix?.sources || {})) {
+    const missing = matrix?.missing_by_source?.[name] || audit.missing || [];
+    const hasPromotion = Boolean(matrix?.promotion_payloads?.[name] || audit.promotion_payload);
+    const row = document.createElement("div");
+    row.className = "source-row";
+    row.innerHTML = `
+      <div class="agent-row-head">
+        <strong>${escapeHtml(name)}</strong>
+        <span class="agent-badge ${audit.ready ? "ready" : "blocked"}">${audit.ready ? "ready" : "blocked"}</span>
+      </div>
+      <div class="meta">requested L${escapeHtml(String(audit.requested_level || matrix?.requested_level || 5))}${hasPromotion ? " - promotion payload ready" : ""}</div>
+      ${missing.length ? `<div class="error">${escapeHtml(missing.join(", "))}</div>` : `<div class="meta">evidence package complete</div>`}
+    `;
+    box.appendChild(row);
+  }
+}
+
+async function loadSourceCertificationPlan() {
+  const output = $("#source-certification-plan-output");
+  try {
+    const result = await api("/api/sources/certification-plan", {
+      method: "POST",
+      body: JSON.stringify({ level: sourceCertificationLevel() }),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+  } catch (err) {
+    renderActionError(output, err);
+  }
+}
+
+async function recordSourceCertificationEvidence() {
+  const source = $("#source-certification-source")?.value || "hirehi";
+  const input = $("#source-certification-evidence-json");
+  const output = $("#source-certification-evidence-output");
+  let evidence = {};
+  try {
+    evidence = JSON.parse(input?.value || "{}");
+  } catch (err) {
+    const message = `Invalid evidence JSON: ${err.message || err}`;
+    if (output) output.textContent = message;
+    setUiError(message);
+    return;
+  }
+  const result = await api(`/api/sources/${encodeURIComponent(source)}/certification-evidence`, {
+    method: "POST",
+    body: JSON.stringify({ level: sourceCertificationLevel(), evidence }),
+  });
+  if (output) output.textContent = JSON.stringify(result, null, 2);
+  await loadSources();
+}
+
+async function promoteSourceCertification() {
+  const source = $("#source-certification-promote-source")?.value || "hirehi";
+  const output = $("#source-certification-promote-output");
+  try {
+    const result = await api(`/api/sources/${encodeURIComponent(source)}/certify`, {
+      method: "POST",
+      body: JSON.stringify({ level: sourceCertificationLevel() }),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+    await loadSources();
+  } catch (err) {
+    renderActionError(output, err);
+  }
+}
+
+async function recordSourceRedactionScan() {
+  const source = $("#source-redaction-scan-source")?.value || "hirehi";
+  const input = $("#source-redaction-scan-payload");
+  const output = $("#source-redaction-scan-output");
+  let payload = {};
+  try {
+    payload = JSON.parse(input?.value || "{}");
+  } catch (err) {
+    const message = `Invalid redaction payload JSON: ${err.message || err}`;
+    if (output) output.textContent = message;
+    setUiError(message);
+    return;
+  }
+  const result = await api(`/api/sources/${encodeURIComponent(source)}/redaction-scan`, {
+    method: "POST",
+    body: JSON.stringify({
+      level: sourceCertificationLevel(),
+      payload,
+      text: $("#source-redaction-scan-text")?.value || "",
+    }),
+  });
+  if (output) output.textContent = JSON.stringify(result, null, 2);
+  await loadSources();
+}
+
+async function configureSourceExternalApplyTarget() {
+  const source = $("#source-external-target-source")?.value || "hirehi";
+  const output = $("#source-external-target-output");
+  const input = $("#source-external-target-payload-template");
+  let payloadTemplate = {};
+  try {
+    payloadTemplate = JSON.parse(input?.value || "{}");
+  } catch (err) {
+    const message = `Invalid payload template JSON: ${err.message || err}`;
+    if (output) output.textContent = message;
+    setUiError(message);
+    return;
+  }
+  const result = await api(`/api/sources/${encodeURIComponent(source)}/external-apply-target`, {
+    method: "POST",
+    body: JSON.stringify({
+      level: sourceCertificationLevel(),
+      session: $("#source-external-target-session")?.value || "",
+      url: $("#source-external-target-url")?.value || "",
+      method: $("#source-external-target-method")?.value || "POST",
+      payload_template: payloadTemplate,
+    }),
+  });
+  if (output) output.textContent = JSON.stringify(result, null, 2);
+  await loadSources();
+}
+
+async function configureSourceExternalApplyFromHar() {
+  const source = $("#source-external-har-source")?.value || "getmatch";
+  const output = $("#source-external-har-output");
+  const hosts = ($("#source-external-har-hosts")?.value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  try {
+    const result = await api(`/api/sources/${encodeURIComponent(source)}/external-apply-from-har`, {
+      method: "POST",
+      body: JSON.stringify({
+        level: sourceCertificationLevel(),
+        path: $("#source-external-har-path")?.value || "",
+        hosts,
+      }),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+    await loadSources();
+  } catch (err) {
+    renderActionError(output, err);
+  }
+}
+
+function renderSourceReadiness(readiness) {
+  const box = $("#source-readiness-list");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const [name, source] of Object.entries(readiness || {})) {
+    const row = document.createElement("div");
+    row.className = "source-row";
+    const blockers = source.blockers || [];
+    row.innerHTML = `
+      <div class="agent-row-head">
+        <strong>${escapeHtml(name)}</strong>
+        <span class="agent-badge">${escapeHtml(source.readiness_badge || source.level_name || "")}</span>
+      </div>
+      <div class="meta">${escapeHtml(source.adapter_status || "")} · ${escapeHtml(source.adapter_class || "")}</div>
+      <div class="meta">search: ${escapeHtml(source.search || "-")} · detail: ${escapeHtml(source.detail || "-")} · apply: ${escapeHtml(source.apply || "-")}</div>
+      ${blockers.length ? `<div class="error">${escapeHtml(blockers.join(", "))}</div>` : `<div class="meta">ready for configured level</div>`}
     `;
     box.appendChild(row);
   }
@@ -1330,6 +1639,602 @@ async function buildAgentBatchMatrix() {
   $("#agent-batch-matrix-output").textContent = JSON.stringify(result, null, 2);
 }
 
+async function loadSetupStatus() {
+  const [summary, doctor, ai] = await Promise.all([
+    api("/api/init/status"),
+    api("/api/doctor"),
+    api("/api/ai/status"),
+  ]);
+  renderAiReadiness(ai);
+  $("#setup-summary").textContent = JSON.stringify({ summary, doctor, ai }, null, 2);
+}
+
+function renderAiReadiness(ai) {
+  const box = $("#ai-readiness-list");
+  if (!box) return;
+  const routes = Object.entries(ai?.routes || {});
+  if (!routes.length) {
+    box.innerHTML = '<p class="meta">No AI routes configured.</p>';
+    return;
+  }
+  box.innerHTML = routes.map(([name, route]) => {
+    const ready = Boolean(route.ready);
+    const badge = ready ? "ready" : "blocked";
+    const model = route.model || "model not set";
+    const adapter = route.adapter || "adapter not set";
+    const auth = route.auth || "";
+    const actions = (route.actions || []).join(", ");
+    return `
+      <div class="agent-row">
+        <div class="agent-row-head">
+          <strong>${escapeHtml(name)}</strong>
+          <span class="agent-badge ${badge}">${ready ? "ready" : "blocked"}</span>
+        </div>
+        <div class="meta">${escapeHtml(adapter)} · ${escapeHtml(model)}${auth ? ` · ${escapeHtml(auth)}` : ""}</div>
+        ${actions ? `<div class="error">${escapeHtml(actions)}</div>` : ""}
+      </div>
+    `;
+  }).join("");
+}
+
+async function testAiRoute() {
+  const route = $("#ai-test-route")?.value.trim() || "smart";
+  const prompt = $("#ai-test-prompt")?.value.trim() || "ping";
+  const result = await api("/api/ai/test", {
+    method: "POST",
+    body: JSON.stringify({ route, prompt, dry_run: true }),
+  });
+  $("#setup-summary").textContent = JSON.stringify(result, null, 2);
+}
+
+function setupWoImportSource() {
+  return $("#setup-import-wo-source")?.value.trim() || "";
+}
+
+async function previewSetupWoImport() {
+  const output = $("#setup-import-wo-output");
+  try {
+    setBusy("#setup-import-wo-preview-button", true);
+    const result = await api("/api/init/import-wo/preview", {
+      method: "POST",
+      body: JSON.stringify({ source: setupWoImportSource() }),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+  } catch (err) {
+    renderActionError(output, err);
+  } finally {
+    setBusy("#setup-import-wo-preview-button", false);
+  }
+}
+
+async function applySetupWoImport() {
+  const output = $("#setup-import-wo-output");
+  if (!window.confirm("Apply redacted WO/FLOW import into this local project?")) return;
+  try {
+    setBusy("#setup-import-wo-apply-button", true);
+    const result = await api("/api/init/import-wo", {
+      method: "POST",
+      body: JSON.stringify({ source: setupWoImportSource() }),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+    await loadSetupStatus();
+  } catch (err) {
+    renderActionError(output, err);
+  } finally {
+    setBusy("#setup-import-wo-apply-button", false);
+  }
+}
+
+async function loadOnboardingQuestions() {
+  const [questions, status, facts] = await Promise.all([
+    api("/api/onboarding/questions"),
+    api("/api/onboarding/status"),
+    api("/api/candidate/facts"),
+  ]);
+  const select = $("#onboarding-question-select");
+  if (select) {
+    select.innerHTML = questions.map((q) => `<option value="${escapeAttr(q.id)}">${escapeHtml(q.title || q.id)}</option>`).join("");
+  }
+  $("#onboarding-questions").innerHTML = questions.map((q) => `
+    <div class="agent-row">
+      <div class="agent-row-head"><strong>${escapeHtml(q.title || q.id)}</strong><span class="agent-badge">${escapeHtml(q.category || "")}</span></div>
+      <div class="meta">${escapeHtml(q.prompt || "")}</div>
+    </div>
+  `).join("");
+  $("#onboarding-status").textContent = JSON.stringify({ status, facts }, null, 2);
+}
+
+async function submitOnboardingAnswer() {
+  const questionId = $("#onboarding-question-select")?.value || "experience";
+  const answer = $("#onboarding-answer")?.value || "";
+  if (!answer.trim()) return;
+  await api("/api/onboarding/answer", {
+    method: "POST",
+    body: JSON.stringify({ question_id: questionId, answer, source: "web_ui" }),
+  });
+  $("#onboarding-answer").value = "";
+  await loadOnboardingQuestions();
+  await loadCandidateMap();
+}
+
+async function loadCandidateMap() {
+  const [profile, facts, completeness] = await Promise.all([
+    api("/api/candidate/profile"),
+    api("/api/candidate/facts"),
+    api("/api/candidate/completeness"),
+  ]);
+  $("#candidate-facts-list").innerHTML = facts.map((fact) => `
+    <div class="agent-row">
+      <div class="agent-row-head">
+        <strong>${escapeHtml(fact.key || "fact")}</strong>
+        <span class="agent-badge ${escapeAttr(fact.status || "")}">${escapeHtml(fact.status || "")}</span>
+      </div>
+      <div>${escapeHtml(String(fact.value || ""))}</div>
+      <div class="meta">${escapeHtml(fact.source || "")}</div>
+      ${fact.status === "confirmed" ? "" : `<button onclick="confirmCandidateFact(${Number(fact.id)})">Confirm</button>`}
+    </div>
+  `).join("") || `<p class="meta">No facts yet.</p>`;
+  $("#candidate-map-output").textContent = JSON.stringify({ profile, completeness }, null, 2);
+}
+
+async function confirmCandidateFact(factId) {
+  await api("/api/candidate/confirm-fact", {
+    method: "POST",
+    body: JSON.stringify({ fact_id: factId }),
+  });
+  await loadCandidateMap();
+  await loadOnboardingQuestions();
+}
+
+async function buildResumeVariant() {
+  const jobId = Number($("#resume-variant-job-id")?.value || 0);
+  const resumeId = Number($("#resume-variant-resume-id")?.value || 0);
+  if (!jobId || !resumeId) return;
+  const result = await api("/api/resume-variants/build", {
+    method: "POST",
+    body: JSON.stringify({ job_id: jobId, resume_id: resumeId }),
+  });
+  $("#resume-variant-output").textContent = JSON.stringify(result, null, 2);
+  renderResumeVariantDiff(result.diff || {});
+}
+
+function renderResumeVariantDiff(diff) {
+  const target = $("#resume-variant-diff");
+  if (!target) return;
+  const added = diff.added_lines || [];
+  const removed = diff.removed_lines || [];
+  target.innerHTML = `
+    <div class="agent-row">
+      <div class="agent-row-head"><strong>Variant diff</strong><span class="agent-badge">${added.length} added / ${removed.length} removed</span></div>
+      <div class="meta">Added</div>
+      <pre class="agent-json">${escapeHtml(added.join("\n") || "none")}</pre>
+      <div class="meta">Removed</div>
+      <pre class="agent-json">${escapeHtml(removed.join("\n") || "none")}</pre>
+    </div>
+  `;
+}
+
+async function buildApplicationPreview() {
+  const jobId = Number($("#application-preview-job-id")?.value || 0);
+  if (!jobId) return;
+  let sourcePayload = {};
+  try {
+    sourcePayload = JSON.parse($("#application-preview-payload")?.value || "{}");
+  } catch (err) {
+    $("#application-preview-output").textContent = `Invalid payload JSON: ${err.message}`;
+    return;
+  }
+  const result = await api("/api/applications/build-pack", {
+    method: "POST",
+    body: JSON.stringify({
+      job_id: jobId,
+      resume_variant: {
+        id: $("#application-preview-resume-variant-id")?.value || "",
+      },
+      cover_letter: $("#application-preview-letter")?.value || "",
+      source_payload: sourcePayload,
+      campaign_policy: { enabled: true, real_apply: false },
+    }),
+  });
+  $("#application-preview-output").textContent = JSON.stringify(result, null, 2);
+}
+
+function externalApplyFormPayload() {
+  try {
+    return JSON.parse($("#external-apply-form-json")?.value || "{}");
+  } catch (err) {
+    $("#application-preview-output").textContent = `Invalid external form JSON: ${err.message}`;
+    return null;
+  }
+}
+
+function externalApplyRequestBody(confirm = false) {
+  const form = externalApplyFormPayload();
+  if (!form) return null;
+  return {
+    form,
+    resume_variant: {
+      id: $("#application-preview-resume-variant-id")?.value || "",
+    },
+    cover_letter: $("#application-preview-letter")?.value || "",
+    campaign_policy: { enabled: true, real_apply: false },
+    confirm,
+    submit_certified: Boolean($("#external-apply-submit-certified")?.checked),
+    campaign_policy_apply: false,
+  };
+}
+
+async function dryRunExternalApply() {
+  const jobId = Number($("#application-preview-job-id")?.value || 0);
+  if (!jobId) return;
+  const body = externalApplyRequestBody(false);
+  if (!body) return;
+  const result = await api(`/api/jobs/${jobId}/external-apply/dry-run`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  $("#application-preview-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function confirmExternalApply() {
+  const jobId = Number($("#application-preview-job-id")?.value || 0);
+  if (!jobId) return;
+  const body = externalApplyRequestBody(true);
+  if (!body) return;
+  const message = body.submit_certified
+    ? "Submit through a certified external adapter?"
+    : "Prepare external manual submit handoff?";
+  if (!window.confirm(message)) return;
+  const result = await api(`/api/jobs/${jobId}/external-apply/confirm`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  $("#application-preview-output").textContent = JSON.stringify(result, null, 2);
+  await loadJobs();
+}
+
+async function loadCampaignRuns() {
+  const [runs, preflight] = await Promise.all([
+    api("/api/hh/campaigns"),
+    api("/api/agent/preflight"),
+  ]);
+  const pauseState = $("#campaign-pause-state");
+  if (pauseState) {
+    const paused = Boolean(preflight.agent?.paused);
+    pauseState.textContent = paused ? `paused: ${preflight.agent?.pause_reason || "manual"}` : "running";
+    pauseState.className = `agent-badge ${paused ? "blocked" : "ready"}`;
+  }
+  $("#campaign-runs-list").innerHTML = runs.map((run) => `
+    <div class="agent-row">
+      <div class="agent-row-head">
+        <strong>Run #${escapeHtml(String(run.id))}</strong>
+        <span class="agent-badge ${escapeAttr(run.status || "")}">${escapeHtml(run.status || "")}</span>
+      </div>
+      <pre class="agent-json">${escapeHtml(JSON.stringify(run.counts || {}, null, 2))}</pre>
+      <button onclick="loadCampaignRun(${Number(run.id)})">Load items</button>
+    </div>
+  `).join("") || `<p class="meta">No campaign runs.</p>`;
+}
+
+async function loadCampaignRun(runId) {
+  state.selectedCampaignRunId = Number(runId);
+  const detail = await api(`/api/hh/campaigns/${runId}`);
+  $("#campaign-plan-output").textContent = JSON.stringify(detail, null, 2);
+}
+
+async function planHhCampaign() {
+  const dailyCap = Number($("#campaign-daily-cap")?.value || 0);
+  const body = {
+    limit: Number($("#campaign-limit")?.value || 50),
+    min_score: Number($("#campaign-min-score")?.value || 70),
+    skip_tests: true,
+    ai_filter_mode: $("#campaign-ai-filter")?.value || "off",
+  };
+  if (dailyCap > 0) body.daily_cap = dailyCap;
+  const result = await api("/api/hh/campaigns/plan", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (result.id) state.selectedCampaignRunId = Number(result.id);
+  $("#campaign-plan-output").textContent = JSON.stringify(result, null, 2);
+  await loadCampaignRuns();
+}
+
+async function planExternalCampaign() {
+  const dailyCap = Number($("#campaign-daily-cap")?.value || 0);
+  const body = {
+    source: $("#external-campaign-source")?.value || "hirehi",
+    limit: Number($("#campaign-limit")?.value || 50),
+    min_score: Number($("#campaign-min-score")?.value || 70),
+  };
+  if (dailyCap > 0) body.daily_cap = dailyCap;
+  const result = await api("/api/campaigns/external/plan", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (result.id) state.selectedCampaignRunId = Number(result.id);
+  $("#campaign-plan-output").textContent = JSON.stringify(result, null, 2);
+  await loadCampaignRuns();
+}
+
+async function confirmCampaignRun() {
+  const runId = Number(state.selectedCampaignRunId || 0);
+  if (!runId) return;
+  if (!window.confirm("Confirm real HH campaign apply?")) return;
+  const result = await api(`/api/hh/campaigns/${runId}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+  });
+  $("#campaign-plan-output").textContent = JSON.stringify(result, null, 2);
+  await loadCampaignRuns();
+}
+
+async function confirmExternalCampaignRun() {
+  const runId = Number(state.selectedCampaignRunId || 0);
+  if (!runId) return;
+  if (!window.confirm("Confirm real external campaign apply?")) return;
+  const result = await api(`/api/campaigns/${runId}/run-external`, {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+  });
+  $("#campaign-plan-output").textContent = JSON.stringify(result, null, 2);
+  await loadCampaignRuns();
+}
+
+async function killCampaigns() {
+  if (!window.confirm("Pause all campaign execution now?")) return;
+  try {
+    setBusy("#campaign-kill-switch-button", true);
+    const result = await api("/api/agent/pause", {
+      method: "POST",
+      body: JSON.stringify({ reason: "campaign_ui_kill_switch" }),
+    });
+    $("#campaign-plan-output").textContent = JSON.stringify(result, null, 2);
+    await loadCampaignRuns();
+  } catch (err) {
+    renderActionError($("#campaign-plan-output"), err);
+  } finally {
+    setBusy("#campaign-kill-switch-button", false);
+  }
+}
+
+async function resumeCampaigns() {
+  try {
+    setBusy("#campaign-resume-button", true);
+    const result = await api("/api/agent/resume", {
+      method: "POST",
+      body: JSON.stringify({ reason: "campaign_ui_resume" }),
+    });
+    $("#campaign-plan-output").textContent = JSON.stringify(result, null, 2);
+    await loadCampaignRuns();
+  } catch (err) {
+    renderActionError($("#campaign-plan-output"), err);
+  } finally {
+    setBusy("#campaign-resume-button", false);
+  }
+}
+
+function pipelineJobId() {
+  return Number($("#pipeline-job-id")?.value || state.selectedId || 0);
+}
+
+function interviewPrepJobId() {
+  return Number($("#interview-prep-job-id")?.value || state.selectedId || 0);
+}
+
+async function loadPipelineStatus() {
+  const jobId = pipelineJobId();
+  if (!jobId) return;
+  const result = await api(`/api/pipeline/jobs/${jobId}`);
+  $("#pipeline-status-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function buildPipelinePrepPack() {
+  const jobId = pipelineJobId();
+  if (!jobId) return;
+  const result = await api(`/api/pipeline/jobs/${jobId}/prep-pack`, {
+    method: "POST",
+    body: JSON.stringify({ stage: $("#pipeline-stage-select")?.value || "tech" }),
+  });
+  $("#pipeline-prep-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function buildInterviewPrepPack() {
+  const jobId = interviewPrepJobId();
+  if (!jobId) return;
+  const result = await api(`/api/pipeline/jobs/${jobId}/prep-pack`, {
+    method: "POST",
+    body: JSON.stringify({ stage: $("#interview-prep-stage-select")?.value || "tech" }),
+  });
+  $("#interview-prep-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function schedulePipelineFollowup() {
+  const jobId = pipelineJobId();
+  if (!jobId) return;
+  const eventAt = $("#pipeline-event-at")?.value || "";
+  if (!eventAt) {
+    $("#pipeline-status-output").textContent = "Set event date and time first.";
+    return;
+  }
+  const result = await api(`/api/pipeline/jobs/${jobId}/event`, {
+    method: "POST",
+    body: JSON.stringify({ event_type: "follow_up", event_at: eventAt }),
+  });
+  $("#pipeline-status-output").textContent = JSON.stringify(result, null, 2);
+  await loadEvents();
+}
+
+async function loadReplayTimeline() {
+  const runId = $("#replay-run-id")?.value;
+  const jobId = $("#replay-job-id")?.value;
+  if (!runId && !jobId) return;
+  const params = replayQueryParams();
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const replay = runId
+    ? await api(`/api/replay/runs/${encodeURIComponent(runId)}${query}`)
+    : await api(`/api/replay/jobs/${encodeURIComponent(jobId)}${query}`);
+  const events = replay.events || [];
+  $("#replay-timeline-list").innerHTML = events.map((event) => `
+    <div class="agent-row">
+      <div class="agent-row-head">
+        <strong>${escapeHtml(event.title || event.event_type || "event")}</strong>
+        <span class="agent-badge">${escapeHtml(event.event_type || "")}</span>
+      </div>
+      <div class="meta">${escapeHtml(event.created_at || "")}</div>
+      <pre class="agent-json">${escapeHtml(JSON.stringify(event.data || {}, null, 2))}</pre>
+    </div>
+  `).join("") || `<p class="meta">No replay events.</p>`;
+}
+
+function replayQueryParams() {
+  const params = new URLSearchParams();
+  const source = $("#replay-source-filter")?.value.trim();
+  const eventType = $("#replay-event-type-filter")?.value.trim();
+  if (source) params.set("source", source);
+  if (eventType) params.set("event_type", eventType);
+  return params;
+}
+
+function exportReplayMarkdown() {
+  const runId = $("#replay-run-id")?.value;
+  const jobId = $("#replay-job-id")?.value;
+  if (!runId && !jobId) return;
+  const params = replayQueryParams();
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const path = runId
+    ? `/api/replay/runs/${encodeURIComponent(runId)}/export${query}`
+    : `/api/replay/jobs/${encodeURIComponent(jobId)}/export${query}`;
+  window.open(path, "_blank");
+}
+
+async function loadSecurityStatus() {
+  const result = await api("/api/security/status");
+  $("#audit-security-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function runAuditSecurityRedactionScan() {
+  const output = $("#audit-security-redaction-output");
+  try {
+    setBusy("#audit-security-redaction-button", true);
+    const result = await api("/api/init/redaction-scan", {
+      method: "POST",
+      body: JSON.stringify({ text: $("#audit-security-redaction-text")?.value || "" }),
+    });
+    if (output) output.textContent = JSON.stringify(result, null, 2);
+  } catch (err) {
+    renderActionError(output, err);
+  } finally {
+    setBusy("#audit-security-redaction-button", false);
+  }
+}
+
+function browserLabSource() {
+  return $("#browser-lab-source")?.value.trim() || "getmatch";
+}
+
+async function loadBrowserLabStatus() {
+  const source = encodeURIComponent(browserLabSource());
+  const result = await api(`/api/browser-lab/status?source=${source}`);
+  $("#browser-lab-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function openBrowserLabLogin() {
+  const result = await api("/api/browser-lab/open-login", {
+    method: "POST",
+    body: JSON.stringify({ source: browserLabSource() }),
+  });
+  $("#browser-lab-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function importBrowserLabHar() {
+  const hosts = ($("#browser-lab-hosts")?.value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const result = await api("/api/browser-lab/import-har", {
+    method: "POST",
+    body: JSON.stringify({
+      source: browserLabSource(),
+      path: $("#browser-lab-har-path")?.value.trim() || "",
+      allowed_hosts: hosts,
+      configure_external_apply: Boolean($("#browser-lab-configure-external-apply")?.checked),
+    }),
+  });
+  $("#browser-lab-output").textContent = JSON.stringify(result, null, 2);
+}
+
+function browserLabRequestContext() {
+  const output = $("#browser-lab-output");
+  let form = {};
+  try {
+    form = JSON.parse($("#browser-lab-form-json")?.value || "{}");
+  } catch (err) {
+    if (output) output.textContent = `Invalid form JSON: ${err.message}`;
+    return null;
+  }
+  let persona = {};
+  try {
+    persona = JSON.parse($("#browser-lab-persona-json")?.value || "{}");
+  } catch (err) {
+    if (output) output.textContent = `Invalid persona JSON: ${err.message}`;
+    return null;
+  }
+  return { form, persona };
+}
+
+async function mapBrowserLabForm() {
+  const context = browserLabRequestContext();
+  if (!context) return;
+  const result = await api("/api/browser-lab/forms/map", {
+    method: "POST",
+    body: JSON.stringify({ source: browserLabSource(), form: context.form, persona: context.persona }),
+  });
+  $("#browser-lab-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function dryRunBrowserLabForm() {
+  const context = browserLabRequestContext();
+  if (!context) return;
+  const result = await api("/api/browser-lab/forms/dry-run", {
+    method: "POST",
+    body: JSON.stringify({ source: browserLabSource(), form: context.form, persona: context.persona }),
+  });
+  $("#browser-lab-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function executeBrowserLabDryRun() {
+  const context = browserLabRequestContext();
+  if (!context) return;
+  const result = await api("/api/browser-lab/forms/execute-dry-run", {
+    method: "POST",
+    body: JSON.stringify({ source: browserLabSource(), form: context.form, persona: context.persona, headless: true }),
+  });
+  $("#browser-lab-output").textContent = JSON.stringify(result, null, 2);
+}
+
+async function loadRoadmapView(view) {
+  if (view === "setup") await loadSetupStatus();
+  if (view === "onboarding") await loadOnboardingQuestions();
+  if (view === "candidate-map") await loadCandidateMap();
+  if (view === "job-detail") await loadJobDetailView();
+  if (view === "campaigns") await loadCampaignRuns();
+  if (view === "pipeline") await loadPipelineStatus();
+  if (view === "interview-prep") fillSelectedJobControls(state.selectedId);
+  if (view === "audit-security") await loadSecurityStatus();
+  if (view === "browser-lab") await loadBrowserLabStatus();
+}
+
+async function loadRoadmapViewSafe(view) {
+  try {
+    setUiError("");
+    await loadRoadmapView(view);
+  } catch (err) {
+    setUiError(err.message || String(err));
+    console.error(err);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   for (const button of document.querySelectorAll("button")) {
     button.dataset.label = button.textContent;
@@ -1340,7 +2245,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
       document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
       button.classList.add("active");
-      $(`#view-${button.dataset.view}`).classList.add("active");
+      const view = $(`#view-${button.dataset.view}`);
+      if (!view) return;
+      view.classList.add("active");
+      loadRoadmapViewSafe(button.dataset.view);
     });
   });
   $("#sync-button").addEventListener("click", syncJobs);
@@ -1378,6 +2286,48 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#agent-batch-matrix-button")?.addEventListener("click", buildAgentBatchMatrix);
   $("#hh-lab-run-button")?.addEventListener("click", runHhLabCall);
   $("#hh-lab-save-snippet-button")?.addEventListener("click", saveHhLabSnippet);
+  $("#setup-refresh-button")?.addEventListener("click", loadSetupStatus);
+  $("#ai-test-button")?.addEventListener("click", testAiRoute);
+  $("#setup-import-wo-preview-button")?.addEventListener("click", previewSetupWoImport);
+  $("#setup-import-wo-apply-button")?.addEventListener("click", applySetupWoImport);
+  $("#onboarding-refresh-button")?.addEventListener("click", loadOnboardingQuestions);
+  $("#onboarding-submit-button")?.addEventListener("click", submitOnboardingAnswer);
+  $("#candidate-refresh-button")?.addEventListener("click", loadCandidateMap);
+  $("#resume-variant-button")?.addEventListener("click", buildResumeVariant);
+  $("#job-detail-load-button")?.addEventListener("click", () => loadJobDetailView().catch((err) => renderActionError($("#job-detail-output"), err)));
+  $("#application-preview-button")?.addEventListener("click", buildApplicationPreview);
+  $("#external-apply-dry-run-button")?.addEventListener("click", dryRunExternalApply);
+  $("#external-apply-confirm-button")?.addEventListener("click", confirmExternalApply);
+  $("#campaign-refresh-button")?.addEventListener("click", loadCampaignRuns);
+  $("#campaign-plan-button")?.addEventListener("click", planHhCampaign);
+  $("#external-campaign-plan-button")?.addEventListener("click", planExternalCampaign);
+  $("#campaign-confirm-run-button")?.addEventListener("click", confirmCampaignRun);
+  $("#external-campaign-run-button")?.addEventListener("click", confirmExternalCampaignRun);
+  $("#campaign-kill-switch-button")?.addEventListener("click", killCampaigns);
+  $("#campaign-resume-button")?.addEventListener("click", resumeCampaigns);
+  $("#pipeline-refresh-button")?.addEventListener("click", loadPipelineStatus);
+  $("#pipeline-prep-pack-button")?.addEventListener("click", buildPipelinePrepPack);
+  $("#pipeline-schedule-followup-button")?.addEventListener("click", schedulePipelineFollowup);
+  $("#interview-prep-pack-button")?.addEventListener("click", buildInterviewPrepPack);
+  $("#replay-refresh-button")?.addEventListener("click", loadReplayTimeline);
+  $("#replay-export-button")?.addEventListener("click", exportReplayMarkdown);
+  $("#audit-security-refresh-button")?.addEventListener("click", loadSecurityStatus);
+  $("#audit-security-redaction-button")?.addEventListener("click", runAuditSecurityRedactionScan);
+  $("#browser-lab-status-button")?.addEventListener("click", loadBrowserLabStatus);
+  $("#browser-lab-open-login-button")?.addEventListener("click", openBrowserLabLogin);
+  $("#browser-lab-import-har-button")?.addEventListener("click", importBrowserLabHar);
+  $("#browser-lab-map-form-button")?.addEventListener("click", mapBrowserLabForm);
+  $("#browser-lab-dry-run-button")?.addEventListener("click", dryRunBrowserLabForm);
+  $("#browser-lab-execute-dry-run-button")?.addEventListener("click", executeBrowserLabDryRun);
+  $("#source-sync-button")?.addEventListener("click", syncSelectedSource);
+  $("#source-test-button")?.addEventListener("click", testSelectedSource);
+  $("#source-external-target-button")?.addEventListener("click", configureSourceExternalApplyTarget);
+  $("#source-external-har-button")?.addEventListener("click", configureSourceExternalApplyFromHar);
+  $("#source-redaction-scan-button")?.addEventListener("click", recordSourceRedactionScan);
+  $("#source-certification-plan-button")?.addEventListener("click", loadSourceCertificationPlan);
+  $("#source-certification-evidence-button")?.addEventListener("click", recordSourceCertificationEvidence);
+  $("#source-certification-promote-button")?.addEventListener("click", promoteSourceCertification);
+  $("#resume-import-button")?.addEventListener("click", importResume);
   document.querySelectorAll("[data-agent-operation]").forEach((button) => {
     button.addEventListener("click", () => runAgentOperation(button.dataset.agentOperation, button));
   });
@@ -1390,6 +2340,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   document.querySelector("[data-view='favorites']")?.addEventListener("click", loadFavorites);
+  document.querySelector("[data-view='resumes']")?.addEventListener("click", loadResumes);
+  document.querySelector("[data-view='job-detail']")?.addEventListener("click", () => loadJobDetailView().catch(console.error));
+  document.querySelector("[data-view='interview-prep']")?.addEventListener("click", () => fillSelectedJobControls(state.selectedId));
   document.querySelector("[data-view='stats']")?.addEventListener("click", loadStats);
   document.querySelector("[data-view='trends']")?.addEventListener("click", loadMarketTrends);
   document.querySelector("[data-view='agent']")?.addEventListener("click", () => loadAgentCockpit().catch(console.error));
@@ -1437,15 +2390,32 @@ async function saveResume() {
   } catch (e) { alert("Ошибка: " + e.message); }
 }
 
+async function importResume() {
+  const path = $("#resume-import-path")?.value.trim();
+  if (!path) return;
+  const result = await api("/api/resumes/import", {
+    method: "POST",
+    body: JSON.stringify({
+      path,
+      activate: Boolean($("#resume-import-activate")?.checked),
+    }),
+  });
+  $("#resume-import-output").textContent = JSON.stringify(result, null, 2);
+  if (result.status === "imported") {
+    await loadResumes();
+  }
+}
+
 async function loadResumes() {
   try {
     const resumes = await api("/api/resumes");
     const list = $("#resumes-list");
     list.innerHTML = "";
     for (const r of resumes) {
+      const details = [r.is_active ? "★ Активное" : "", r.source_format || "", r.imported_from || "", `ATS: ${r.ats_score ?? "—"}`].filter(Boolean).join(" · ");
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(r.name)}</strong>
-        <div class="meta">${r.is_active ? "★ Активное" : ""} · ATS: ${r.ats_score ?? "—"}</div>
+        <div class="meta">${escapeHtml(details)}</div>
         <div style="margin-top:6px;display:flex;gap:6px;">
           <button onclick="activateResume(${r.id})">Активировать</button>
           <button onclick="showResumeForm(${r.id})">Ред.</button>
@@ -1603,7 +2573,7 @@ function renderFilteredJobs(jobs) {
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)"></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" ${selectedJobIds.has(job.id) ? "checked" : ""} onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)"></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>

@@ -1,13 +1,19 @@
 ﻿from __future__ import annotations
 
 import csv
+import hashlib
+import importlib.util
 import io
 import json
+import platform
 import re
+import shutil
 import smtplib
+import sqlite3
+import sys
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -20,11 +26,27 @@ from .config import (
     default_config,
     load_config,
     mask_secrets,
+    preserve_masked_secrets,
     save_config,
 )
-from .letters import chat_completion, draft_cover_letter, draft_cover_letter_ai
+from .applications.pack_builder import build_application_pack_preview, build_application_policy
+from .applications.source_payload import safe_source_payload
+from .agents import write_agent_orchestrator_assets
+from .external_sessions import call_external_session, show_external_session
+from .ai import ai_status as build_ai_status, ai_test as run_ai_test, chat_completion
+from .browser_lab import (
+    browser_lab_dry_run_form_fill as build_browser_lab_dry_run_form_fill,
+    browser_lab_execute_dry_run_form_fill as execute_browser_lab_dry_run_form_fill,
+    browser_lab_import_har as import_browser_lab_har,
+    browser_lab_map_form as map_browser_lab_form,
+    browser_lab_open_login as plan_browser_lab_open_login,
+    browser_lab_setup as setup_browser_lab,
+    browser_lab_status as build_browser_lab_status,
+)
+from .letters import draft_cover_letter, draft_cover_letter_ai, human_cover_letter_variants
 from .models import (
     ApplyPlan,
+    CalendarEvent,
     HHAgentEvent,
     HHAgentTask,
     HHCampaignItem,
@@ -34,7 +56,21 @@ from .models import (
     HHResume,
     Job,
     LetterDraft,
+    Resume,
 )
+from .memory.candidate_profile import build_candidate_map
+from .onboarding.questions import onboarding_questions as build_onboarding_questions
+from .onboarding.completeness import candidate_completeness_from_facts
+from .ops_import.writer import write_ops_import
+from .resume_engine import (
+    canonicalize_resume_text,
+    diff_resume_text,
+    import_resume_file,
+    merge_resume_canonical_with_claims,
+)
+from .resumes.ats_optimizer import build_resume_variant_metadata
+from .security.redaction import redact_secrets
+from .security.secret_scan import find_secret_markers
 from .hh_agent.approval import ApprovalQueue
 from .hh_agent.apply_from_file import ApplyFromFileRow, load_apply_from_file
 from .hh_agent.events import (
@@ -48,6 +84,12 @@ from .hh_agent.persona import persona_from_profile
 from .hh_agent.resume_templates import (
     build_hh_batch_preset_matrix as build_resume_batch_preset_matrix,
     draft_hh_resume_payload_from_template,
+)
+from .interview_prep import (
+    INTERVIEW_STAGES,
+    PIPELINE_AUTOMATION,
+    build_after_interview_assets,
+    build_stage_focus,
 )
 from .resume_payloads import load_hh_resume_payload, validate_hh_resume_payload
 from .scoring import score_job
@@ -64,6 +106,7 @@ from .sources import (
     RelocateMeSource,
     TelegramSource,
 )
+from .sources.registry import EXTERNAL_APPLY_EVIDENCE_REQUIREMENTS, source_status_report
 from .sources.hh import HHApplyClient
 from .sources.common import clean_text, fetch_url
 from .storage import Storage
@@ -220,6 +263,48 @@ def _campaign_counts() -> dict[str, int]:
     return {"ready": 0, "skipped": 0, "error": 0, "applied": 0}
 
 
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _count_campaign_item(counts: dict[str, int], item: HHCampaignItem) -> None:
+    if item.status in counts:
+        counts[item.status] += 1
+    else:
+        counts["error"] += 1
+
+
+def _with_replay_hashes(data: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(data)
+    for key in ("prompt", "output"):
+        value = enriched.get(key)
+        if value is not None and f"{key}_hash" not in enriched:
+            digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+            enriched[f"{key}_hash"] = f"sha256:{digest}"
+        enriched.pop(key, None)
+    return enriched
+
+
+def _browser_lab_default_hosts(source: str, config: dict[str, Any]) -> set[str]:
+    source_config = (config.get("sources") or {}).get(source) or {}
+    hosts: set[str] = set()
+    for key in ("base_url", "api_base_url"):
+        value = str(source_config.get(key) or "")
+        host = urllib.parse.urlsplit(value).hostname
+        if host:
+            hosts.add(host)
+    if source == "hh":
+        hosts.add("hh.ru")
+    if not hosts and source:
+        compact = source.replace("_", "")
+        hosts.add(f"{compact}.ru" if source in {"hirehi"} else f"{compact}.work" if source == "jabka" else source)
+    return hosts
+
+
 HH_RELATION_APPLIED_VALUES = {
     "got_response",
     "got_invitation",
@@ -236,6 +321,21 @@ HH_APPLY_ERROR_OUTCOMES = {
     "archived",
     "resume_archived",
     "vacancy_archived",
+}
+
+
+HH_DIRECT_APPLY_HARD_BLOCKERS = {
+    "test_required": "test_required",
+    "questions_required": "questions_required",
+    "question_required": "questions_required",
+    "manual_questions_required": "questions_required",
+    "captcha_required": "captcha_or_challenge",
+    "challenge_required": "captcha_or_challenge",
+    "captcha_or_challenge": "captcha_or_challenge",
+    "archived": "archived",
+    "vacancy_archived": "archived",
+    "already_applied": "already_applied",
+    "has_relations": "has_relations",
 }
 
 
@@ -314,6 +414,361 @@ SOURCE_CAPABILITIES: dict[str, dict[str, str]] = {
 
 
 DEFAULT_SYNC_SOURCE_NAMES = ["hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
+EXTERNAL_APPLY_CERTIFICATION_SOURCE_NAMES = ["geekjob", "habr", "getmatch", "hirehi", "careerspace", "jabka"]
+PUBLIC_BOARD_APPLY_FORM_SOURCE_NAMES = {"hirehi", "careerspace", "another_it", "jabka"}
+
+
+def _source_maturity_level(source_name: str, capabilities: dict[str, str]) -> int:
+    if source_name == "hh" and capabilities.get("apply") == "official_api":
+        return 6
+    apply_capability = capabilities.get("apply", "")
+    detail_capability = capabilities.get("detail", "")
+    search_capability = capabilities.get("search", "")
+    if apply_capability == "personal_auth_recon":
+        return 2
+    if apply_capability == "external_page":
+        return 2 if detail_capability not in {"unknown", ""} else 1
+    if search_capability and detail_capability:
+        return 1
+    return 0
+
+
+def _relevant_candidate_facts(job: Job, facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    text = f"{job.title} {job.description}".lower()
+    relevant: list[dict[str, Any]] = []
+    for fact in facts:
+        value = str(fact.get("value") or "")
+        tokens = [
+            token.lower()
+            for token in re.findall(r"[A-Za-zА-Яа-я0-9+#.]{3,}", value)
+        ]
+        if any(token in text for token in tokens):
+            relevant.append(fact)
+    return relevant
+
+
+def _application_pack_policy_reasons(
+    job: Job,
+    source_payload: dict[str, Any],
+    campaign_policy: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    if "enabled" in campaign_policy and not campaign_policy.get("enabled"):
+        reasons.append("campaign_disabled")
+    if "real_apply" in campaign_policy and not campaign_policy.get("real_apply"):
+        reasons.append("real_apply_disabled")
+    if (
+        campaign_policy.get("require_resume_variant", True)
+        and not source_payload.get("resume_variant_id")
+        and not source_payload.get("resume_id")
+    ):
+        reasons.append("resume_variant_missing")
+    if not source_payload.get("cover_letter_present"):
+        reasons.append("cover_letter_missing")
+    if str(source_payload.get("form_signature") or "").lower() == "unknown":
+        reasons.append("unknown_form")
+    if source_payload.get("captcha") or source_payload.get("challenge"):
+        reasons.append("captcha_or_challenge")
+    if source_payload.get("test_required") or source_payload.get("has_test"):
+        reasons.append("test_required")
+    min_score = int(campaign_policy.get("min_score") or 0)
+    score = job.score.total_score if job.score else 0
+    if min_score and score < min_score:
+        reasons.append("below_min_score")
+    return list(dict.fromkeys(reasons))
+
+
+def _external_form_source_payload(form: dict[str, Any]) -> dict[str, Any]:
+    fields = list(form.get("fields") or [])
+    return {
+        "form_url": str(form.get("form_url") or form.get("url") or ""),
+        "form_signature": str(form.get("form_signature") or ("known" if fields else "unknown")),
+        "captcha": bool(form.get("captcha")),
+        "challenge": bool(form.get("challenge")),
+        "test_required": bool(form.get("test_required") or form.get("has_test")),
+        "field_count": len(fields),
+    }
+
+
+def _external_apply_form_from_dry_run_event(data: dict[str, Any], *, fallback_url: str) -> dict[str, Any]:
+    plan = data.get("plan") if isinstance(data.get("plan"), dict) else {}
+    raw_result = plan.get("raw_result") if isinstance(plan.get("raw_result"), dict) else {}
+    apply_meta = raw_result.get("apply") if isinstance(raw_result.get("apply"), dict) else {}
+    form = apply_meta.get("form") if isinstance(apply_meta.get("form"), dict) else {}
+    if form.get("fields"):
+        return dict(form)
+    dry_run = data.get("dry_run") if isinstance(data.get("dry_run"), dict) else {}
+    return {
+        "form_url": str(dry_run.get("form_url") or data.get("external_url") or fallback_url),
+        "fields": [],
+    }
+
+
+def _external_apply_config(config: dict[str, Any], source: str) -> dict[str, Any]:
+    source_config = (config.get("sources") or {}).get(source) or {}
+    external_apply = source_config.get("external_apply") or {}
+    return dict(external_apply) if isinstance(external_apply, dict) else {}
+
+
+def _external_apply_target_fingerprint(external_apply: dict[str, Any]) -> str:
+    target = {
+        "session": str(external_apply.get("session") or ""),
+        "url": str(external_apply.get("url") or ""),
+        "method": str(external_apply.get("method") or "POST").upper(),
+        "payload_template": external_apply.get("payload_template") or {},
+    }
+    return json.dumps(mask_secrets(target), ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _external_apply_level(external_apply: dict[str, Any]) -> int:
+    if not external_apply.get("certified"):
+        return 0
+    try:
+        return max(0, min(6, int(external_apply.get("level") or external_apply.get("maturity_level") or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _render_external_apply_template(value: Any, context: dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        return value.format_map(_SafeFormatDict({key: str(val) for key, val in context.items()}))
+    if isinstance(value, list):
+        return [_render_external_apply_template(item, context) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _render_external_apply_template(item, context)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _external_apply_payload_context(
+    job: Job,
+    *,
+    resume_variant: dict[str, Any] | None,
+    cover_letter: str,
+    short_message: str,
+    extra_answers: dict[str, str] | None,
+) -> dict[str, Any]:
+    resume = resume_variant or {}
+    return {
+        "job_id": job.id or "",
+        "source": job.source,
+        "source_id": job.source_id,
+        "job_url": job.url,
+        "title": job.title,
+        "company": job.company,
+        "cover_letter": cover_letter,
+        "short_message": short_message,
+        "resume_id": resume.get("id") or "",
+        "resume_body": resume.get("body") or "",
+        **(extra_answers or {}),
+    }
+
+
+def _dry_run_certification_context(data: dict[str, Any]) -> dict[str, Any]:
+    plan = data.get("plan") if isinstance(data.get("plan"), dict) else {}
+    raw_result = plan.get("raw_result") if isinstance(plan.get("raw_result"), dict) else {}
+    apply_meta = raw_result.get("apply") if isinstance(raw_result.get("apply"), dict) else {}
+    form_meta = apply_meta.get("form") if isinstance(apply_meta.get("form"), dict) else {}
+    dry_run = data.get("dry_run") if isinstance(data.get("dry_run"), dict) else {}
+    form_url = (
+        dry_run.get("form_url")
+        or form_meta.get("form_url")
+        or data.get("external_url")
+        or plan.get("external_url")
+        or ""
+    )
+    host = urllib.parse.urlsplit(str(form_url or "")).hostname or ""
+    form_signature = (
+        apply_meta.get("form_signature")
+        or form_meta.get("form_signature")
+        or dry_run.get("form_signature")
+        or ""
+    )
+    detector = apply_meta.get("detector") or apply_meta.get("adapter_version") or ""
+    context: dict[str, Any] = {}
+    if form_url:
+        context["form_url"] = str(form_url)
+    if host:
+        context["host"] = host
+    if form_signature:
+        context["form_signature"] = str(form_signature)
+    if detector:
+        context["detector"] = str(detector)
+    return context
+
+
+def _source_certification_context(
+    source: str,
+    *,
+    session: str,
+    url: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    dry_run = evidence.get("dry_run") if isinstance(evidence.get("dry_run"), dict) else {}
+    target_host = urllib.parse.urlsplit(str(url or "")).hostname or ""
+    return mask_secrets(
+        {
+            "source": source,
+            "session": session,
+            "target_url": url,
+            "target_host": target_host,
+            "dry_run_host": dry_run.get("host") or "",
+            "dry_run_form_url": dry_run.get("form_url") or "",
+            "form_signature": dry_run.get("form_signature") or "",
+            "detector": dry_run.get("detector") or "",
+        }
+    )
+
+
+def _best_external_apply_endpoint(recon: dict[str, Any]) -> dict[str, Any] | None:
+    endpoints = recon.get("endpoints") if isinstance(recon.get("endpoints"), list) else []
+    candidates = [
+        endpoint
+        for endpoint in endpoints
+        if "apply" in set(endpoint.get("tags") or [])
+        and str(endpoint.get("method") or "GET").upper() in {"POST", "PUT", "PATCH"}
+    ]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda endpoint: (
+            0 if "api" in set(endpoint.get("tags") or []) else 1,
+            0 if int(endpoint.get("status") or 0) in range(200, 300) else 1,
+            str(endpoint.get("url") or ""),
+        ),
+    )[0]
+
+
+def _safe_external_apply_endpoint_view(endpoint: dict[str, Any]) -> dict[str, Any]:
+    return mask_secrets(
+        {
+            "method": str(endpoint.get("method") or "POST").upper(),
+            "url": str(endpoint.get("url") or ""),
+            "status": endpoint.get("status") or 0,
+            "tags": list(endpoint.get("tags") or []),
+            "response_mime": str(endpoint.get("response_mime") or ""),
+        }
+    )
+
+
+def _external_apply_payload_template_from_post_data(post_data: str) -> tuple[dict[str, Any], list[str]]:
+    try:
+        parsed = json.loads(str(post_data or ""))
+    except json.JSONDecodeError:
+        return {}, []
+    if not isinstance(parsed, dict):
+        return {}, []
+    template: dict[str, Any] = {}
+    unknown: list[str] = []
+    for key in parsed:
+        mapped = _external_apply_payload_template_value(str(key))
+        if mapped:
+            template[str(key)] = mapped
+        else:
+            unknown.append(str(key))
+    return template, unknown
+
+
+def _external_apply_payload_template_value(key: str) -> str:
+    lowered = key.lower()
+    if any(part in lowered for part in ("job", "vacancy", "offer", "position")):
+        return "{source_id}"
+    if any(part in lowered for part in ("cover", "letter", "message", "response", "comment", "motivation")):
+        return "{cover_letter}"
+    if "short" in lowered:
+        return "{short_message}"
+    if any(part in lowered for part in ("resume", "cv")):
+        return "{resume_id}"
+    return ""
+
+
+def _external_readiness_block_reason(readiness: dict[str, Any], *, fallback: str) -> str:
+    blockers = set(readiness.get("blockers") or [])
+    if "external_apply_session_missing" in blockers:
+        return "external_apply_session_missing"
+    if "external_apply_url_missing" in blockers:
+        return "external_apply_url_missing"
+    return fallback
+
+
+def _certification_evidence_present(value: Any) -> bool:
+    if value is True:
+        return True
+    if value in (False, None, ""):
+        return False
+    if isinstance(value, dict):
+        status = str(value.get("status") or value.get("result") or "").strip().lower()
+        if status in {"ok", "pass", "passed", "ready", "complete", "completed", "dry_run_ready", "executed_dry_run"}:
+            return True
+        return any(value.get(key) for key in ("id", "event_id", "run_id", "scan_id", "command", "path", "hash"))
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        return bool(lowered) and lowered not in {"false", "no", "fail", "failed", "missing"}
+    return bool(value)
+
+
+def _missing_certification_evidence(requirement: str) -> dict[str, Any]:
+    return {"status": "missing", "requirement": requirement}
+
+
+def _source_certification_action(source: str, requirement: str) -> dict[str, Any]:
+    source_name = str(source or "").strip().lower().replace("-", "_")
+    requirement_name = str(requirement or "").strip().lower()
+    actions: dict[str, dict[str, str]] = {
+        "session": {
+            "surface": "browser_lab",
+            "command": f"work-hunter browser login {source_name}",
+            "description": "Create or refresh the local browser session, then export/import a HAR if the source needs captured cookies.",
+        },
+        "url": {
+            "surface": "api_recon",
+            "command": f"work-hunter source external-apply-from-har {source_name} <session.har> --host <host>",
+            "description": "Map the authenticated external apply endpoint from a redacted HAR before configuring a real target.",
+        },
+        "tests": {
+            "surface": "pytest",
+            "command": "python -m pytest tests\\test_source_adapter_registry.py tests\\test_external_apply_executor.py tests\\test_browser_session_lab.py -q",
+            "description": "Run the certification safety tests, then record the exact command as tests evidence.",
+        },
+        "replay": {
+            "surface": "replay",
+            "command": f"GET /api/replay/runs/<run_id>?source={source_name}",
+            "description": "Attach a replay timeline that proves the certification dry run path was exercised without submission.",
+        },
+        "redaction": {
+            "surface": "redaction",
+            "command": f"work-hunter source redaction-scan {source_name} --payload <payload.json> --text <sample>",
+            "description": "Scan captured payloads and text samples so secrets are masked before any evidence is stored.",
+        },
+        "dry_run": {
+            "surface": "browser_lab",
+            "command": "POST /api/jobs/<job_id>/external-apply/dry-run",
+            "description": "Execute a no-submit dry run for a representative job and store the replay event as dry_run evidence.",
+        },
+    }
+    action = actions.get(
+        requirement_name,
+        {
+            "surface": "manual",
+            "command": f"work-hunter source certification-evidence {source_name} --evidence <evidence.json>",
+            "description": "Record explicit certification evidence for this requirement.",
+        },
+    )
+    return {
+        "requirement": requirement_name,
+        "safe": True,
+        **action,
+    }
+
+
+def _latest_event_matching(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if event.get("event_type") == event_type:
+            return event
+    return None
 
 
 def _safe_preset_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -611,6 +1066,141 @@ def _format_followup_template(template: str, context: dict[str, Any]) -> str:
     return template.format_map(SafeDict(context)).strip()
 
 
+def _parse_pipeline_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _pipeline_datetime(value: str | None, *, fallback: str | None = None) -> datetime:
+    parsed = _parse_pipeline_datetime(value)
+    if parsed is not None:
+        return parsed
+    parsed_fallback = _parse_pipeline_datetime(fallback)
+    if parsed_fallback is not None:
+        return parsed_fallback
+    return datetime.now().astimezone().replace(microsecond=0)
+
+
+def _pipeline_due_at(value: str | None, days_after: int, *, fallback: str | None = None) -> str:
+    return (_pipeline_datetime(value, fallback=fallback) + timedelta(days=max(1, int(days_after)))).isoformat()
+
+
+def _candidate_fact_text(value: Any) -> str:
+    if isinstance(value, str):
+        return clean_text(value)
+    if isinstance(value, list):
+        return clean_text("; ".join(_candidate_fact_text(item) for item in value if item))
+    if isinstance(value, dict):
+        parts = [str(item) for item in value.values() if item]
+        return clean_text("; ".join(parts))
+    return clean_text(str(value or ""))
+
+
+def _candidate_profile_constraints(profile: dict[str, Any]) -> str:
+    parts: list[str] = []
+    locations = [str(item).strip() for item in profile.get("locations") or [] if str(item).strip()]
+    stop_words = [str(item).strip() for item in profile.get("stop_words") or [] if str(item).strip()]
+    salary_min = int(profile.get("salary_min") or 0)
+    if locations:
+        parts.append(f"locations: {', '.join(locations)}")
+    if bool(profile.get("remote_only", False)):
+        parts.append("remote only")
+    elif any(item.casefold() == "remote" for item in locations):
+        parts.append("remote preferred")
+    if salary_min:
+        parts.append(f"salary_min: {salary_min}")
+    if stop_words:
+        parts.append(f"avoid: {', '.join(stop_words)}")
+    return "; ".join(parts)
+
+
+def _dedup_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        cleaned = str(item or "").strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _pipeline_stage(job_status: str, application_status: str, events: list[CalendarEvent]) -> str:
+    app_status = (application_status or "").lower()
+    status = (job_status or "").lower()
+    if app_status in {"rejected", "declined"} or status in {"rejected", "declined", "hidden"}:
+        return "closed"
+    if app_status == "offer" or status == "offer":
+        return "offer"
+    if any(event.event_type == "interview" for event in events):
+        return "interview_scheduled"
+    if app_status in {"interview", "tech_interview", "phone_screen"} or status in {
+        "interview",
+        "tech_interview",
+        "phone_screen",
+    }:
+        return "interview"
+    if app_status in {"response", "viewed"} or status in {"response", "viewed"}:
+        return "response_received"
+    if app_status == "external_manual_ready" or status == "external_manual_ready":
+        return "manual_submit_ready"
+    if app_status or status == "applied":
+        return "applied_waiting"
+    return "not_applied"
+
+
+def _stage_label(stage: str) -> str:
+    labels = {
+        "not_applied": "Not applied",
+        "manual_submit_ready": "Manual submit ready",
+        "applied_waiting": "Applied, waiting",
+        "response_received": "Reply received",
+        "interview": "Interview flow",
+        "interview_scheduled": "Interview scheduled",
+        "offer": "Offer stage",
+        "closed": "Closed",
+    }
+    return labels.get(stage, stage.replace("_", " ").title())
+
+
+def _tech_stack_from_job(job: Job, profile: dict[str, Any]) -> list[str]:
+    text = f"{job.title} {job.description}".lower()
+    profile_skills = [
+        str(item)
+        for item in (profile.get("must_have_skills") or []) + (profile.get("nice_to_have_skills") or [])
+    ]
+    common = [
+        "Python",
+        "FastAPI",
+        "Django",
+        "Flask",
+        "PostgreSQL",
+        "Redis",
+        "Docker",
+        "Kubernetes",
+        "SQL",
+        "API",
+        "Async",
+        "Celery",
+        "Kafka",
+        "React",
+        "TypeScript",
+    ]
+    candidates = profile_skills + common
+    matched = [skill for skill in candidates if skill and skill.lower() in text]
+    if not matched:
+        matched = profile_skills[:5]
+    return _dedup_keep_order(matched)[:10]
+
+
 def _hh_question_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     containers: list[Any] = [
         payload.get("questions"),
@@ -674,6 +1264,68 @@ def send_email_message(message: dict[str, Any], smtp_config: dict[str, Any] | No
     return {"status": "sent", "to": str(message["to"])}
 
 
+def _module_status(name: str) -> dict[str, Any]:
+    found = importlib.util.find_spec(name) is not None
+    return {"status": "ok" if found else "missing", "module": name}
+
+
+def _playwright_chromium_status() -> dict[str, Any]:
+    setup_command = "python -m playwright install chromium"
+    if importlib.util.find_spec("playwright") is None:
+        return {
+            "status": "missing",
+            "reason": "playwright_missing",
+            "setup_command": 'pip install -e ".[browser]"',
+        }
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+    except Exception as exc:
+        return {
+            "status": "warning",
+            "reason": type(exc).__name__,
+            "error": str(exc)[:200],
+            "setup_command": setup_command,
+        }
+    if not executable.exists():
+        return {
+            "status": "missing",
+            "reason": "chromium_missing",
+            "executable": str(executable),
+            "setup_command": setup_command,
+        }
+    return {"status": "ok", "executable": str(executable)}
+
+
+def _cli_tool_status(command: str) -> dict[str, Any]:
+    path = shutil.which(command)
+    return {
+        "status": "ok" if path else "missing",
+        "command": command,
+        "path": path or "",
+    }
+
+
+def _legacy_onboarding_question(question_id: str) -> dict[str, str] | None:
+    legacy = {
+        "skills": {
+            "id": "skills",
+            "title": "Skills",
+            "prompt": "List strong technical skills that can be truthfully used in resumes.",
+            "category": "skills",
+        },
+        "constraints": {
+            "id": "constraints",
+            "title": "Constraints",
+            "prompt": "List salary, location, remote, schedule, and role constraints.",
+            "category": "constraints",
+        },
+    }
+    return legacy.get(str(question_id or ""))
+
+
 class WorkHunter:
     def __init__(self, root: str | Path | None = None):
         self.root = Path(root) if root is not None else Path.cwd()
@@ -686,13 +1338,249 @@ class WorkHunter:
             save_config(self.config_path, self.config)
         return self.config_path
 
+    def init_report(
+        self,
+        *,
+        check: bool = False,
+        refresh_docs: bool = False,
+        with_ai: bool = False,
+        with_browser: bool = False,
+        import_wo: str | None = None,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        path = self.config_path if dry_run else self.init(overwrite=force)
+        docs: list[str] = []
+        agent_assets: dict[str, Any] | None = None
+        if refresh_docs:
+            if not dry_run:
+                docs = self._write_product_docs()
+            agent_assets = write_agent_orchestrator_assets(self.root, dry_run=dry_run)
+        report: dict[str, Any] = {
+            "status": "ok",
+            "config_path": str(path),
+            "check": bool(check),
+            "dry_run": bool(dry_run),
+            "force": bool(force),
+            "windows_only": True,
+            "ui": {
+                "host": self.config.get("ui", {}).get("host", "127.0.0.1"),
+                "port": self.config.get("ui", {}).get("port", 8787),
+            },
+            "docs": docs,
+            "readiness": self.setup_readiness(),
+        }
+        if agent_assets is not None:
+            report["agents"] = agent_assets
+        if with_ai:
+            report["ai"] = self.ai_status()
+        if with_browser:
+            report["browser"] = {
+                "playwright_profile_root": str(self.root / ".work-hunter" / "browser-profiles"),
+                "dry_run_required": True,
+            }
+        if import_wo:
+            report["import_wo"] = write_ops_import(import_wo, self.root, dry_run=dry_run)
+        return report
+
     def save_config(self, config: dict[str, Any]) -> None:
-        self.config = config
-        save_config(self.config_path, config)
+        self.config = preserve_masked_secrets(self.config, config)
+        save_config(self.config_path, self.config)
 
     def reset_config_defaults(self) -> None:
         self.config = default_config()
         save_config(self.config_path, self.config)
+
+    def _write_product_docs(self) -> list[str]:
+        product_dir = self.root / "docs" / "product"
+        product_dir.mkdir(parents=True, exist_ok=True)
+        docs = {
+            "WORK_HUNTER_VISION.md": (
+                "# Work Hunter Vision\n\n"
+                "Work Hunter is a private Windows-only local-first command center for one owner.\n"
+                "It is not a SaaS product, public bot, or mass spam tool. It runs on the owner's "
+                "machine, uses the owner's local accounts, and keeps operational data in local files "
+                "and SQLite.\n\n"
+                "The core product path is onboarding, candidate map, truthful resumes, vacancy search, "
+                "fit scoring, human cover letters, application preview, real auto-apply when a source "
+                "is certified, replay, reply tracking, and interview prep.\n\n"
+                "The main feature is real auto-apply, but it is always controlled by source maturity, "
+                "campaign policy, preview, audit, and safety gates.\n"
+            ),
+            "REQUIREMENTS.md": (
+                "# Requirements\n\n"
+                "- Windows 10/11 only.\n"
+                "- CLI and local web UI bind to 127.0.0.1 by default.\n"
+                "- Real apply is policy-gated, audited, and replayable.\n"
+                "- Codex/OpenCode auth cache files are never read, copied, logged, or exported.\n"
+                "- AI routes call official local runtimes or explicit API endpoints without scraping credentials.\n"
+                "- Candidate claims must be backed by confirmed facts before generated resume variants use them.\n"
+                "- Application packs must show resume variant, cover letter, short message, payload summary, risks, and preview.\n"
+                "- External sources must stay below real auto-apply until certified with tests, replay, redaction, and dry-run evidence.\n"
+            ),
+            "SOURCE_PRIORITY.md": (
+                "# Source Priority\n\n"
+                "1. HH\n"
+                "2. GeekJob\n"
+                "3. Habr\n"
+                "4. Getmatch\n"
+                "5. hirehi\n"
+                "6. careerspace\n"
+                "7. jabka.work\n\n"
+                "HH is the primary full-cycle source because it has the strongest official API, "
+                "resume, negotiation, and apply surface. GeekJob, Habr, Getmatch, hirehi, "
+                "careerspace, and jabka.work are priority external sources that must pass source "
+                "maturity before campaign auto-apply.\n"
+            ),
+            "SAFETY_CONTRACT.md": (
+                "# Safety Contract\n\n"
+                "- Never read Codex or OpenCode auth cache files.\n"
+                "- Never log tokens, cookies, auth headers, session ids, or API keys.\n"
+                "- Unknown forms, tests, captcha, and challenges block real apply.\n"
+                "- Non-certified source adapters cannot auto-apply.\n"
+                "- Real apply requires an enabled campaign policy, min_score pass, caps, valid session, preview, audit, replay, and kill switch off.\n"
+                "- The kill switch must stop planning and execution immediately.\n"
+                "- Dry-run and preview paths must never submit an application.\n"
+            ),
+        }
+        written: list[str] = []
+        for name, content in docs.items():
+            path = product_dir / name
+            path.write_text(content, encoding="utf-8")
+            written.append(str(path))
+        return written
+
+    def ai_status(self) -> dict[str, Any]:
+        return build_ai_status(self.config.get("ai", {}))
+
+    def ai_test(self, *, route: str | None = None, prompt: str = "ping", dry_run: bool = False) -> dict[str, Any]:
+        result = run_ai_test(
+            self.config.get("ai", {}),
+            route=route,
+            prompt=prompt,
+            dry_run=dry_run,
+        )
+        return mask_secrets(result)
+
+    def doctor_report(self) -> dict[str, Any]:
+        checks = {
+            "python": {
+                "status": "ok" if sys.version_info >= (3, 11) else "error",
+                "version": platform.python_version(),
+                "executable": sys.executable,
+            },
+            "sqlite": {
+                "status": "ok",
+                "version": sqlite3.sqlite_version,
+                "database_path": str(database_path(self.root)),
+            },
+            "config": {
+                "status": "ok" if self.config_path.exists() else "missing",
+                "path": str(self.config_path),
+            },
+            "data_dir": {
+                "status": "ok" if self.config_path.parent.exists() else "missing",
+                "path": str(self.config_path.parent),
+            },
+            "ui_bind": {
+                "status": "ok" if self.config.get("ui", {}).get("host", "127.0.0.1") == "127.0.0.1" else "warning",
+                "host": self.config.get("ui", {}).get("host", "127.0.0.1"),
+                "port": self.config.get("ui", {}).get("port", 8787),
+            },
+        }
+        status = "ok" if all(item["status"] in {"ok", "missing"} for item in checks.values()) else "warning"
+        return {
+            "status": status,
+            "windows_only": True,
+            "platform": platform.platform(),
+            "checks": checks,
+        }
+
+    def setup_readiness(self) -> dict[str, Any]:
+        doctor = self.doctor_report()
+        checks = doctor["checks"]
+        ai = self.ai_status()
+        profile_root = self.root / ".work-hunter" / "browser-profiles"
+        hh_agent = self.config.get("hh_agent") or {}
+        return {
+            "environment": {
+                "windows_only": True,
+                "platform": platform.platform(),
+                "python": checks["python"]["status"],
+                "python_version": checks["python"]["version"],
+                "sqlite": checks["sqlite"]["status"],
+                "sqlite_version": checks["sqlite"]["version"],
+                "config": checks["config"]["status"],
+                "data_dir": checks["data_dir"]["status"],
+                "ui_bind": checks["ui_bind"],
+                "dependencies": {
+                    "requests": _module_status("requests"),
+                    "mcp": _module_status("mcp"),
+                    "starlette": _module_status("starlette"),
+                },
+            },
+            "ai_runtime": {
+                **ai,
+                "cli_tools": {
+                    "codex": _cli_tool_status("codex"),
+                    "opencode": _cli_tool_status("opencode"),
+                },
+            },
+            "browser": {
+                "profile_root": str(profile_root),
+                "profile_root_exists": profile_root.exists(),
+                "playwright": _module_status("playwright"),
+                "chromium": _playwright_chromium_status(),
+                "sessions": {
+                    "profile_root": str(profile_root),
+                    "status": "ready" if profile_root.exists() else "missing",
+                },
+            },
+            "candidate": self.candidate_completeness(),
+            "sources": self.source_capabilities(),
+            "implementation": self.implementation_readiness(),
+            "safety": {
+                "redaction_scan": "available",
+                "audit_db": "ok" if database_path(self.root).exists() else "missing",
+                "kill_switch": "paused" if bool(hh_agent.get("paused", False)) else "active",
+            },
+        }
+
+    def implementation_readiness(self) -> dict[str, Any]:
+        return {
+            "source_campaign_apply": {
+                "status": "ready_for_certified_sources",
+                "ready_sources": ["hh", "certified_external_sources"],
+                "ready": [
+                    "hh_campaign_runner",
+                    "external_campaign_runner",
+                    "source_maturity_policy",
+                    "external_apply_evidence_gate",
+                    "source_certification_audit",
+                    "source_certification_promotion",
+                    "source_certification_matrix",
+                    "source_external_apply_target_config",
+                ],
+                "gaps": [],
+                "operational_requirements": ["per_source_certification_required"],
+            },
+            "browser_session_lab": {
+                "status": "ready",
+                "ready": ["profile_paths", "har_import", "form_mapping", "dry_run_plan", "playwright_fill_screenshot_executor"],
+                "gaps": [],
+                "operational_requirements": ["manual_login_or_har_session_required_for_authenticated_sources"],
+            },
+            "ai_runtime": {
+                "status": "ready",
+                "ready": ["runtime_registry_package", "route_status", "direct_chat_completion", "cli_route_detection"],
+                "gaps": [],
+            },
+            "resume_exports": {
+                "status": "ready",
+                "ready": ["markdown_export", "docx_export", "pdf_export", "pdf_docx_import", "ats_metadata"],
+                "gaps": [],
+            },
+        }
 
     def sync_sources(
         self,
@@ -745,15 +1633,402 @@ class WorkHunter:
         return count
 
     def source_capabilities(self) -> dict[str, dict[str, Any]]:
-        sources = self.config.get("sources") or {}
-        result: dict[str, dict[str, Any]] = {}
-        for source_name, capabilities in SOURCE_CAPABILITIES.items():
-            source_config = sources.get(source_name) or {}
-            result[source_name] = {
-                **capabilities,
-                "enabled": bool(source_config.get("enabled", False)),
+        return source_status_report(self.config.get("sources") or {})
+
+    def source_certification_audit(
+        self,
+        source: str,
+        *,
+        level: int = 5,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source_name = str(source or "").strip().lower().replace("-", "_")
+        requested_level = max(0, min(6, int(level or 0)))
+        external_apply = _external_apply_config(self.config, source_name)
+        configured_evidence = {}
+        for key in ("evidence", "certification"):
+            value = external_apply.get(key)
+            if isinstance(value, dict):
+                configured_evidence.update(mask_secrets(value))
+        local_evidence = self._source_certification_local_evidence(source_name)
+        provided_evidence = mask_secrets(dict(evidence or {}))
+        requirement_evidence = {
+            requirement: _missing_certification_evidence(requirement)
+            for requirement in ("tests", "replay", "redaction", "dry_run")
+        }
+        requirement_evidence.update(
+            {
+                key: value
+                for key, value in configured_evidence.items()
+                if key == "tests" and key in requirement_evidence
             }
-        return result
+        )
+        requirement_evidence.update(local_evidence)
+        requirement_evidence.update(
+            {
+                key: value
+                for key, value in provided_evidence.items()
+                if key == "tests" and key in requirement_evidence
+            }
+        )
+        missing: list[str] = []
+        session = str(external_apply.get("session") or "")
+        url = str(external_apply.get("url") or "")
+        if not session:
+            missing.append("session")
+        if not url:
+            missing.append("url")
+        for requirement, value in requirement_evidence.items():
+            if not _certification_evidence_present(value):
+                missing.append(requirement)
+        ready = not missing
+        certification_context = _source_certification_context(
+            source_name,
+            session=session,
+            url=url,
+            evidence=requirement_evidence,
+        )
+        promotion_payload = None
+        if ready:
+            promotion_external_apply = {
+                **external_apply,
+                "certified": requested_level >= 5,
+                "level": requested_level,
+                "session": session,
+                "url": url,
+                "evidence": requirement_evidence,
+                "certification_context": certification_context,
+            }
+            promotion_payload = {
+                "source": source_name,
+                "external_apply": promotion_external_apply,
+            }
+        return {
+            "source": source_name,
+            "requested_level": requested_level,
+            "ready": ready,
+            "missing": missing,
+            "evidence": {
+                "session": {"status": "present", "name": session} if session else _missing_certification_evidence("session"),
+                "url": {"status": "present", "url": url} if url else _missing_certification_evidence("url"),
+                **requirement_evidence,
+            },
+            "certification_context": certification_context,
+            "promotion_payload": promotion_payload,
+            "readiness": self.source_capabilities().get(source_name) or {},
+        }
+
+    def source_certification_matrix(
+        self,
+        *,
+        level: int = 5,
+        sources: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        requested_level = max(0, min(6, int(level or 0)))
+        raw_sources = sources or EXTERNAL_APPLY_CERTIFICATION_SOURCE_NAMES
+        source_names: list[str] = []
+        for source in raw_sources:
+            source_name = str(source or "").strip().lower().replace("-", "_")
+            if source_name and source_name not in source_names:
+                source_names.append(source_name)
+
+        evidence_by_source = evidence or {}
+        audits: dict[str, Any] = {}
+        missing_by_source: dict[str, list[str]] = {}
+        promotion_payloads: dict[str, Any] = {}
+        ready_count = 0
+        for source_name in source_names:
+            source_evidence = evidence_by_source.get(source_name)
+            if source_evidence is None:
+                source_evidence = evidence_by_source.get(source_name.replace("_", "-"))
+            audit = self.source_certification_audit(
+                source_name,
+                level=requested_level,
+                evidence=dict(source_evidence) if isinstance(source_evidence, dict) else {},
+            )
+            audits[source_name] = audit
+            if audit.get("ready"):
+                ready_count += 1
+                if audit.get("promotion_payload"):
+                    promotion_payloads[source_name] = audit["promotion_payload"]
+            else:
+                missing_by_source[source_name] = list(audit.get("missing") or [])
+
+        total = len(source_names)
+        blocked_count = total - ready_count
+        status = "ready" if blocked_count == 0 else "partial" if ready_count else "blocked"
+        return {
+            "status": status,
+            "requested_level": requested_level,
+            "sources": audits,
+            "summary": {"total": total, "ready": ready_count, "blocked": blocked_count},
+            "missing_by_source": missing_by_source,
+            "promotion_payloads": promotion_payloads,
+        }
+
+    def source_certification_plan(
+        self,
+        *,
+        level: int = 5,
+        sources: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        matrix = self.source_certification_matrix(level=level, sources=sources, evidence=evidence)
+        planned_sources: dict[str, Any] = {}
+        for source_name, audit in (matrix.get("sources") or {}).items():
+            missing = list(audit.get("missing") or [])
+            planned_sources[source_name] = {
+                "ready": bool(audit.get("ready")),
+                "missing": missing,
+                "actions": [
+                    _source_certification_action(source_name, requirement)
+                    for requirement in missing
+                ],
+                "promotion_payload_ready": bool(audit.get("promotion_payload")),
+            }
+        return {
+            **matrix,
+            "sources": planned_sources,
+            "matrix": matrix,
+        }
+
+    def record_source_certification_evidence(
+        self,
+        source: str,
+        *,
+        evidence: dict[str, Any] | None = None,
+        level: int = 5,
+    ) -> dict[str, Any]:
+        source_name = str(source or "").strip().lower().replace("-", "_")
+        raw_evidence = evidence or {}
+        recorded_evidence = {
+            key: mask_secrets(value)
+            for key, value in raw_evidence.items()
+            if key in EXTERNAL_APPLY_EVIDENCE_REQUIREMENTS and isinstance(value, dict)
+        }
+        config = dict(self.config)
+        sources = dict(config.get("sources") or {})
+        source_config = dict(sources.get(source_name) or {})
+        external_apply = dict(source_config.get("external_apply") or {})
+        existing_evidence = dict(external_apply.get("evidence") or {})
+        existing_evidence.update(recorded_evidence)
+        external_apply["evidence"] = existing_evidence
+        source_config["external_apply"] = external_apply
+        sources[source_name] = source_config
+        config["sources"] = sources
+        self.save_config(config)
+        audit = self.source_certification_audit(source_name, level=level)
+        return {
+            "status": "recorded" if recorded_evidence else "noop",
+            "source": source_name,
+            "recorded": sorted(recorded_evidence),
+            "evidence": recorded_evidence,
+            "audit": audit,
+            "capabilities": self.source_capabilities().get(source_name) or {},
+        }
+
+    def configure_source_external_apply_target(
+        self,
+        source: str,
+        *,
+        session: str = "",
+        url: str = "",
+        method: str = "POST",
+        payload_template: dict[str, Any] | None = None,
+        level: int = 5,
+    ) -> dict[str, Any]:
+        source_name = str(source or "").strip().lower().replace("-", "_")
+        normalized_method = str(method or "POST").strip().upper() or "POST"
+        template = mask_secrets(payload_template or {})
+        config = dict(self.config)
+        sources = dict(config.get("sources") or {})
+        source_config = dict(sources.get(source_name) or {})
+        external_apply = dict(source_config.get("external_apply") or {})
+        previous_target = _external_apply_target_fingerprint(external_apply)
+        was_certified = bool(external_apply.get("certified"))
+        external_apply.update(
+            {
+                "session": str(session or "").strip(),
+                "url": str(url or "").strip(),
+                "method": normalized_method,
+                "payload_template": template,
+            }
+        )
+        certification_invalidated = was_certified and previous_target != _external_apply_target_fingerprint(external_apply)
+        if certification_invalidated:
+            for key in (
+                "certified",
+                "evidence",
+                "certification",
+                "certification_context",
+                "certification_hash",
+            ):
+                external_apply.pop(key, None)
+        source_config["external_apply"] = external_apply
+        sources[source_name] = source_config
+        config["sources"] = sources
+        self.save_config(config)
+        audit = self.source_certification_audit(source_name, level=level)
+        target = {
+            "session": external_apply.get("session") or "",
+            "url": external_apply.get("url") or "",
+            "method": external_apply.get("method") or "POST",
+            "payload_template": external_apply.get("payload_template") or {},
+        }
+        return {
+            "status": "configured",
+            "source": source_name,
+            "target": mask_secrets(target),
+            "certification_invalidated": certification_invalidated,
+            "audit": audit,
+            "capabilities": self.source_capabilities().get(source_name) or {},
+        }
+
+    def record_source_redaction_scan(
+        self,
+        source: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        text: str = "",
+        level: int = 5,
+    ) -> dict[str, Any]:
+        source_name = str(source or "").strip().lower().replace("-", "_")
+        raw_scan = {"payload": payload or {}, "text": str(text or "")}
+        raw_serialized = json.dumps(raw_scan, ensure_ascii=False, sort_keys=True, default=str)
+        redacted = mask_secrets(redact_secrets(raw_scan))
+        redacted_serialized = json.dumps(redacted, ensure_ascii=False, sort_keys=True, default=str)
+        markers = sorted(find_secret_markers(raw_serialized))
+        changed = raw_serialized != redacted_serialized or bool(markers)
+        event_id = self.record_replay_event(
+            source=source_name,
+            event_type="external_apply_redaction_scan",
+            title="External apply redaction scan",
+            summary="passed",
+            data={
+                "status": "passed",
+                "changed": changed,
+                "markers": markers,
+                "redacted": redacted,
+            },
+        )
+        audit = self.source_certification_audit(source_name, level=level)
+        return {
+            "status": "recorded",
+            "source": source_name,
+            "event_id": event_id,
+            "findings": {"changed": changed, "markers": markers},
+            "redacted": redacted,
+            "audit": audit,
+            "capabilities": self.source_capabilities().get(source_name) or {},
+        }
+
+    def _source_certification_local_evidence(self, source: str) -> dict[str, Any]:
+        events = self.storage.list_replay_events(source=source)
+        evidence: dict[str, Any] = {}
+        dry_run = _latest_event_matching(
+            [
+                event
+                for event in events
+                if event.get("event_type") == "external_apply_dry_run"
+                and (event.get("data") or {}).get("status") == "dry_run_ready"
+                and (event.get("data") or {}).get("submit") is False
+            ],
+            "external_apply_dry_run",
+        )
+        if dry_run is None:
+            dry_run = _latest_event_matching(
+                [
+                    event
+                    for event in events
+                    if event.get("event_type") == "browser_lab_form_execute_dry_run"
+                    and (event.get("data") or {}).get("status") == "executed_dry_run"
+                    and (event.get("data") or {}).get("submit") is False
+                    and ((event.get("data") or {}).get("executor") or {}).get("status") == "ok"
+                ],
+                "browser_lab_form_execute_dry_run",
+            )
+        if dry_run is not None:
+            dry_run_data = dry_run.get("data") or {}
+            dry_run_screenshots = dry_run_data.get("screenshots") or (dry_run_data.get("executor") or {}).get("screenshots")
+            dry_run_context = _dry_run_certification_context(dry_run_data)
+            evidence["dry_run"] = {
+                "status": str(dry_run_data.get("status") or "dry_run_ready"),
+                "event_id": dry_run["id"],
+                "event_type": dry_run["event_type"],
+                "created_at": dry_run["created_at"],
+                **dry_run_context,
+            }
+            if dry_run_screenshots:
+                evidence["dry_run"]["screenshots"] = mask_secrets(dry_run_screenshots)
+            evidence["replay"] = {
+                "status": "passed",
+                "event_id": dry_run["id"],
+                "event_type": dry_run["event_type"],
+                "created_at": dry_run["created_at"],
+                **dry_run_context,
+            }
+        redaction = _latest_event_matching(
+            [
+                event
+                for event in events
+                if event.get("event_type") in {"redaction_scan", "external_apply_redaction_scan"}
+                and _certification_evidence_present(event.get("data") or {})
+            ],
+            "redaction_scan",
+        )
+        if redaction is None:
+            redaction = _latest_event_matching(
+                [
+                    event
+                    for event in events
+                    if event.get("event_type") == "external_apply_redaction_scan"
+                    and _certification_evidence_present(event.get("data") or {})
+                ],
+                "external_apply_redaction_scan",
+            )
+        if redaction is not None:
+            evidence["redaction"] = {
+                "status": "passed",
+                "event_id": redaction["id"],
+                "event_type": redaction["event_type"],
+                "created_at": redaction["created_at"],
+            }
+        return evidence
+
+    def promote_source_certification(
+        self,
+        source: str,
+        *,
+        level: int = 5,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        audit = self.source_certification_audit(source, level=level, evidence=evidence)
+        source_name = str(audit["source"])
+        if not audit.get("ready") or not audit.get("promotion_payload"):
+            return {
+                "status": "blocked",
+                "reason": "source_certification_evidence_missing",
+                "source": source_name,
+                "level": int(audit.get("requested_level") or 0),
+                "audit": audit,
+                "capabilities": self.source_capabilities().get(source_name) or {},
+            }
+        config = dict(self.config)
+        sources = dict(config.get("sources") or {})
+        source_config = dict(sources.get(source_name) or {})
+        source_config["external_apply"] = dict(audit["promotion_payload"]["external_apply"])
+        sources[source_name] = source_config
+        config["sources"] = sources
+        self.save_config(config)
+        capabilities = self.source_capabilities().get(source_name) or {}
+        return {
+            "status": "certified",
+            "source": source_name,
+            "level": int(capabilities.get("level") or audit.get("requested_level") or 0),
+            "audit": audit,
+            "capabilities": capabilities,
+        }
 
     def list_jobs(
         self,
@@ -794,6 +2069,40 @@ class WorkHunter:
         draft = LetterDraft(job_id=job_id, body=body)
         self.storage.save_letter(draft)
         return draft
+
+    def cover_letter_preview(
+        self,
+        job_id: int,
+        *,
+        template: str = "A",
+        use_for_campaign: bool = False,
+    ) -> dict[str, Any]:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        preview = human_cover_letter_variants(
+            job,
+            active_profile(self.config),
+            selected_template=template,
+            use_for_campaign=use_for_campaign,
+        )
+        campaign_letter = dict(preview["campaign_letter"])
+        if use_for_campaign:
+            draft = LetterDraft(job_id=job_id, body=str(campaign_letter["body"]))
+            self.storage.save_letter(draft)
+            self.record_replay_event(
+                job_id=job_id,
+                source=job.source,
+                event_type="cover_letter_generated",
+                title="Сгенерировано сопроводительное",
+                summary=f"Template: {campaign_letter['template']}, {len(campaign_letter['body'].split())} words",
+                data={
+                    "template": campaign_letter["template"],
+                    "style": campaign_letter["name"],
+                    "use_for_campaign": True,
+                },
+            )
+        return preview
 
     def chat(self, messages: list[dict[str, str]], job_id: int | None = None) -> str:
         """Chat with AI assistant, optionally providing job context."""
@@ -883,6 +2192,1044 @@ class WorkHunter:
             "available": list(profiles.keys()),
             "data": profile_data,
         }
+
+    def onboarding_questions(self) -> list[dict[str, Any]]:
+        return build_onboarding_questions()
+
+    def answer_onboarding(
+        self,
+        question_id: str,
+        answer: str,
+        *,
+        source: str = "manual",
+    ) -> dict[str, Any]:
+        question = next((item for item in self.onboarding_questions() if item["id"] == question_id), None)
+        if question is None:
+            question = _legacy_onboarding_question(question_id)
+        if question is None:
+            raise ValueError(f"Unknown onboarding question: {question_id}")
+        profile_id = str(self.config.get("profile") or "default")
+        fact_id = self.storage.save_candidate_fact(
+            profile_id=profile_id,
+            category=str(question["category"]),
+            key=str(question_id),
+            value=answer,
+            confidence=0.7,
+            source=source,
+            status="unconfirmed",
+            evidence={"question": question["prompt"]},
+        )
+        fact = self.storage.list_candidate_facts(profile_id=profile_id)[-1]
+        self.record_replay_event(
+            source="candidate",
+            event_type="candidate_fact_created",
+            title="Candidate fact captured",
+            data={"fact": fact},
+        )
+        return {"status": "recorded", "facts": [{"id": fact_id, **fact}]}
+
+    def confirm_candidate_fact(self, fact_id: int) -> dict[str, Any]:
+        fact = self.storage.update_candidate_fact_status(fact_id, "confirmed")
+        if fact is None:
+            raise ValueError(f"Candidate fact {fact_id} not found")
+        self.record_replay_event(
+            source="candidate",
+            event_type="candidate_fact_confirmed",
+            title="Candidate fact confirmed",
+            data={"fact": fact},
+        )
+        return fact
+
+    def candidate_facts(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        return self.storage.list_candidate_facts(
+            profile_id=str(self.config.get("profile") or "default"),
+            status=status,
+        )
+
+    def _candidate_config_facts(self, existing: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        about = self.config.get("about") or {}
+        profile = active_profile(self.config)
+        profile_id = str(self.config.get("profile") or "default")
+        existing_keys = {str(fact.get("key") or "") for fact in existing}
+        facts: list[dict[str, Any]] = []
+
+        skills = [
+            str(skill).strip()
+            for skill in about.get("all_skills") or []
+            if str(skill).strip()
+        ]
+        experience = [
+            item
+            for item in about.get("experience") or []
+            if isinstance(item, dict) and any(str(value).strip() for value in item.values() if value)
+        ]
+        has_candidate_baseline = bool(skills or experience)
+        if not has_candidate_baseline:
+            return facts
+
+        if skills and not existing_keys.intersection({"skills", "stack"}):
+            facts.append(
+                {
+                    "id": "config:skills",
+                    "profile_id": profile_id,
+                    "category": "profile",
+                    "key": "skills",
+                    "value": ", ".join(skills),
+                    "confidence": 0.9,
+                    "source": "config_about",
+                    "status": "confirmed",
+                    "evidence": {"config_path": "about.all_skills"},
+                }
+            )
+        if experience and "experience" not in existing_keys:
+            facts.append(
+                {
+                    "id": "config:experience",
+                    "profile_id": profile_id,
+                    "category": "profile",
+                    "key": "experience",
+                    "value": experience,
+                    "confidence": 0.9,
+                    "source": "config_about",
+                    "status": "confirmed",
+                    "evidence": {"config_path": "about.experience"},
+                }
+            )
+        if "constraints" not in existing_keys:
+            constraints = _candidate_profile_constraints(profile)
+            if constraints:
+                facts.append(
+                    {
+                        "id": "config:constraints",
+                        "profile_id": profile_id,
+                        "category": "preferences",
+                        "key": "constraints",
+                        "value": constraints,
+                        "confidence": 0.8,
+                        "source": "config_profile",
+                        "status": "confirmed",
+                        "evidence": {"config_path": f"profiles.{profile_id}"},
+                    }
+                )
+        return facts
+
+    def _candidate_evidence_facts(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        stored = self.candidate_facts()
+        combined = [*stored, *self._candidate_config_facts(stored)]
+        if status is None:
+            return combined
+        return [fact for fact in combined if str(fact.get("status") or "") == status]
+
+    def candidate_completeness(self) -> dict[str, Any]:
+        facts = self._candidate_evidence_facts()
+        return candidate_completeness_from_facts(facts)
+
+    def candidate_map(self) -> dict[str, Any]:
+        return build_candidate_map(
+            profile=active_profile(self.config),
+            facts=self._candidate_evidence_facts(),
+            completeness=self.candidate_completeness(),
+        )
+
+    def import_resume(self, path: str | Path, *, activate: bool = False) -> dict[str, Any]:
+        imported = import_resume_file(path)
+        if imported.get("status") != "imported":
+            return imported
+        profile_id = str(self.config.get("profile") or "default")
+        resume_id = self.storage.save_resume(
+            Resume(
+                name=str(imported["name"]),
+                body=str(imported["body"]),
+                profile_id=profile_id,
+                is_active=activate,
+                source_format=str(imported["source_format"]),
+                imported_from=str(imported["imported_from"]),
+                canonical=dict(imported["canonical"]),
+            )
+        )
+        if activate:
+            self.storage.set_active_resume(resume_id)
+        result = {
+            "status": "imported",
+            "id": resume_id,
+            "name": imported["name"],
+            "source_format": imported["source_format"],
+            "imported_from": imported["imported_from"],
+            "canonical": imported["canonical"],
+        }
+        self.record_replay_event(
+            source="resume",
+            event_type="resume_imported",
+            title="Resume imported",
+            data=result,
+        )
+        return result
+
+    def build_resume_variant(self, job_id: int, resume_id: int) -> dict[str, Any]:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        resume = self.storage.get_resume(resume_id)
+        if resume is None:
+            raise ValueError(f"Resume {resume_id} not found")
+        confirmed = self._candidate_evidence_facts(status="confirmed")
+        if not confirmed:
+            return {
+                "status": "blocked",
+                "reason": "no_confirmed_candidate_facts",
+                "claims": [],
+            }
+        relevant = _relevant_candidate_facts(job, confirmed)
+        if not relevant:
+            relevant = confirmed[:3]
+        claims = [
+            {
+                "id": fact["id"],
+                "key": fact["key"],
+                "value": fact["value"],
+                "status": fact["status"],
+                "source": fact["source"],
+            }
+            for fact in relevant
+        ]
+        body = resume.body.rstrip()
+        body += "\n\nRelevant confirmed facts:\n"
+        for fact in relevant:
+            body += f"- {fact['value']}\n"
+        base_canonical = resume.canonical or canonicalize_resume_text(resume.body, source_name=resume.name)
+        canonical = merge_resume_canonical_with_claims(base_canonical, claims)
+        diff = diff_resume_text(resume.body, body)
+        metadata = build_resume_variant_metadata(
+            vacancy_text=f"{job.title} {job.description}",
+            canonical=canonical,
+            claims=claims,
+            diff=diff,
+        )
+        variant_id = self.storage.save_resume_variant(
+            base_resume_id=resume_id,
+            job_id=job_id,
+            profile_id=resume.profile_id,
+            name=f"{resume.name} / {job.title}",
+            body=body,
+            claims=claims,
+            status="ready",
+            policy_result={
+                "truthful_claims_only": True,
+                "diff": diff,
+                "canonical": canonical,
+                **metadata,
+            },
+        )
+        result = {
+            "status": "ready",
+            "id": variant_id,
+            "job_id": job_id,
+            "base_resume_id": resume_id,
+            "body": body,
+            "canonical": canonical,
+            "diff": diff,
+            "claims": claims,
+            **metadata,
+        }
+        self.record_replay_event(
+            job_id=job_id,
+            source=job.source,
+            event_type="resume_variant_built",
+            title="Resume variant built",
+            data=result,
+        )
+        return result
+
+    def build_application_pack(
+        self,
+        job_id: int,
+        *,
+        resume_variant: dict[str, Any] | None = None,
+        cover_letter: str = "",
+        short_message: str = "",
+        source_payload: dict[str, Any] | None = None,
+        campaign_policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        payload = dict(source_payload or {})
+        policy = dict(campaign_policy or {})
+        resume_variant_data = resume_variant or {}
+        payload.setdefault("resume_variant_id", resume_variant_data.get("id") or "")
+        payload.setdefault("cover_letter_present", bool(str(cover_letter or "").strip()))
+        reasons = _application_pack_policy_reasons(job, payload, policy)
+        policy_status = "blocked_manual_review" if reasons else "ready"
+        preview = build_application_pack_preview(
+            job=job.to_dict(),
+            resume_variant=resume_variant_data,
+            cover_letter=cover_letter,
+            short_message=short_message,
+            source_payload=payload,
+        )
+        policy_result = build_application_policy(reasons)
+        safe_payload = safe_source_payload(payload)
+        resume_variant_id = str(resume_variant_data.get("id") or "")
+        pack_id = self.storage.save_application_pack(
+            job_id=job_id,
+            source=job.source,
+            resume_variant_id=resume_variant_id,
+            cover_letter=cover_letter,
+            short_message=short_message,
+            payload=payload,
+            preview=mask_secrets(preview),
+            policy_status=policy_status,
+            policy_reasons=reasons,
+        )
+        result = {
+            "id": pack_id,
+            "job_id": job_id,
+            "source": job.source,
+            "score": job.score.total_score if job.score else 0,
+            "resume_variant_id": resume_variant_id,
+            "cover_letter": cover_letter,
+            "short_message": short_message,
+            "source_payload": safe_payload,
+            "policy_status": policy_status,
+            "policy_reasons": reasons,
+            "policy": policy_result,
+            "preview": mask_secrets(preview),
+        }
+        self.record_replay_event(
+            job_id=job_id,
+            source=job.source,
+            event_type="application_pack_built",
+            title="Application pack built",
+            summary=policy_status,
+            data=result,
+        )
+        return result
+
+    def external_apply_dry_run(
+        self,
+        job_id: int,
+        *,
+        form: dict[str, Any],
+        resume_variant: dict[str, Any] | None = None,
+        cover_letter: str = "",
+        short_message: str = "",
+        campaign_policy: dict[str, Any] | None = None,
+        extra_answers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        if job.source == "hh":
+            return {
+                "status": "blocked",
+                "reason": "hh_uses_official_apply",
+                "message": "Use HH apply plan/confirm for official HH API vacancies.",
+                "submit": False,
+            }
+        target_fingerprint = _external_apply_target_fingerprint(_external_apply_config(self.config, job.source))
+        if form.get("fields"):
+            plan = self._external_apply_supplied_form_plan(job, job_id=job_id, cover_letter=cover_letter, form=form)
+        else:
+            plan = self.prepare_apply_plan(job_id, letter=cover_letter)
+            detected_form = ((plan.get("raw_result") or {}).get("apply") or {}).get("form")
+            if isinstance(detected_form, dict) and detected_form.get("fields"):
+                form = detected_form
+        source_payload = _external_form_source_payload(form)
+        preview_policy = {
+            "enabled": True,
+            "real_apply": True,
+            "require_resume_variant": False,
+            **(campaign_policy or {}),
+        }
+        pack = self.build_application_pack(
+            job_id,
+            resume_variant=resume_variant or {},
+            cover_letter=cover_letter,
+            short_message=short_message,
+            source_payload=source_payload,
+            campaign_policy=preview_policy,
+        )
+        if not form.get("fields"):
+            reason = "external_apply_form_not_detected"
+            risk_flags = list(
+                dict.fromkeys(
+                    [
+                        *list(plan.get("risk_flags") or []),
+                        reason,
+                        *list(pack.get("policy_reasons") or []),
+                    ]
+                )
+            )
+            external_url = str(plan.get("external_url") or job.url)
+            result = {
+                "status": "blocked_manual_review",
+                "reason": reason,
+                "job_id": job_id,
+                "source": job.source,
+                "external_url": external_url,
+                "submit": False,
+                "requires_manual_confirm": True,
+                "risk_flags": risk_flags,
+                "plan": plan,
+                "application_pack": pack,
+                "external_apply_target_fingerprint": target_fingerprint,
+                "dry_run": {
+                    "status": "blocked_manual_review",
+                    "reason": reason,
+                    "source": job.source,
+                    "form_url": external_url,
+                    "submit": False,
+                    "actions": [],
+                    "risk_flags": ["unknown_form"],
+                    "screenshots": {},
+                },
+                "actions": [{"type": "open_url", "url": external_url}],
+                "screenshots": {},
+            }
+            self.record_replay_event(
+                job_id=job_id,
+                source=job.source,
+                event_type="external_apply_dry_run",
+                title="External apply dry run",
+                summary="blocked_manual_review",
+                data=result,
+            )
+            return mask_secrets(result)
+        persona = persona_from_profile(active_profile(self.config), self.config.get("about") or {}).to_dict()
+        dry_run = self.browser_lab_dry_run_form_fill(
+            form,
+            source=job.source,
+            persona=persona,
+            resume=resume_variant or {},
+            vacancy=job.to_dict(),
+            extra_answers={
+                **(extra_answers or {}),
+                "cover_letter": cover_letter,
+                "short_message": short_message,
+            },
+        )
+        risk_flags = list(
+            dict.fromkeys(
+                [
+                    *list(plan.get("risk_flags") or []),
+                    *list(dry_run.get("risk_flags") or []),
+                    *list(pack.get("policy_reasons") or []),
+                ]
+            )
+        )
+        status = "dry_run_ready"
+        if pack.get("policy_status") != "ready" or dry_run.get("status") != "dry_run_ready":
+            status = "blocked_manual_review"
+        result = {
+            "status": status,
+            "job_id": job_id,
+            "source": job.source,
+            "external_url": plan.get("external_url") or job.url,
+            "submit": False,
+            "requires_manual_confirm": True,
+            "risk_flags": risk_flags,
+            "plan": plan,
+            "application_pack": pack,
+            "external_apply_target_fingerprint": target_fingerprint,
+            "dry_run": dry_run,
+            "actions": dry_run.get("actions") or [],
+            "screenshots": dry_run.get("screenshots") or {},
+        }
+        self.record_replay_event(
+            job_id=job_id,
+            source=job.source,
+            event_type="external_apply_dry_run",
+            title="External apply dry run",
+            summary=status,
+            data=result,
+        )
+        return mask_secrets(result)
+
+    def _external_apply_supplied_form_plan(
+        self,
+        job: Job,
+        *,
+        job_id: int,
+        cover_letter: str,
+        form: dict[str, Any],
+    ) -> dict[str, Any]:
+        apply_meta = {
+            "status": "supplied",
+            "detector": "user_supplied_form",
+            "form_signature": str(form.get("form_signature") or _external_form_source_payload(form).get("form_signature") or ""),
+            "form": form,
+        }
+        return ApplyPlan(
+            job_id=job_id,
+            source=job.source,
+            mode="external_page",
+            letter=cover_letter,
+            risk_flags=["external_manual_apply", "source_apply_form_supplied"],
+            status="external",
+            external_url=str(form.get("form_url") or job.url),
+            raw_result={
+                "message": "External apply form was supplied by the caller; no source discovery was performed.",
+                "apply": apply_meta,
+                "next_actions": [{"type": "dry_run_form_fill", "status": "ready"}],
+            },
+        ).to_dict()
+
+    def confirm_external_apply(
+        self,
+        job_id: int,
+        *,
+        form: dict[str, Any],
+        resume_variant: dict[str, Any] | None = None,
+        cover_letter: str = "",
+        short_message: str = "",
+        campaign_policy: dict[str, Any] | None = None,
+        extra_answers: dict[str, str] | None = None,
+        confirm: bool = False,
+        submit: bool = False,
+        campaign_policy_apply: bool = False,
+        requester: Any | None = None,
+    ) -> dict[str, Any]:
+        if not confirm:
+            return {
+                "status": "blocked",
+                "reason": "confirmation_required",
+                "message": "Explicit confirmation is required before preparing an external apply handoff.",
+                "submit": False,
+            }
+        dry_run = self.external_apply_dry_run(
+            job_id,
+            form=form,
+            resume_variant=resume_variant,
+            cover_letter=cover_letter,
+            short_message=short_message,
+            campaign_policy=campaign_policy,
+            extra_answers=extra_answers,
+        )
+        if dry_run.get("status") != "dry_run_ready":
+            blocked = {
+                **dry_run,
+                "status": "blocked_manual_review",
+                "submit": False,
+                "final_submit_requires_user": True,
+            }
+            self.record_replay_event(
+                job_id=job_id,
+                source=str(dry_run.get("source") or ""),
+                event_type="external_apply_confirm_blocked",
+                title="External apply confirm blocked",
+                summary="blocked_manual_review",
+                data=blocked,
+            )
+            return blocked
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        if submit:
+            return self._submit_certified_external_apply(
+                job,
+                dry_run=dry_run,
+                resume_variant=resume_variant,
+                cover_letter=cover_letter,
+                short_message=short_message,
+                campaign_policy=campaign_policy or {},
+                extra_answers=extra_answers or {},
+                campaign_policy_apply=campaign_policy_apply,
+                requester=requester,
+            )
+        result = {
+            **dry_run,
+            "status": "manual_submit_ready",
+            "submit": False,
+            "final_submit_requires_user": True,
+            "message": "External form is prepared for manual review; Work Hunter will not press submit.",
+        }
+        self.storage.save_application(
+            job_id,
+            "external_manual_ready",
+            json.dumps(mask_secrets(result), ensure_ascii=False),
+        )
+        self.storage.set_status(job_id, "external_manual_ready", "External apply prepared; manual submit required")
+        self.record_replay_event(
+            job_id=job_id,
+            source=str(result.get("source") or ""),
+            event_type="external_apply_confirmed",
+            title="External apply prepared",
+            summary="manual_submit_ready",
+            data=result,
+        )
+        return mask_secrets(result)
+
+    def _submit_certified_external_apply(
+        self,
+        job: Job,
+        *,
+        dry_run: dict[str, Any],
+        resume_variant: dict[str, Any] | None,
+        cover_letter: str,
+        short_message: str,
+        campaign_policy: dict[str, Any],
+        extra_answers: dict[str, str],
+        campaign_policy_apply: bool = False,
+        requester: Any | None = None,
+    ) -> dict[str, Any]:
+        job_id = int(job.id or 0)
+        external_apply = _external_apply_config(self.config, job.source)
+        readiness = self.source_capabilities().get(job.source) or {}
+        level = int(readiness.get("level") or _external_apply_level(external_apply))
+        pause_operation = "external_campaign_apply" if campaign_policy_apply else "external_apply_submit"
+        pause_block = self._campaign_pause_block(operation=pause_operation)
+        if pause_block is not None:
+            blocked = {**pause_block, "source": job.source, "submit": False}
+            self.record_replay_event(
+                job_id=job_id,
+                source=job.source,
+                event_type="external_apply_submit_blocked",
+                title="External apply submit blocked",
+                summary=str(blocked.get("reason") or ""),
+                data=blocked,
+            )
+            return blocked
+        if campaign_policy_apply:
+            if not readiness.get("can_campaign_apply"):
+                return self._external_submit_blocked(
+                    job,
+                    reason=_external_readiness_block_reason(
+                        readiness,
+                        fallback="external_source_requires_l6_campaign_certification",
+                    ),
+                    level=level,
+                    campaign_policy_apply=True,
+                    readiness=readiness,
+                )
+            if not (campaign_policy.get("enabled") and campaign_policy.get("real_apply")):
+                return self._external_submit_blocked(
+                    job,
+                    reason="external_campaign_policy_required",
+                    level=level,
+                    campaign_policy_apply=True,
+                    readiness=readiness,
+                )
+        elif not readiness.get("can_real_apply"):
+            return self._external_submit_blocked(
+                job,
+                reason=_external_readiness_block_reason(
+                    readiness,
+                    fallback="external_source_requires_l5_certification",
+                ),
+                level=level,
+                campaign_policy_apply=False,
+                readiness=readiness,
+            )
+        session = str(external_apply.get("session") or "")
+        url_template = str(external_apply.get("url") or "")
+        if not session:
+            return self._external_submit_blocked(
+                job,
+                reason="external_apply_session_missing",
+                level=level,
+                readiness=readiness,
+            )
+        if not url_template:
+            return self._external_submit_blocked(
+                job,
+                reason="external_apply_url_missing",
+                level=level,
+                readiness=readiness,
+            )
+        context = _external_apply_payload_context(
+            job,
+            resume_variant=resume_variant,
+            cover_letter=cover_letter,
+            short_message=short_message,
+            extra_answers=extra_answers,
+        )
+        method = str(external_apply.get("method") or "POST").upper()
+        url = _render_external_apply_template(url_template, context)
+        payload_template = external_apply.get("payload_template") or {}
+        payload = _render_external_apply_template(payload_template, context)
+        data = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        session_result = call_external_session(
+            self.root,
+            session,
+            method,
+            str(url),
+            data=data,
+            real=True,
+            unsafe_lab=True,
+            certified_apply=True,
+            requester=requester,
+            timeout=int(external_apply.get("timeout") or 20),
+        )
+        status = "external_applied" if session_result.get("status") == "ok" else "external_apply_failed"
+        result = {
+            **dry_run,
+            "status": status,
+            "submit": session_result.get("status") == "ok",
+            "final_submit_requires_user": False,
+            "campaign_policy_apply": bool(campaign_policy_apply),
+            "certified_apply": {
+                "level": level,
+                "session": session,
+                "method": method,
+                "url": str(url),
+            },
+            "request": session_result.get("request") or {},
+            "response": session_result.get("response") or {},
+            "raw_result": session_result,
+        }
+        event_type = "external_apply_submitted" if status == "external_applied" else "external_apply_submit_failed"
+        self.record_replay_event(
+            job_id=job_id,
+            source=job.source,
+            event_type=event_type,
+            title="External apply submitted" if status == "external_applied" else "External apply submit failed",
+            summary=status,
+            data=result,
+        )
+        if status == "external_applied":
+            self.storage.save_application(
+                job_id,
+                "external_applied",
+                json.dumps(mask_secrets(result), ensure_ascii=False),
+            )
+            self.storage.set_status(job_id, "applied", "External apply submitted through certified session")
+        return mask_secrets(result)
+
+    def _external_submit_blocked(
+        self,
+        job: Job,
+        *,
+        reason: str,
+        level: int,
+        campaign_policy_apply: bool = False,
+        readiness: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "status": "blocked",
+            "reason": reason,
+            "source": job.source,
+            "job_id": job.id,
+            "submit": False,
+            "campaign_policy_apply": bool(campaign_policy_apply),
+            "level": level,
+            "certified_apply": {"level": level},
+        }
+        if readiness is not None:
+            payload["readiness"] = readiness
+        self.record_replay_event(
+            job_id=job.id,
+            source=job.source,
+            event_type="external_apply_submit_blocked",
+            title="External apply submit blocked",
+            summary=reason,
+            data=payload,
+        )
+        return payload
+
+    def record_replay_event(
+        self,
+        *,
+        run_id: int | None = None,
+        job_id: int | None = None,
+        source: str = "",
+        event_type: str,
+        actor: str = "work_hunter",
+        title: str = "",
+        summary: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> int:
+        return self.storage.append_replay_event(
+            run_id=run_id,
+            job_id=job_id,
+            source=source,
+            event_type=event_type,
+            actor=actor,
+            title=str(mask_secrets(title)),
+            summary=str(mask_secrets(summary)),
+            data=mask_secrets(_with_replay_hashes(data or {})),
+        )
+
+    def replay_for_job(
+        self,
+        job_id: int,
+        *,
+        source: str | None = None,
+        event_type: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "events": mask_secrets(
+                self.storage.list_replay_events(job_id=job_id, source=source, event_type=event_type)
+            ),
+        }
+
+    def replay_for_run(
+        self,
+        run_id: int,
+        *,
+        source: str | None = None,
+        event_type: str | None = None,
+    ) -> dict[str, Any]:
+        run = self.storage.get_hh_campaign_run(run_id)
+        return {
+            "run": mask_secrets(run.to_dict() if run else {"id": run_id, "status": "missing"}),
+            "events": mask_secrets(
+                self.storage.list_replay_events(run_id=run_id, source=source, event_type=event_type)
+            ),
+        }
+
+    def export_replay_markdown(
+        self,
+        *,
+        job_id: int | None = None,
+        run_id: int | None = None,
+        source: str | None = None,
+        event_type: str | None = None,
+    ) -> str:
+        events = self.storage.list_replay_events(
+            job_id=job_id,
+            run_id=run_id,
+            source=source,
+            event_type=event_type,
+        )
+        lines = ["# Replay Timeline", ""]
+        if job_id is not None:
+            lines.append(f"- job_id: {job_id}")
+        if run_id is not None:
+            lines.append(f"- run_id: {run_id}")
+        lines.extend(
+            [
+                "- why selected: see selected/policy_decision events",
+                "- what generated/sent: see resume_variant_built/application_pack_built/apply events",
+                "- when sent/result: see created_at, summary, and status-bearing event data",
+                "",
+            ]
+        )
+        for event in events:
+            lines.append(f"## {event['created_at']} · {event['event_type']} · {event['title'] or 'event'}")
+            if event.get("summary"):
+                lines.append(str(event["summary"]))
+            data = mask_secrets(event.get("data") or {})
+            if data:
+                lines.append("```json")
+                lines.append(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+                lines.append("```")
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+    def security_status(self) -> dict[str, Any]:
+        audit_logs = self.storage.list_audit_logs(limit=1)
+        return {
+            "doctor": self.doctor_report(),
+            "ai": self.ai_status(),
+            "hh_auth": self.hh_auth_status(),
+            "source_capabilities": self.source_capabilities(),
+            "pending_approvals": len(self.list_hh_approvals(status="pending")),
+            "audit_logs": {
+                "count": len(self.storage.list_audit_logs()),
+                "latest_event_type": audit_logs[0]["event_type"] if audit_logs else "",
+            },
+        }
+
+    def record_audit_log(
+        self,
+        *,
+        event_type: str,
+        actor: str = "work_hunter",
+        data: dict[str, Any] | None = None,
+    ) -> int:
+        return self.storage.append_audit_log(
+            event_type=event_type,
+            actor=actor,
+            data=mask_secrets(data or {}),
+        )
+
+    def browser_lab_status(self, source: str) -> dict[str, Any]:
+        return build_browser_lab_status(self.root, source)
+
+    def browser_lab_setup(self, source: str) -> dict[str, Any]:
+        result = setup_browser_lab(self.root, source)
+        self.record_replay_event(
+            source=result["source"],
+            event_type="browser_lab_setup",
+            title="Browser lab profile prepared",
+            data=result,
+        )
+        return result
+
+    def browser_lab_open_login(self, source: str, *, login_url: str = "") -> dict[str, Any]:
+        result = plan_browser_lab_open_login(self.root, source, login_url=login_url)
+        self.record_replay_event(
+            source=result["source"],
+            event_type="browser_lab_open_login_planned",
+            title="Browser login planned",
+            data=result,
+        )
+        return result
+
+    def browser_lab_import_har(
+        self,
+        source: str,
+        har_path: str | Path,
+        *,
+        allowed_hosts: set[str] | None = None,
+    ) -> dict[str, Any]:
+        source_name = str(source or "").strip().lower().replace("-", "_")
+        hosts = set(allowed_hosts or _browser_lab_default_hosts(source_name, self.config))
+        result = import_browser_lab_har(self.root, source_name, har_path, allowed_hosts=hosts)
+        self.record_replay_event(
+            source=source_name,
+            event_type="browser_lab_har_imported",
+            title="Browser HAR imported",
+            data=result,
+        )
+        return result
+
+    def configure_source_external_apply_from_har(
+        self,
+        source: str,
+        har_path: str | Path,
+        *,
+        allowed_hosts: set[str] | None = None,
+        level: int = 5,
+    ) -> dict[str, Any]:
+        source_name = str(source or "").strip().lower().replace("-", "_")
+        imported = self.browser_lab_import_har(source_name, har_path, allowed_hosts=allowed_hosts)
+        if imported.get("status") != "imported":
+            return {
+                "status": "blocked",
+                "reason": imported.get("reason") or "har_import_blocked",
+                "source": source_name,
+                "import": imported,
+            }
+        endpoint = _best_external_apply_endpoint(imported.get("recon") or {})
+        if endpoint is None:
+            return {
+                "status": "blocked",
+                "reason": "apply_endpoint_not_found",
+                "source": source_name,
+                "import": {
+                    "status": imported.get("status"),
+                    "network_recorder": imported.get("network_recorder") or {},
+                },
+                "recon_summary": {
+                    "total_endpoints": (imported.get("recon") or {}).get("total_endpoints") or 0,
+                    "by_tag": (imported.get("recon") or {}).get("by_tag") or {},
+                },
+            }
+        payload_template, unknown_payload_keys = _external_apply_payload_template_from_post_data(
+            str(endpoint.get("post_data") or "")
+        )
+        configured = self.configure_source_external_apply_target(
+            source_name,
+            session=source_name,
+            url=str(endpoint.get("url") or ""),
+            method=str(endpoint.get("method") or "POST"),
+            payload_template=payload_template,
+            level=level,
+        )
+        result = {
+            "status": "configured",
+            "source": source_name,
+            "apply_endpoint": _safe_external_apply_endpoint_view(endpoint),
+            "payload_template": payload_template,
+            "unknown_payload_keys": unknown_payload_keys,
+            "configured": configured,
+            "import": {
+                "status": imported.get("status"),
+                "session": imported.get("session") or {},
+                "network_recorder": imported.get("network_recorder") or {},
+            },
+        }
+        self.record_replay_event(
+            source=source_name,
+            event_type="source_external_apply_target_configured_from_har",
+            title="External apply target configured from HAR",
+            summary="configured",
+            data=result,
+        )
+        return mask_secrets(result)
+
+    def browser_lab_map_form(
+        self,
+        form: dict[str, Any],
+        *,
+        source: str,
+        persona: dict[str, Any] | None = None,
+        resume: dict[str, Any] | None = None,
+        vacancy: dict[str, Any] | None = None,
+        extra_answers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return map_browser_lab_form(
+            form,
+            source=source,
+            persona=persona,
+            resume=resume,
+            vacancy=vacancy,
+            extra_answers=extra_answers,
+        )
+
+    def browser_lab_dry_run_form_fill(
+        self,
+        form: dict[str, Any],
+        *,
+        source: str,
+        persona: dict[str, Any] | None = None,
+        resume: dict[str, Any] | None = None,
+        vacancy: dict[str, Any] | None = None,
+        extra_answers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        result = build_browser_lab_dry_run_form_fill(
+            self.root,
+            form,
+            source=source,
+            persona=persona,
+            resume=resume,
+            vacancy=vacancy,
+            extra_answers=extra_answers,
+        )
+        self.record_replay_event(
+            source=str(source or ""),
+            event_type="browser_lab_form_dry_run",
+            title="Browser form dry run",
+            summary=str(result.get("status") or ""),
+            data=result,
+        )
+        return result
+
+    def browser_lab_execute_dry_run_form_fill(
+        self,
+        form: dict[str, Any],
+        *,
+        source: str,
+        persona: dict[str, Any] | None = None,
+        resume: dict[str, Any] | None = None,
+        vacancy: dict[str, Any] | None = None,
+        extra_answers: dict[str, str] | None = None,
+        executor: Any | None = None,
+        headless: bool = True,
+        timeout_ms: int = 15000,
+    ) -> dict[str, Any]:
+        result = execute_browser_lab_dry_run_form_fill(
+            self.root,
+            form,
+            source=source,
+            persona=persona,
+            resume=resume,
+            vacancy=vacancy,
+            extra_answers=extra_answers,
+            executor=executor,
+            headless=headless,
+            timeout_ms=timeout_ms,
+        )
+        self.record_replay_event(
+            source=str(source or ""),
+            event_type="browser_lab_form_execute_dry_run",
+            title="Browser form dry run executed",
+            summary=str(result.get("status") or ""),
+            data=result,
+        )
+        return result
 
     def hh_config(self) -> dict[str, Any]:
         return active_hh_config(self.config)
@@ -1138,6 +3485,10 @@ class WorkHunter:
             risk_flags.append("letter_required")
         if vacancy.get("has_test") or vacancy.get("test"):
             risk_flags.append("test_required")
+        elif _hh_question_required(vacancy):
+            risk_flags.append("questions_required")
+        if vacancy.get("captcha") or vacancy.get("captcha_required") or vacancy.get("challenge") or vacancy.get("challenge_required"):
+            risk_flags.append("captcha_or_challenge")
         if vacancy.get("archived"):
             risk_flags.append("archived")
         relations = list(vacancy.get("relations") or [])
@@ -1218,6 +3569,18 @@ class WorkHunter:
                 raw_result["source_detail_error"] = detail.get("error")
                 risk_flags.append("source_detail_api_error")
 
+        if job.source == "geekjob":
+            mechanism = self._geekjob_apply_mechanism(job)
+            self._merge_apply_mechanism(raw_result, risk_flags, mechanism)
+
+        if job.source == "habr":
+            mechanism = self._habr_apply_mechanism(job)
+            self._merge_apply_mechanism(raw_result, risk_flags, mechanism)
+
+        if job.source in PUBLIC_BOARD_APPLY_FORM_SOURCE_NAMES and apply_capability == "external_page":
+            mechanism = self._public_board_apply_mechanism(job)
+            self._merge_apply_mechanism(raw_result, risk_flags, mechanism)
+
         raw_result["next_actions"] = self._external_apply_next_actions(
             job=job,
             external_url=external_url,
@@ -1243,6 +3606,54 @@ class WorkHunter:
             return {"ok": True, "payload": source.get_offer(job.source_id)}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def _geekjob_apply_mechanism(self, job: Job) -> dict[str, Any]:
+        try:
+            source = GeekJobSource((self.config.get("sources") or {}).get("geekjob") or {})
+            return {"ok": True, "payload": source.apply_mechanism(job.source_id)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _habr_apply_mechanism(self, job: Job) -> dict[str, Any]:
+        try:
+            source = HabrSource((self.config.get("sources") or {}).get("habr") or {})
+            return {"ok": True, "payload": source.apply_mechanism(job.source_id)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _public_board_apply_mechanism(self, job: Job) -> dict[str, Any]:
+        try:
+            source_config = (self.config.get("sources") or {}).get(job.source) or {}
+            source = PublicJobBoardSource(
+                source_config,
+                source_name=job.source,
+                spec=PUBLIC_BOARD_SPECS[job.source],
+            )
+            return {"ok": True, "payload": source.apply_mechanism(job.source_id)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _merge_apply_mechanism(
+        self,
+        raw_result: dict[str, Any],
+        risk_flags: list[str],
+        mechanism: dict[str, Any],
+    ) -> None:
+        if mechanism.get("ok"):
+            apply_meta = dict(mechanism["payload"])
+            raw_result["apply"] = apply_meta
+            raw_result["source_detail"] = {"apply_mechanism": apply_meta}
+            if apply_meta.get("status") == "detected" and apply_meta.get("form_signature") != "unknown":
+                risk_flags.append("source_apply_form_detected")
+            if apply_meta.get("cover_letter_required"):
+                risk_flags.append("letter_required")
+            if apply_meta.get("test_required"):
+                risk_flags.append("test_required")
+            if apply_meta.get("captcha"):
+                risk_flags.append("captcha_or_challenge")
+        else:
+            raw_result["source_detail_error"] = mechanism.get("error")
+            risk_flags.append("source_detail_api_error")
 
     def _external_apply_next_actions(
         self,
@@ -1271,6 +3682,18 @@ class WorkHunter:
                 {
                     "type": "cover_letter_hint",
                     "message": "Cover letter is required by this source.",
+                }
+            )
+        form = apply_meta.get("form") if isinstance(apply_meta.get("form"), dict) else {}
+        if form.get("fields"):
+            actions.append(
+                {
+                    "type": "browser_lab_dry_run",
+                    "source": job.source,
+                    "form_signature": apply_meta.get("form_signature") or form.get("form_signature") or "known",
+                    "form_url": form.get("form_url") or external_url,
+                    "submit": False,
+                    "field_count": len(form.get("fields") or []),
                 }
             )
         if capabilities.get("apply") == "personal_auth_recon":
@@ -1306,6 +3729,19 @@ class WorkHunter:
             return {
                 "status": "blocked",
                 "message": "Only HH vacancies can be sent directly through the API.",
+                "plan": plan,
+            }
+        risk_flags = list(plan.get("risk_flags") or [])
+        hard_blocker = next(
+            (HH_DIRECT_APPLY_HARD_BLOCKERS[flag] for flag in risk_flags if flag in HH_DIRECT_APPLY_HARD_BLOCKERS),
+            "",
+        )
+        if hard_blocker:
+            return {
+                "status": "blocked_manual_review",
+                "reason": hard_blocker,
+                "message": "HH application requires manual review before real send.",
+                "risk_flags": risk_flags,
                 "plan": plan,
             }
 
@@ -2293,6 +4729,47 @@ class WorkHunter:
         save_config(self.config_path, self.config)
         return {"status": "resumed", "paused": False, "reason": reason}
 
+    def _campaign_pause_block(self, *, operation: str, run_id: int | None = None) -> dict[str, Any] | None:
+        agent_config = self.config.get("hh_agent") or {}
+        if not bool(agent_config.get("paused", False)):
+            return None
+        payload: dict[str, Any] = {
+            "status": "blocked",
+            "reason": "campaign_kill_switch_paused",
+            "message": "HH campaign kill switch is paused.",
+            "operation": operation,
+            "paused": True,
+            "pause_reason": str(agent_config.get("pause_reason") or ""),
+        }
+        if run_id is not None:
+            payload["id"] = run_id
+        return payload
+
+    def _hh_campaign_daily_cap(self, explicit: Any = None, *, source: str = "hh") -> int | None:
+        cap = _positive_int(explicit)
+        if cap is not None:
+            return cap
+        campaign_config = self.config.get("campaigns") or {}
+        source_caps = campaign_config.get("per_source_caps") or {}
+        cap = _positive_int(source_caps.get(source))
+        if cap is not None:
+            return cap
+        cap = _positive_int(campaign_config.get("daily_cap"))
+        if cap is not None:
+            return cap
+        hh_campaign_config = self.config.get("hh_campaign") or {}
+        return _positive_int(hh_campaign_config.get("daily_cap"))
+
+    def _record_hh_campaign_block(self, payload: dict[str, Any], *, run_id: int | None = None) -> None:
+        self.record_replay_event(
+            run_id=run_id,
+            source="hh",
+            event_type="campaign_blocked",
+            title="HH campaign blocked",
+            summary=str(payload.get("reason") or ""),
+            data=payload,
+        )
+
     def hh_agent_preflight(self, *, live_auth: bool = False) -> dict[str, Any]:
         hh_config = self.hh_config()
         agent_config = self.config.get("hh_agent") or {}
@@ -2806,7 +5283,13 @@ class WorkHunter:
         skip_tests: bool = False,
         ai_filter_mode: str = "off",
         resume_id: str | None = None,
+        daily_cap: int | None = None,
     ) -> dict[str, Any]:
+        blocked = self._campaign_pause_block(operation="plan_hh_search_campaign")
+        if blocked:
+            self._record_hh_campaign_block(blocked)
+            return blocked
+        resolved_daily_cap = self._hh_campaign_daily_cap(daily_cap, source="hh")
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
@@ -2846,9 +5329,11 @@ class WorkHunter:
             "skip_tests": skip_tests,
             "ai_filter_mode": ai_filter_mode,
             "resume_id": resume_id or "",
+            "daily_cap": resolved_daily_cap or 0,
         }
         run_id = self.storage.create_hh_campaign_run(filters=filters)
         counts = _campaign_counts()
+        ready_count = 0
         for job in imported_jobs:
             item = self._plan_hh_campaign_item(
                 run_id,
@@ -2858,15 +5343,27 @@ class WorkHunter:
                 ai_filter_mode=ai_filter_mode,
                 resume_id=resume_id,
             )
+            if item.status == "ready":
+                if resolved_daily_cap is not None and ready_count >= resolved_daily_cap:
+                    item.status = "skipped"
+                    item.reason = "daily_cap_reached"
+                    item.raw_result = {**item.raw_result, "daily_cap": resolved_daily_cap}
+                else:
+                    ready_count += 1
             self.storage.save_hh_campaign_item(item)
-            if item.status in counts:
-                counts[item.status] += 1
-            else:
-                counts["error"] += 1
+            _count_campaign_item(counts, item)
         self.storage.update_hh_campaign_run(run_id, status="planned", counts=counts)
         run = self.storage.get_hh_campaign_run(run_id)
         payload = run.to_dict() if run else {"id": run_id, "status": "planned", "counts": counts}
         payload["imported"] = len(imported_jobs)
+        self.record_replay_event(
+            run_id=run_id,
+            source="hh",
+            event_type="campaign_planned",
+            title="HH search campaign planned",
+            summary=f"{counts['ready']} ready",
+            data=payload,
+        )
         return payload
 
     def plan_hh_campaign(
@@ -2877,16 +5374,24 @@ class WorkHunter:
         skip_tests: bool = False,
         ai_filter_mode: str = "off",
         resume_id: str | None = None,
+        daily_cap: int | None = None,
     ) -> dict[str, Any]:
+        blocked = self._campaign_pause_block(operation="plan_hh_campaign")
+        if blocked:
+            self._record_hh_campaign_block(blocked)
+            return blocked
+        resolved_daily_cap = self._hh_campaign_daily_cap(daily_cap, source="hh")
         filters = {
             "limit": limit,
             "min_score": min_score,
             "skip_tests": skip_tests,
             "ai_filter_mode": ai_filter_mode,
             "resume_id": resume_id or "",
+            "daily_cap": resolved_daily_cap or 0,
         }
         run_id = self.storage.create_hh_campaign_run(filters=filters)
         counts = _campaign_counts()
+        ready_count = 0
         jobs = self.storage.list_jobs(limit=limit, source="hh")
         for job in jobs:
             item = self._plan_hh_campaign_item(
@@ -2897,16 +5402,27 @@ class WorkHunter:
                 ai_filter_mode=ai_filter_mode,
                 resume_id=resume_id,
             )
+            if item.status == "ready":
+                if resolved_daily_cap is not None and ready_count >= resolved_daily_cap:
+                    item.status = "skipped"
+                    item.reason = "daily_cap_reached"
+                    item.raw_result = {**item.raw_result, "daily_cap": resolved_daily_cap}
+                else:
+                    ready_count += 1
             self.storage.save_hh_campaign_item(item)
-            if item.status in counts:
-                counts[item.status] += 1
-            elif item.status == "ready":
-                counts["ready"] += 1
-            else:
-                counts["error"] += 1
+            _count_campaign_item(counts, item)
         self.storage.update_hh_campaign_run(run_id, status="planned", counts=counts)
         run = self.storage.get_hh_campaign_run(run_id)
-        return run.to_dict() if run else {"id": run_id, "status": "planned", "counts": counts}
+        payload = run.to_dict() if run else {"id": run_id, "status": "planned", "counts": counts}
+        self.record_replay_event(
+            run_id=run_id,
+            source="hh",
+            event_type="campaign_planned",
+            title="HH campaign planned",
+            summary=f"{counts['ready']} ready",
+            data=payload,
+        )
+        return payload
 
     def _plan_hh_campaign_item(
         self,
@@ -3078,21 +5594,401 @@ class WorkHunter:
                 return item.reason or "skipped"
         return ""
 
+    def plan_external_campaign(
+        self,
+        source: str,
+        *,
+        limit: int = 100,
+        min_score: int = 0,
+        daily_cap: int | None = None,
+    ) -> dict[str, Any]:
+        source_name = str(source or "").strip().lower().replace("-", "_")
+        blocked = self._campaign_pause_block(operation="plan_external_campaign")
+        if blocked:
+            self._record_hh_campaign_block({**blocked, "source": source_name})
+            return {**blocked, "source": source_name}
+        readiness = self.source_capabilities().get(source_name) or {}
+        if not readiness.get("can_campaign_apply"):
+            return {
+                "status": "blocked",
+                "source": source_name,
+                "reason": "external_source_requires_l6_campaign_certification",
+                "readiness": readiness,
+            }
+        session_check = self._external_campaign_session_check(source_name)
+        if session_check.get("status") != "ok":
+            return {
+                "status": "blocked",
+                "source": source_name,
+                "reason": session_check.get("reason") or "external_session_missing",
+                "session": session_check,
+            }
+        filters = {
+            "mode": "external_campaign",
+            "source": source_name,
+            "limit": limit,
+            "min_score": min_score,
+            "daily_cap": daily_cap or 0,
+        }
+        run_id = self.storage.create_hh_campaign_run(filters=filters)
+        counts = _campaign_counts()
+        ready_count = 0
+        for job in self.storage.list_jobs(limit=limit, source=source_name):
+            item = self._plan_external_campaign_item(
+                run_id,
+                job,
+                min_score=min_score,
+                source=source_name,
+            )
+            if item.status == "ready":
+                if daily_cap is not None and ready_count >= daily_cap:
+                    item.status = "skipped"
+                    item.reason = "daily_cap_reached"
+                    item.raw_result = {**item.raw_result, "daily_cap": daily_cap}
+                else:
+                    ready_count += 1
+            self.storage.save_hh_campaign_item(item)
+            _count_campaign_item(counts, item)
+        self.storage.update_hh_campaign_run(run_id, status="planned", counts=counts)
+        run = self.storage.get_hh_campaign_run(run_id)
+        payload = run.to_dict() if run else {"id": run_id, "status": "planned", "counts": counts}
+        self.record_replay_event(
+            run_id=run_id,
+            source=source_name,
+            event_type="external_campaign_planned",
+            title="External campaign planned",
+            summary=f"{counts['ready']} ready",
+            data=payload,
+        )
+        return payload
+
+    def _external_campaign_session_check(self, source: str) -> dict[str, Any]:
+        external_apply = _external_apply_config(self.config, source)
+        session_name = str(external_apply.get("session") or "")
+        if not session_name:
+            return {"status": "blocked", "reason": "external_apply_session_missing"}
+        session = show_external_session(self.root, session_name)
+        hosts = list(session.get("hosts") or [])
+        if not hosts:
+            return {"status": "blocked", "reason": "external_session_missing", "session": session_name}
+        url_host = urllib.parse.urlsplit(str(external_apply.get("url") or "")).hostname or ""
+        if url_host and url_host.lower() not in {host.lower() for host in hosts}:
+            return {
+                "status": "blocked",
+                "reason": "external_session_host_missing",
+                "session": session_name,
+                "host": url_host,
+                "session_hosts": hosts,
+            }
+        return {"status": "ok", "session": session_name, "hosts": hosts}
+
+    def _plan_external_campaign_item(
+        self,
+        run_id: int,
+        job: Job,
+        *,
+        min_score: int,
+        source: str,
+    ) -> HHCampaignItem:
+        job_id = int(job.id or 0)
+        score = job.score.total_score if job.score else 0
+        if min_score and score < min_score:
+            return HHCampaignItem(
+                run_id=run_id,
+                job_id=job_id,
+                vacancy_id=job.source_id,
+                status="skipped",
+                reason="below_min_score",
+            )
+        if self.storage.get_application(job_id) is not None:
+            return HHCampaignItem(
+                run_id=run_id,
+                job_id=job_id,
+                vacancy_id=job.source_id,
+                status="skipped",
+                reason="already_applied",
+            )
+        dry_run_event, dry_run_missing_reason = self._latest_external_apply_dry_run_event(job_id, source=source)
+        if dry_run_event is None:
+            return HHCampaignItem(
+                run_id=run_id,
+                job_id=job_id,
+                vacancy_id=job.source_id,
+                status="skipped",
+                reason=dry_run_missing_reason,
+                raw_result={"reason": dry_run_missing_reason},
+            )
+        dry_run_data = dict(dry_run_event.get("data") or {})
+        form = _external_apply_form_from_dry_run_event(dry_run_data, fallback_url=job.url)
+        if not form.get("fields"):
+            return HHCampaignItem(
+                run_id=run_id,
+                job_id=job_id,
+                vacancy_id=job.source_id,
+                status="skipped",
+                reason="external_apply_dry_run_missing",
+                raw_result={"reason": "external_apply_dry_run_missing", "dry_run_event_id": dry_run_event["id"]},
+            )
+        resume_variant = self._active_resume_variant_payload()
+        if not resume_variant:
+            return HHCampaignItem(
+                run_id=run_id,
+                job_id=job_id,
+                vacancy_id=job.source_id,
+                status="error",
+                reason="resume_required",
+            )
+        letter = str(
+            self.cover_letter_preview(job_id, template="A", use_for_campaign=True)
+            .get("campaign_letter", {})
+            .get("body", "")
+        )
+        campaign_policy = {"enabled": True, "real_apply": True, "min_score": min_score}
+        pack = self.build_application_pack(
+            job_id,
+            resume_variant=resume_variant,
+            cover_letter=letter,
+            source_payload=_external_form_source_payload(form),
+            campaign_policy=campaign_policy,
+        )
+        if pack.get("policy_status") != "ready":
+            return HHCampaignItem(
+                run_id=run_id,
+                job_id=job_id,
+                vacancy_id=job.source_id,
+                status="error",
+                reason="application_pack_blocked",
+                resume_id=str(resume_variant.get("id") or ""),
+                letter=letter,
+                risk_flags=list(pack.get("policy_reasons") or []),
+                raw_result={"application_pack": pack},
+            )
+        return HHCampaignItem(
+            run_id=run_id,
+            job_id=job_id,
+            vacancy_id=job.source_id,
+            status="ready",
+            resume_id=str(resume_variant.get("id") or ""),
+            letter=letter,
+            raw_result={
+                "source": source,
+                "resume_variant": resume_variant,
+                "form": form,
+                "campaign_policy": campaign_policy,
+                "application_pack": pack,
+                "dry_run_event_id": dry_run_event["id"],
+            },
+        )
+
+    def _latest_external_apply_dry_run_event(self, job_id: int, *, source: str) -> tuple[dict[str, Any] | None, str]:
+        events = self.storage.list_replay_events(job_id=job_id, source=source, event_type="external_apply_dry_run")
+        expected_fingerprint = _external_apply_target_fingerprint(_external_apply_config(self.config, source))
+        saw_ready_for_other_target = False
+        for event in reversed(events):
+            data = event.get("data") or {}
+            if data.get("status") == "dry_run_ready" and data.get("submit") is False:
+                if str(data.get("external_apply_target_fingerprint") or "") == expected_fingerprint:
+                    return event, ""
+                saw_ready_for_other_target = True
+        reason = "external_apply_dry_run_target_mismatch" if saw_ready_for_other_target else "external_apply_dry_run_missing"
+        return None, reason
+
+    def confirm_external_campaign(
+        self,
+        run_id: int,
+        *,
+        confirm: bool = False,
+        requester: Any | None = None,
+    ) -> dict[str, Any]:
+        run = self.storage.get_hh_campaign_run(run_id)
+        if run is None:
+            raise ValueError(f"Campaign run {run_id} not found")
+        filters = run.filters or {}
+        source_name = str(filters.get("source") or "").strip().lower().replace("-", "_")
+        if filters.get("mode") != "external_campaign" or not source_name:
+            raise ValueError(f"Campaign run {run_id} is not an external campaign")
+        items = self.storage.list_hh_campaign_items(run_id)
+        blocked = self._campaign_pause_block(operation="confirm_external_campaign", run_id=run_id)
+        if blocked:
+            counts = _campaign_counts()
+            for item in items:
+                _count_campaign_item(counts, item)
+            self.storage.update_hh_campaign_run(run_id, status="blocked", counts=counts)
+            blocked["counts"] = counts
+            self._record_hh_campaign_block({**blocked, "source": source_name}, run_id=run_id)
+            return blocked
+        if not confirm:
+            return {
+                "status": "blocked",
+                "message": "Explicit confirmation is required before sending an external campaign.",
+                "id": run_id,
+            }
+        if run.status != "enabled":
+            return {
+                "status": "blocked",
+                "reason": "real_apply_requires_campaign_policy",
+                "message": "Real external campaign runs require an enabled campaign policy gate before submit.",
+                "id": run_id,
+                "run_status": run.status,
+                "submit": False,
+            }
+        daily_cap = _positive_int(filters.get("daily_cap"))
+        applied_count = 0
+        counts = _campaign_counts()
+        for item in items:
+            if item.status != "ready":
+                _count_campaign_item(counts, item)
+                continue
+            if daily_cap is not None and applied_count >= daily_cap:
+                counts["skipped"] += 1
+                result = {"status": "skipped", "reason": "daily_cap_reached", "daily_cap": daily_cap}
+                self.storage.update_hh_campaign_item(
+                    item.id,
+                    status="skipped",
+                    reason="daily_cap_reached",
+                    raw_result=result,
+                )
+                continue
+            raw = dict(item.raw_result or {})
+            result = self.confirm_external_apply(
+                item.job_id,
+                form=dict(raw.get("form") or {}),
+                resume_variant=dict(raw.get("resume_variant") or {}),
+                cover_letter=item.letter,
+                campaign_policy=dict(raw.get("campaign_policy") or {}),
+                confirm=True,
+                submit=True,
+                campaign_policy_apply=True,
+                requester=requester,
+            )
+            status = str(result.get("status") or "error")
+            if status == "external_applied":
+                applied_count += 1
+                counts["applied"] += 1
+                self.storage.update_hh_campaign_item(item.id, status="applied", raw_result=result)
+            else:
+                counts["error"] += 1
+                self.storage.update_hh_campaign_item(item.id, status="error", reason=status, raw_result=result)
+            self.record_replay_event(
+                run_id=run_id,
+                job_id=item.job_id,
+                source=source_name,
+                event_type="external_campaign_apply_result",
+                title="External campaign apply result",
+                summary=status,
+                data={
+                    "campaign_item_id": item.id,
+                    "vacancy_id": item.vacancy_id,
+                    "status": status,
+                    "result": result,
+                },
+            )
+        self.storage.update_hh_campaign_run(
+            run_id,
+            status="confirmed",
+            counts=counts,
+            finished=True,
+        )
+        updated = self.storage.get_hh_campaign_run(run_id)
+        return updated.to_dict() if updated else {"id": run_id, "status": "confirmed", "counts": counts}
+
+    def _active_resume_variant_payload(self) -> dict[str, Any]:
+        profile_id = str(self.config.get("profile") or "default")
+        for resume in self.storage.list_resumes(profile_id=profile_id):
+            if resume.is_active:
+                return {
+                    "id": resume.id,
+                    "title": resume.name,
+                    "body": resume.body,
+                    "canonical": resume.canonical,
+                }
+        return {}
+
+    def enable_hh_campaign(self, run_id: int) -> dict[str, Any]:
+        run = self.storage.get_hh_campaign_run(run_id)
+        if run is None:
+            raise ValueError(f"HH campaign run {run_id} not found")
+        self.storage.update_hh_campaign_run(
+            run_id,
+            status="enabled",
+            counts=dict(run.counts or {}),
+        )
+        updated = self.storage.get_hh_campaign_run(run_id)
+        return updated.to_dict() if updated else {"id": run_id, "status": "enabled"}
+
+    def confirm_enabled_hh_campaign(self, run_id: int, *, confirm: bool = False) -> dict[str, Any]:
+        run = self.storage.get_hh_campaign_run(run_id)
+        if run is None:
+            raise ValueError(f"HH campaign run {run_id} not found")
+        if not confirm:
+            return self.confirm_hh_campaign(run_id, confirm=False)
+        if run.status != "enabled":
+            return {
+                "status": "blocked",
+                "reason": "real_apply_requires_campaign_policy",
+                "message": "Real campaign runs require an enabled campaign policy gate before submit.",
+                "id": run_id,
+                "run_status": run.status,
+                "submit": False,
+            }
+        return self.confirm_hh_campaign(run_id, confirm=True)
+
     def confirm_hh_campaign(self, run_id: int, *, confirm: bool = False) -> dict[str, Any]:
         run = self.storage.get_hh_campaign_run(run_id)
         if run is None:
             raise ValueError(f"HH campaign run {run_id} not found")
+        items = self.storage.list_hh_campaign_items(run_id)
+        blocked = self._campaign_pause_block(operation="confirm_hh_campaign", run_id=run_id)
+        if blocked:
+            counts = _campaign_counts()
+            for item in items:
+                _count_campaign_item(counts, item)
+            self.storage.update_hh_campaign_run(run_id, status="blocked", counts=counts)
+            blocked["counts"] = counts
+            self._record_hh_campaign_block(blocked, run_id=run_id)
+            return blocked
         if not confirm:
             return {
                 "status": "blocked",
                 "message": "Explicit confirmation is required before sending a campaign.",
                 "id": run_id,
             }
+        daily_cap = self._hh_campaign_daily_cap((run.filters or {}).get("daily_cap"), source="hh")
+        applied_count = 0
         counts = _campaign_counts()
-        for item in self.storage.list_hh_campaign_items(run_id):
+        for item in items:
             if item.status != "ready":
-                if item.status in counts:
-                    counts[item.status] += 1
+                _count_campaign_item(counts, item)
+                continue
+            blocked = self._campaign_pause_block(operation="confirm_hh_campaign", run_id=run_id)
+            if blocked:
+                self.storage.update_hh_campaign_run(run_id, status="blocked", counts=counts)
+                blocked["counts"] = counts
+                self._record_hh_campaign_block(blocked, run_id=run_id)
+                return blocked
+            if daily_cap is not None and applied_count >= daily_cap:
+                counts["skipped"] += 1
+                result = {"status": "skipped", "reason": "daily_cap_reached", "daily_cap": daily_cap}
+                self.storage.update_hh_campaign_item(
+                    item.id,
+                    status="skipped",
+                    reason="daily_cap_reached",
+                    raw_result=result,
+                )
+                self.record_replay_event(
+                    run_id=run_id,
+                    job_id=item.job_id,
+                    source="hh",
+                    event_type="campaign_apply_skipped",
+                    title="Campaign apply skipped",
+                    summary="daily_cap_reached",
+                    data={
+                        "campaign_item_id": item.id,
+                        "vacancy_id": item.vacancy_id,
+                        "reason": "daily_cap_reached",
+                        "daily_cap": daily_cap,
+                    },
+                )
                 continue
             result = self.confirm_apply(
                 item.job_id,
@@ -3102,6 +5998,7 @@ class WorkHunter:
             )
             status = str(result.get("status") or "error")
             if status == "applied":
+                applied_count += 1
                 counts["applied"] += 1
                 self.storage.update_hh_campaign_item(
                     item.id,
@@ -3116,6 +6013,21 @@ class WorkHunter:
                     reason=status,
                     raw_result=result,
                 )
+            self.record_replay_event(
+                run_id=run_id,
+                job_id=item.job_id,
+                source="hh",
+                event_type="campaign_apply_result",
+                title="Campaign apply result",
+                summary=status,
+                data={
+                    "campaign_item_id": item.id,
+                    "vacancy_id": item.vacancy_id,
+                    "resume_id": item.resume_id,
+                    "status": status,
+                    "result": result,
+                },
+            )
         self.storage.update_hh_campaign_run(
             run_id,
             status="confirmed",
@@ -3301,6 +6213,299 @@ class WorkHunter:
             return parsed
         except Exception as exc:
             raise ValueError(f"AI error: {exc}")
+
+    def pipeline_status(
+        self,
+        job_id: int,
+        *,
+        now: str | None = None,
+        followup_after_days: int = 3,
+    ) -> dict[str, Any]:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        application = self.storage.get_application(job_id)
+        events = [event for event in self.storage.list_events() if event.job_id == job_id]
+        stage = _pipeline_stage(
+            job.status,
+            application.status if application is not None else "",
+            events,
+        )
+        follow_up = self._pipeline_follow_up_suggestion(
+            job,
+            application=application,
+            now=now,
+            followup_after_days=followup_after_days,
+        )
+        next_actions = self._pipeline_next_actions(
+            stage=stage,
+            job=job,
+            follow_up=follow_up,
+            events=events,
+        )
+        return {
+            "status": "ok",
+            "stage": stage,
+            "stage_label": _stage_label(stage),
+            "job": job.to_dict(),
+            "application": application.to_dict() if application is not None else None,
+            "events": [event.to_dict() for event in events],
+            "follow_up": follow_up,
+            "next_actions": next_actions,
+        }
+
+    def _pipeline_follow_up_suggestion(
+        self,
+        job: Job,
+        *,
+        application: Any | None,
+        now: str | None = None,
+        followup_after_days: int = 3,
+    ) -> dict[str, Any]:
+        if application is None:
+            return {
+                "status": "not_ready",
+                "reason": "no_application",
+                "requires_manual_send": True,
+            }
+        applied_at = application.applied_at or application.updated_at
+        due_at = _pipeline_due_at(applied_at, followup_after_days, fallback=now)
+        subject = f"Follow-up: {job.title}"
+        company = job.company or "the team"
+        body = (
+            f"Hi {company},\n\n"
+            f"I wanted to follow up on my application for {job.title}. "
+            "The role still looks relevant to my background, and I would be glad "
+            "to discuss fit, next steps, or any additional context you need.\n\n"
+            "Best regards"
+        )
+        return {
+            "status": "ready",
+            "type": "follow_up",
+            "subject": subject,
+            "body": body,
+            "due_at": due_at,
+            "requires_manual_send": True,
+            "days_after_application": max(1, int(followup_after_days)),
+        }
+
+    def _pipeline_next_actions(
+        self,
+        *,
+        stage: str,
+        job: Job,
+        follow_up: dict[str, Any],
+        events: list[CalendarEvent],
+    ) -> list[dict[str, Any]]:
+        if stage == "not_applied":
+            return [
+                {
+                    "type": "build_application_pack",
+                    "title": "Build application pack",
+                    "reason": "No application is stored for this job yet.",
+                }
+            ]
+        if stage == "manual_submit_ready":
+            return [
+                {
+                    "type": "manual_submit",
+                    "title": "Review and submit manually",
+                    "reason": "External apply is prepared but final submit requires the user.",
+                }
+            ]
+        if stage == "applied_waiting":
+            return [
+                {
+                    "type": "send_follow_up",
+                    "title": "Send follow-up",
+                    "reason": "Application is waiting for a reply.",
+                    "due_at": follow_up.get("due_at", ""),
+                    "requires_manual_send": True,
+                },
+                {
+                    "type": "scan_replies",
+                    "title": "Scan replies",
+                    "reason": "A reply can move the job into interview prep.",
+                },
+            ]
+        if stage in {"response_received", "interview"}:
+            return [
+                {
+                    "type": "schedule_interview",
+                    "title": "Schedule interview event",
+                    "reason": "There is progress after application.",
+                },
+                {
+                    "type": "build_interview_prep_pack",
+                    "title": "Build interview prep pack",
+                    "reason": "Prepare stack, STAR answers, company questions and salary script.",
+                },
+            ]
+        if stage == "interview_scheduled":
+            interview_events = [event.to_dict() for event in events if event.event_type == "interview"]
+            return [
+                {
+                    "type": "build_interview_prep_pack",
+                    "title": "Build interview prep pack",
+                    "reason": "An interview is already on the calendar.",
+                    "events": interview_events,
+                }
+            ]
+        if stage == "offer":
+            return [
+                {
+                    "type": "review_offer",
+                    "title": "Review offer and negotiation points",
+                    "reason": f"Prepare compensation and scope questions for {job.company or 'the company'}.",
+                }
+            ]
+        return [
+            {
+                "type": "archive_or_note",
+                "title": "Archive or add final note",
+                "reason": "The pipeline item is closed.",
+            }
+        ]
+
+    def schedule_pipeline_event(
+        self,
+        job_id: int,
+        *,
+        event_at: str,
+        event_type: str = "follow_up",
+        title: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        event_title = title.strip()
+        if not event_title:
+            label = "Interview" if event_type == "interview" else "Follow-up"
+            event_title = f"{label}: {job.title}"
+        event = CalendarEvent(
+            job_id=job_id,
+            title=event_title,
+            event_type=event_type,
+            event_date=event_at,
+            notes=notes,
+        )
+        event.id = self.storage.save_event(event)
+        payload = event.to_dict()
+        self.record_replay_event(
+            job_id=job_id,
+            source=job.source,
+            event_type="pipeline_event_scheduled",
+            title="Pipeline event scheduled",
+            summary=f"{event.event_type}: {event.title}",
+            data=payload,
+        )
+        return {"status": "scheduled", "event": payload}
+
+    def interview_prep_pack(self, job_id: int, *, stage: str = "tech") -> dict[str, Any]:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        stage_focus = build_stage_focus(stage)
+        normalized_stage = str(stage_focus["stage"])
+        profile = active_profile(self.config)
+        confirmed_facts = self._candidate_evidence_facts(status="confirmed")
+        tech_stack = _tech_stack_from_job(job, profile)
+        fact_texts = [
+            _candidate_fact_text(fact.get("value"))
+            for fact in confirmed_facts
+            if _candidate_fact_text(fact.get("value"))
+        ]
+        if not fact_texts:
+            fallback = str((self.config.get("about") or {}).get("summary") or profile.get("summary") or "")
+            if fallback:
+                fact_texts = [fallback]
+        stack_questions = [
+            f"How would you describe your practical experience with {skill} for {job.title}?"
+            for skill in tech_stack[:5]
+        ]
+        if not stack_questions:
+            stack_questions = [
+                f"Which parts of your background are strongest for {job.title}?",
+            ]
+        star_answers = [
+            {
+                "claim": fact,
+                "answer": (
+                    f"Situation: {fact}. "
+                    f"Task: connect this work to {job.title}. "
+                    "Action: explain what you personally owned and how you made decisions. "
+                    "Result: name the measurable or observable outcome."
+                ),
+            }
+            for fact in fact_texts[:4]
+        ]
+        salary_min = str(profile.get("salary_min") or "").strip()
+        salary_phrase = (
+            f"My target starts at {salary_min},"
+            if salary_min
+            else "I would like to align compensation with the role scope,"
+        )
+        salary_script = (
+            f"{salary_phrase} based on responsibilities, seniority and the expected impact. "
+            f"For {job.title}, I would first clarify scope, team process, on-call load and growth path, "
+            "then discuss the final package."
+        )
+        risk_notes = list(job.score.red_flags if job.score else [])
+        if "test" in (job.description or "").lower():
+            risk_notes.append("Clarify any test task scope, deadline and review criteria before accepting.")
+        pack = {
+            "status": "ready",
+            "stage": normalized_stage,
+            "job": job.to_dict(),
+            "tech_stack": tech_stack,
+            "sections": {
+                "stage_focus": stage_focus,
+                "stack_questions": stack_questions,
+                "experience_questions": [
+                    "Which past project is closest to this role, and why?",
+                    "What trade-off would you mention if asked about architecture decisions?",
+                ],
+                "behavioral_questions": [
+                    "Tell me about a disagreement with a teammate and how you handled it.",
+                    "Describe a time you had to ship under uncertainty.",
+                ],
+                "questions_for_company": [
+                    "What does success look like in the first 90 days?",
+                    "How are code reviews, ownership and incident response handled?",
+                    "Which part of the product or platform needs the most attention now?",
+                ],
+            },
+            "star_answers": star_answers,
+            "salary_script": salary_script,
+            "risk_notes": _dedup_keep_order(risk_notes),
+            "stages": list(INTERVIEW_STAGES),
+            "pipeline_automation": list(PIPELINE_AUTOMATION),
+            "after_interview": build_after_interview_assets(job, stage=normalized_stage),
+            "metadata": {
+                "uses_confirmed_facts": bool(confirmed_facts),
+                "fact_count": len(fact_texts),
+                "stage": normalized_stage,
+            },
+            "follow_up_template": (
+                f"Hi {job.company or 'team'}, thank you for the conversation. "
+                "I appreciated the chance to learn more about the role. "
+                "Happy to share any extra context if useful."
+            ),
+        }
+        self.record_replay_event(
+            job_id=job_id,
+            source=job.source,
+            event_type="interview_prep_pack_built",
+            title="Interview prep pack built",
+            summary=f"{normalized_stage} prep for {job.title}",
+            data={
+                "stage": normalized_stage,
+                "tech_stack": tech_stack,
+                "risk_notes": pack["risk_notes"],
+            },
+        )
+        return pack
 
     def interview_questions(self, job_id: int) -> str:
         job = self.storage.get_job(job_id)

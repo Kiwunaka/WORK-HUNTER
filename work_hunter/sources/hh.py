@@ -101,6 +101,28 @@ class HHSource:
                         return jobs
         return jobs
 
+    def detail(self, source_id: str) -> Job:
+        vacancy_id = urllib.parse.quote(str(source_id))
+        if self._access_token():
+            try:
+                return _job_from_detail_item(self._fetch_api_detail(vacancy_id))
+            except RuntimeError:
+                if not self.config.get("web_fallback", True):
+                    raise
+        url = f"https://hh.ru/vacancy/{vacancy_id}"
+        html = fetch_url(url, headers={"User-Agent": self._web_user_agent()})
+        return parse_hh_detail_html(html, source_id=str(source_id), url=url)
+
+    def _fetch_api_detail(self, vacancy_id: str) -> dict[str, Any]:
+        user_agent = str(self.config.get("hh_user_agent") or USER_AGENT)
+        headers = {
+            "Accept": "application/json",
+            "HH-User-Agent": user_agent,
+            "User-Agent": user_agent,
+            "Authorization": f"Bearer {self._access_token()}",
+        }
+        return json.loads(fetch_url(f"{HH_API_URL}/{vacancy_id}", headers=headers))
+
     def _web_user_agent(self) -> str:
         return str(self.config.get("web_user_agent") or USER_AGENT)
 
@@ -149,6 +171,26 @@ def _job_from_item(item: dict[str, Any]) -> Job:
     )
 
 
+def _job_from_detail_item(item: dict[str, Any]) -> Job:
+    salary_text, salary_from, salary_to, currency = _salary_text(item)
+    description = clean_text(str(item.get("description") or ""))
+    return Job(
+        source="hh",
+        source_id=str(item.get("id", "")),
+        url=item.get("alternate_url", "") or f"https://hh.ru/vacancy/{item.get('id', '')}",
+        title=item.get("name", ""),
+        company=(item.get("employer") or {}).get("name", ""),
+        salary_text=salary_text,
+        salary_from=salary_from,
+        salary_to=salary_to,
+        currency=currency,
+        location=(item.get("area") or {}).get("name", ""),
+        remote=(item.get("schedule") or {}).get("id", "") == "remote",
+        description=description,
+        published_at=item.get("published_at", ""),
+    )
+
+
 TITLE_RE = re.compile(
     r'<a\b(?=[^>]*data-qa="serp-item__title")[^>]*href="(?P<href>[^"]+)"[^>]*>'
     r"(?P<body>.*?)</a>",
@@ -183,6 +225,50 @@ def _jobs_from_html(html: str) -> list[Job]:
     return jobs
 
 
+def parse_hh_detail_html(html: str, *, source_id: str, url: str) -> Job:
+    title = _extract_html_first(
+        html,
+        (
+            r'<h1\b(?=[^>]*data-qa=["\']vacancy-title["\'])[^>]*>(.*?)</h1>',
+            r"<h1\b[^>]*>(.*?)</h1>",
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            r"<title\b[^>]*>(.*?)</title>",
+        ),
+    )
+    company = _extract_html_first(
+        html,
+        (
+            r'data-qa=["\']vacancy-company-name["\'][^>]*>(.*?)</',
+            r'class=["\'][^"\']*(?:company|employer)[^"\']*["\'][^>]*>(.*?)</',
+        ),
+    )
+    location = _extract_html_first(
+        html,
+        (
+            r'data-qa=["\']vacancy-view-location["\'][^>]*>(.*?)</',
+            r'class=["\'][^"\']*(?:location|address)[^"\']*["\'][^>]*>(.*?)</',
+        ),
+    )
+    description = _extract_html_first(
+        html,
+        (
+            r'data-qa=["\']vacancy-description["\'][^>]*>(.*?)</div>',
+            r"<article\b[^>]*>(.*?)</article>",
+            r"<main\b[^>]*>(.*?)</main>",
+        ),
+    ) or clean_text(html)
+    return Job(
+        source="hh",
+        source_id=source_id,
+        url=url,
+        title=title or f"HH vacancy {source_id}",
+        company=company,
+        location=location,
+        remote=_remote_from_detail_text(f"{title} {location} {description}"),
+        description=description or title,
+    )
+
+
 def _extract_data_qa(chunk: str, data_qa: str) -> str:
     pattern = rf'data-qa="{re.escape(data_qa)}"[^>]*>(?P<value>.*?)</(?:span|div|a)>'
     return clean_text(_first_match(pattern, chunk, group="value") or "")
@@ -202,6 +288,21 @@ def _hh_description(chunk: str) -> str:
         if index >= 0:
             text = text[:index]
     return text[:1500].strip()
+
+
+def _extract_html_first(html: str, patterns: tuple[str, ...]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, html or "", flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return clean_text(match.group(1))
+    return ""
+
+
+def _remote_from_detail_text(text: str) -> bool | None:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("remote", "remotely", "удален", "удалён", "можно удал")):
+        return True
+    return None
 
 
 class HHApplicantToolAdapter:

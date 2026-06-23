@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +12,22 @@ from .sources.public_boards import PUBLIC_BOARD_SOURCE_NAMES, public_board_defau
 CONFIG_FILENAME = "work_hunter_config.json"
 DATA_DIRNAME = ".work-hunter"
 MASK = "***"
-SENSITIVE_EXACT = {"token", "password", "secret", "api_key", "key"}
-SENSITIVE_SUFFIXES = ("_token", "_password", "_secret", "_api_key", "_key")
+SENSITIVE_EXACT = {
+    "token",
+    "password",
+    "secret",
+    "api_key",
+    "key",
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "client_secret",
+    "access_token",
+    "refresh_token",
+    "xsrf_token",
+    "session_id",
+}
+SENSITIVE_SUFFIXES = ("_token", "_password", "_secret", "_api_key", "_key", "_cookie", "_session")
 
 
 def _default_profile() -> dict[str, Any]:
@@ -78,6 +93,63 @@ def default_config() -> dict[str, Any]:
             "model": "",
             "temperature": 0.7,
             "max_tokens": 1500,
+            "default_route": "smart",
+            "routes": {
+                "smart": {
+                    "adapter": "codex_cli",
+                    "command": "codex",
+                    "model": "gpt-5.5",
+                    "reasoning": "high",
+                    "auth": "external_runtime",
+                    "purpose": "deep reasoning, candidate analysis, campaign judgment",
+                },
+                "patcher": {
+                    "adapter": "codex_cli",
+                    "command": "codex",
+                    "model": "gpt-5.3-codex-spark",
+                    "reasoning": "high",
+                    "auth": "external_runtime",
+                    "purpose": "mechanical edits only",
+                },
+                "codex_sdk": {
+                    "adapter": "codex_sdk",
+                    "enabled": False,
+                    "experimental": True,
+                    "base_url": "",
+                    "model": "",
+                    "auth": "external_runtime",
+                    "purpose": "experimental local Codex app-server integration behind an explicit feature flag",
+                },
+                "opencode_go": {
+                    "adapter": "opencode_cli",
+                    "command": "opencode",
+                    "model": "opencode-go/default",
+                    "agent": "work-hunter-ai",
+                    "auth": "external_runtime",
+                    "purpose": "cheap frequent drafting, fallback execution",
+                },
+                "openrouter": {
+                    "adapter": "openrouter",
+                    "base_url": "https://openrouter.ai/api/v1/chat/completions",
+                    "api_key": "",
+                    "model": "",
+                    "purpose": "router fallback and model experiments",
+                },
+                "fireworks": {
+                    "adapter": "fireworks",
+                    "base_url": "https://api.fireworks.ai/inference/v1/chat/completions",
+                    "api_key": "",
+                    "model": "",
+                    "purpose": "fast cheap structured tasks",
+                },
+                "openai_compatible": {
+                    "adapter": "openai_compatible",
+                    "base_url": "",
+                    "api_key": "",
+                    "model": "",
+                    "purpose": "explicit OpenAI-compatible HTTP endpoint",
+                },
+            },
             "opencode_transport": "cli",
             "opencode_command": "opencode",
             "opencode_model": "",
@@ -97,6 +169,10 @@ def default_config() -> dict[str, Any]:
                 "cockpit_base_url": "http://127.0.0.1:8787",
                 "oauth_start_path": "/hh/oauth/start",
             },
+        },
+        "campaigns": {
+            "daily_cap": 0,
+            "per_source_caps": {},
         },
         "sources": {
             "hh": {
@@ -197,6 +273,29 @@ def save_config(path: str | Path, config: dict[str, Any]) -> None:
         fh.write("\n")
 
 
+def preserve_masked_secrets(existing: Any, incoming: Any) -> Any:
+    """Keep stored secret values when a UI/API roundtrip sends masked placeholders."""
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        result: dict[str, Any] = {}
+        for key, value in incoming.items():
+            lowered = key.lower()
+            old_value = existing.get(key)
+            is_sensitive = lowered in SENSITIVE_EXACT or any(
+                lowered.endswith(suffix) for suffix in SENSITIVE_SUFFIXES
+            )
+            if is_sensitive and value == MASK and old_value not in ("", None, MASK):
+                result[key] = old_value
+            else:
+                result[key] = preserve_masked_secrets(old_value, value)
+        return result
+    if isinstance(existing, list) and isinstance(incoming, list):
+        return [
+            preserve_masked_secrets(existing[index] if index < len(existing) else None, item)
+            for index, item in enumerate(incoming)
+        ]
+    return incoming
+
+
 def active_profile(config: dict[str, Any]) -> dict[str, Any]:
     """Return the currently selected profile dict."""
     profile_id = config.get("profile", "default")
@@ -239,4 +338,23 @@ def mask_secrets(value: Any) -> Any:
         return masked
     if isinstance(value, list):
         return [mask_secrets(item) for item in value]
+    if isinstance(value, str):
+        return _mask_secret_string(value)
     return value
+
+
+def _mask_secret_string(value: str) -> str:
+    text = value
+    patterns = [
+        (r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)\S+", r"\1***"),
+        (r"(?i)(cookie\s*[:=]\s*)[^\r\n]+", r"\1***"),
+        (r"(?i)\b(client_secret|access_token|refresh_token|api_key|session_id)\s*=\s*[^\s&;]+", r"\1=***"),
+        (
+            r"(?i)(--(?:api-key|client-secret|access-token|refresh-token|session-id)(?:=|\s+))[^\s]+",
+            r"\1***",
+        ),
+        (r"(?i)\bsk-[A-Za-z0-9][A-Za-z0-9_-]{2,}\b", MASK),
+    ]
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    return text

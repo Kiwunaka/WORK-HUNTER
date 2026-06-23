@@ -135,6 +135,7 @@ class SafeTaskRunner:
                     skip_tests=bool(task.get("skip_tests") or task.get("skip-tests") or False),
                     ai_filter_mode=str(task.get("ai_filter_mode") or task.get("ai-filter-mode") or "off"),
                     resume_id=task.get("resume_id") or task.get("resume-id"),
+                    daily_cap=task.get("daily_cap") or task.get("daily-cap"),
                 )
             else:
                 return {"task": task_name, "status": "blocked", "reason": "task_not_safe"}

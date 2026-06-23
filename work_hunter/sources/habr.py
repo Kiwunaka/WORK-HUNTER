@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 from ..models import Job
+from .apply_forms import detect_apply_mechanism
 from .common import absolute_url, clean_text, fetch_url, last_path_part
 
 
@@ -76,6 +77,16 @@ class HabrSource:
         }
         url = f"{BASE_URL}/vacancies?{urllib.parse.urlencode(params)}"
         return fetch_url(url)
+
+    def detail(self, source_id: str) -> Job:
+        vacancy_id = urllib.parse.quote(str(source_id))
+        url = f"{BASE_URL}/vacancies/{vacancy_id}"
+        return parse_habr_detail_html(fetch_url(url), source_id=str(source_id), url=url)
+
+    def apply_mechanism(self, source_id: str) -> dict[str, Any]:
+        vacancy_id = urllib.parse.quote(str(source_id))
+        url = f"{BASE_URL}/vacancies/{vacancy_id}"
+        return parse_habr_apply_mechanism(fetch_url(url), source_id=str(source_id), url=url)
 
 
 def extract_rss_url(html: str) -> str | None:
@@ -171,6 +182,53 @@ def parse_habr_html(html: str) -> list[Job]:
     return jobs
 
 
+def parse_habr_detail_html(html: str, *, source_id: str, url: str) -> Job:
+    title = _extract_html_first(
+        html,
+        (
+            r"<h1\b[^>]*>(.*?)</h1>",
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            r"<title\b[^>]*>(.*?)</title>",
+        ),
+    )
+    description = _extract_html_first(html, (r"<article\b[^>]*>(.*?)</article>", r"<main\b[^>]*>(.*?)</main>")) or clean_text(html)
+    company = _extract_html_first(
+        html,
+        (
+            r'class=["\'][^"\']*(?:company_name|company-name|company)[^"\']*["\'][^>]*>(.*?)</',
+            r'data-qa=["\'][^"\']*company[^"\']*["\'][^>]*>(.*?)</',
+        ),
+    )
+    location = _extract_html_first(
+        html,
+        (
+            r'class=["\'][^"\']*(?:location|address)[^"\']*["\'][^>]*>(.*?)</',
+            r'data-qa=["\'][^"\']*(?:location|address)[^"\']*["\'][^>]*>(.*?)</',
+        ),
+    )
+    return Job(
+        source="habr",
+        source_id=source_id,
+        url=url,
+        title=title or f"Habr vacancy {source_id}",
+        company=company,
+        location=location,
+        remote=_remote_from_text(f"{title} {location} {description}"),
+        description=description or title,
+    )
+
+
+def parse_habr_apply_mechanism(html: str, *, source_id: str, url: str) -> dict[str, Any]:
+    return detect_apply_mechanism(
+        html,
+        source="habr",
+        source_id=source_id,
+        url=url,
+        base_url=BASE_URL,
+        form_signature="habr_apply_form:v1",
+    )
+
+
 def _company_from_description(description: str) -> str:
     if not description:
         return ""
@@ -262,3 +320,18 @@ def _int_or_none(value: Any) -> int | None:
         return int(float(str(value).replace(" ", "")))
     except ValueError:
         return None
+
+
+def _extract_html_first(html: str, patterns: tuple[str, ...]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, html or "", flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return clean_text(match.group(1))
+    return ""
+
+
+def _remote_from_text(text: str) -> bool | None:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("remote", "remotely", "удален", "удалён")):
+        return True
+    return None

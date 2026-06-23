@@ -5,7 +5,16 @@ description = "Personal local job-search command center with MCP tools and a loc
 requires-python = ">=3.11"
 dependencies = [
   "mcp>=1.0",
+  "requests>=2.31,<3",
   "starlette>=0.27,<0.47",
+]
+
+[project.optional-dependencies]
+browser = [
+  "playwright>=1.45,<2",
+]
+dev = [
+  "pytest>=8,<9",
 ]
 
 [project.scripts]

@@ -60,6 +60,14 @@ def import_external_session_from_har(
         captured = _capture_headers(request.get("headers") or [])
         if captured:
             headers_by_host.setdefault(host, {}).update(captured)
+    if not headers_by_host:
+        return {
+            "status": "blocked",
+            "name": name,
+            "reason": "no_allowed_har_entries",
+            "hosts": [],
+            "headers": {},
+        }
     sessions = _load_sessions(root)
     sessions.setdefault("sessions", {})[name] = {
         "name": name,
@@ -91,6 +99,7 @@ def call_external_session(
     data: str | None = None,
     real: bool = False,
     unsafe_lab: bool = False,
+    certified_apply: bool = False,
     requester: Callable[..., ExternalHTTPResponse] | None = None,
     timeout: int = 20,
 ) -> dict[str, Any]:
@@ -119,6 +128,13 @@ def call_external_session(
         return {
             "status": "blocked",
             "reason": "mutating_real_call_requires_unsafe_lab",
+            "name": name,
+            "request": request_view,
+        }
+    if _is_mutating_method(method) and _is_apply_like_request(url, data) and not certified_apply:
+        return {
+            "status": "blocked",
+            "reason": "external_apply_submit_blocked",
             "name": name,
             "request": request_view,
         }
@@ -207,6 +223,24 @@ def _headers_for_host(session: dict[str, Any], host: str) -> dict[str, str] | No
 
 def _is_mutating_method(method: str) -> bool:
     return method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _is_apply_like_request(url: str, data: str | None = None) -> bool:
+    haystack = f"{url}\n{data or ''}".lower()
+    markers = (
+        "/apply",
+        "apply/",
+        "applications",
+        "application",
+        "responses",
+        "response",
+        "negotiations",
+        "vacancy_response",
+        "cover_letter",
+        "resume_id",
+        "vacancy_id",
+    )
+    return any(marker in haystack for marker in markers)
 
 
 def _host_allowed(host: str, allowed_hosts: set[str]) -> bool:

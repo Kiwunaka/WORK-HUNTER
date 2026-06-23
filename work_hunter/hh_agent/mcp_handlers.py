@@ -4,6 +4,10 @@ from typing import Any
 
 from mcp.types import Tool
 
+from ..llm.structured import send_structured_chat
+from .policy import VacancyPolicy
+from .research import HHVacancyResearchService
+
 
 class HHMCPToolHandlers:
     TOOL_NAMES = {
@@ -60,7 +64,7 @@ class HHMCPToolHandlers:
             ),
             Tool(
                 name="hh_analyze_vacancy",
-                description="Analyze one HH vacancy. Current implementation records an audited placeholder until LLM service is wired into MCP.",
+                description="Analyze one HH vacancy and persist an audited HH vacancy analysis.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -137,18 +141,29 @@ class HHMCPToolHandlers:
         if name == "hh_get_vacancy":
             return self.service.hh_call_api("GET", f"/vacancies/{args['vacancy_id']}")
         if name == "hh_analyze_vacancy":
+            vacancy_id = str(args["vacancy_id"])
+            resume_id = str(args.get("resume_id") or "")
+            research = self._research_service()
+            vacancy = research.get_vacancy_details(vacancy_id)
+            analysis = research.analyze_vacancy(vacancy, resume_id=resume_id)
             return {
-                "status": "planned",
-                "vacancy_id": str(args["vacancy_id"]),
-                "resume_id": str(args.get("resume_id") or ""),
-                "message": "LLM-backed MCP analysis is wired in the next implementation slice.",
+                "status": "analyzed",
+                "vacancy_id": vacancy_id,
+                "resume_id": resume_id,
+                "analysis": analysis.to_dict(),
             }
         if name == "hh_research_vacancies":
+            research = self._research_service()
+            limit = int(args.get("limit") or 20)
+            params = {"text": str(args.get("text") or ""), "per_page": limit, "page": 0}
+            results = research.search_vacancies(params)[:limit]
             return {
-                "status": "planned",
+                "status": "researched",
                 "text": str(args.get("text") or ""),
-                "limit": int(args.get("limit") or 20),
+                "limit": limit,
                 "resume_id": str(args.get("resume_id") or ""),
+                "items": [item.to_dict() for item in results],
+                "count": len(results),
             }
         if name == "hh_apply_vacancy":
             if args.get("confirm_apply"):
@@ -157,11 +172,21 @@ class HHMCPToolHandlers:
                     "vacancy_id": str(args["vacancy_id"]),
                     "message": "MCP real apply is blocked until approval/confirm flow is enabled.",
                 }
+            vacancy_id = str(args["vacancy_id"])
+            resume_id = str(args.get("resume_id") or "")
+            research = self._research_service()
+            vacancy = _vacancy_or_minimal(research.get_vacancy_details(vacancy_id), vacancy_id)
+            attempt = research.plan_apply_vacancy(
+                vacancy,
+                resume_id=resume_id,
+                letter=str(args.get("letter") or ""),
+            )
             return {
-                "status": "planned",
-                "vacancy_id": str(args["vacancy_id"]),
-                "resume_id": str(args.get("resume_id") or ""),
+                "status": attempt.status,
+                "vacancy_id": vacancy_id,
+                "resume_id": resume_id,
                 "dry_run": True,
+                "attempt": attempt.to_dict(),
             }
         if name == "hh_research_and_apply":
             if args.get("confirm_apply"):
@@ -169,13 +194,71 @@ class HHMCPToolHandlers:
                     "status": "blocked",
                     "message": "MCP real apply is blocked until approval/confirm flow is enabled.",
                 }
+            research = self._research_service()
+            limit = int(args.get("limit") or 20)
+            resume_id = str(args.get("resume_id") or "")
+            params = {"text": str(args.get("text") or ""), "per_page": limit, "page": 0}
+            items = []
+            counts = {"planned": 0, "blocked": 0, "applied": 0}
+            for result in research.search_vacancies(params)[:limit]:
+                vacancy = _vacancy_or_minimal(research.get_vacancy_details(result.vacancy_id), result.vacancy_id)
+                attempt = research.plan_apply_vacancy(vacancy, resume_id=resume_id)
+                attempt_payload = attempt.to_dict()
+                if attempt.status in counts:
+                    counts[attempt.status] += 1
+                elif attempt.status == "blocked":
+                    counts["blocked"] += 1
+                items.append(
+                    {
+                        "vacancy_id": result.vacancy_id,
+                        "vacancy": result.to_dict(),
+                        "attempt": attempt_payload,
+                    }
+                )
             return {
                 "status": "planned",
                 "text": str(args.get("text") or ""),
-                "limit": int(args.get("limit") or 20),
-                "counts": {"planned": 0, "blocked": 0, "applied": 0},
+                "limit": limit,
+                "resume_id": resume_id,
+                "counts": counts,
+                "items": items,
             }
         raise KeyError(name)
+
+    def _research_service(self) -> HHVacancyResearchService:
+        config = getattr(self.service, "config", {}) or {}
+        hh_agent = config.get("hh_agent") or {}
+        policy = VacancyPolicy.from_mapping(dict(hh_agent.get("policy") or {}))
+        try:
+            persona = self.service.candidate_map()
+        except Exception:
+            persona = {}
+        return HHVacancyResearchService(
+            client=_HHMCPClient(self.service),
+            storage=self.service.storage,
+            ai_config=dict(config.get("ai") or {}),
+            policy=policy,
+            persona=persona,
+            structured_chat=send_structured_chat,
+        )
+
+
+class _HHMCPClient:
+    def __init__(self, service: Any):
+        self.service = service
+
+    def search_vacancies(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        payload = self.service.hh_call_api("GET", "/vacancies", data=params)
+        items = payload.get("items") if isinstance(payload, dict) else None
+        return list(items or [])
+
+    def get_vacancy(self, vacancy_id: str) -> dict[str, Any]:
+        return dict(self.service.hh_call_api("GET", f"/vacancies/{vacancy_id}"))
+
+    def get_similar_vacancies(self, vacancy_id: str) -> list[dict[str, Any]]:
+        payload = self.service.hh_call_api("GET", f"/vacancies/{vacancy_id}/similar_vacancies")
+        items = payload.get("items") if isinstance(payload, dict) else None
+        return list(items or [])
 
 
 def _search_params(args: dict[str, Any]) -> dict[str, Any]:
@@ -187,3 +270,9 @@ def _search_params(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("area"):
         params["area"] = str(args["area"])
     return params
+
+
+def _vacancy_or_minimal(value: dict[str, Any], vacancy_id: str) -> dict[str, Any]:
+    if value.get("id") or value.get("vacancy_id"):
+        return value
+    return {**value, "id": vacancy_id}

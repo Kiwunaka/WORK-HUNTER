@@ -9,6 +9,7 @@ __pycache__/
 .coverage
 htmlcov/
 work_hunter.egg-info/
+node_modules/
 
 # Virtual environments and local installs
 .venv/

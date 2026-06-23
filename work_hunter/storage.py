@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
+from .config import mask_secrets
 from .models import (
     Application,
     CalendarEvent,
@@ -65,6 +66,21 @@ def _hh_api_lab_snippet_row(row: sqlite3.Row) -> dict[str, Any]:
         "body": json.loads(row["body_json"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+
+
+def _resume_variant_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "base_resume_id": row["base_resume_id"],
+        "job_id": row["job_id"],
+        "profile_id": row["profile_id"],
+        "name": row["name"],
+        "body": row["body"],
+        "claims": json.loads(row["claims_json"]),
+        "status": row["status"],
+        "policy_result": json.loads(row["policy_result_json"]),
+        "created_at": row["created_at"],
     }
 
 
@@ -250,6 +266,9 @@ class Storage:
                 profile_id TEXT NOT NULL DEFAULT 'default',
                 is_active INTEGER NOT NULL DEFAULT 0,
                 ats_score INTEGER,
+                source_format TEXT NOT NULL DEFAULT '',
+                imported_from TEXT NOT NULL DEFAULT '',
+                canonical_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT ''
             );
@@ -556,6 +575,223 @@ class Storage:
                 updated_at TEXT NOT NULL DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS candidate_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                category TEXT NOT NULL DEFAULT '',
+                key TEXT NOT NULL DEFAULT '',
+                value_json TEXT NOT NULL DEFAULT '{}',
+                confidence REAL NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'unconfirmed',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS candidate_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS candidate_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                fact_id INTEGER,
+                status TEXT NOT NULL DEFAULT '',
+                claim_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS candidate_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                fact_id INTEGER,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS resume_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                asset_type TEXT NOT NULL DEFAULT '',
+                path TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS resume_variants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                base_resume_id INTEGER,
+                job_id INTEGER,
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                name TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                claims_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT '',
+                policy_result_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS resume_variant_diffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resume_variant_id INTEGER,
+                diff_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS application_packs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                resume_variant_id TEXT NOT NULL DEFAULT '',
+                template_id TEXT NOT NULL DEFAULT '',
+                cover_letter TEXT NOT NULL DEFAULT '',
+                short_message TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                preview_json TEXT NOT NULL DEFAULT '{}',
+                policy_status TEXT NOT NULL DEFAULT '',
+                policy_reasons_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS application_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                template_type TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS application_previews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_pack_id INTEGER,
+                preview_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS source_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS source_capabilities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL DEFAULT '',
+                capabilities_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS source_adapter_maturity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL DEFAULT '',
+                level INTEGER NOT NULL DEFAULT 0,
+                policy_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS browser_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL DEFAULT '',
+                profile_dir TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS browser_recordings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL DEFAULT '',
+                recording_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS form_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL DEFAULT '',
+                form_signature TEXT NOT NULL DEFAULT '',
+                mapping_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS campaign_presets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                preset_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS policy_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
+                job_id INTEGER,
+                source TEXT NOT NULL DEFAULT '',
+                decision_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS replay_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
+                job_id INTEGER,
+                source TEXT NOT NULL DEFAULT '',
+                event_type TEXT NOT NULL DEFAULT '',
+                actor TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                data_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS replay_screenshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                replay_event_id INTEGER,
+                name TEXT NOT NULL DEFAULT '',
+                path TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                route TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                input_json TEXT NOT NULL DEFAULT '{}',
+                output_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                input_json TEXT NOT NULL DEFAULT '{}',
+                output_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL DEFAULT '',
+                actor TEXT NOT NULL DEFAULT '',
+                data_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS hh_apply_from_file_state (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_path TEXT NOT NULL DEFAULT '',
@@ -610,7 +846,24 @@ class Storage:
             );
             """
         )
+        self._ensure_columns(
+            "resumes",
+            {
+                "source_format": "TEXT NOT NULL DEFAULT ''",
+                "imported_from": "TEXT NOT NULL DEFAULT ''",
+                "canonical_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        )
         self.conn.commit()
+
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def upsert_job(self, job: Job) -> int:
         self.conn.execute(
@@ -1457,13 +1710,597 @@ class Storage:
             for row in rows
         ]
 
+    def list_hh_campaign_runs(self, limit: int = 20) -> list[HHCampaignRun]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_campaign_runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            HHCampaignRun(
+                id=int(row["id"]),
+                status=row["status"],
+                filters=json.loads(row["filters_json"]),
+                counts=json.loads(row["counts_json"]),
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+            )
+            for row in rows
+        ]
+
+    def save_candidate_fact(
+        self,
+        *,
+        profile_id: str = "default",
+        category: str = "",
+        key: str,
+        value: Any,
+        confidence: float = 0.5,
+        source: str = "",
+        status: str = "unconfirmed",
+        evidence: dict[str, Any] | None = None,
+    ) -> int:
+        now = utc_now()
+        cur = self.conn.execute(
+            """
+            INSERT INTO candidate_facts (
+                profile_id, category, key, value_json, confidence, source,
+                status, evidence_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                profile_id,
+                category,
+                key,
+                json.dumps(value, ensure_ascii=False),
+                float(confidence),
+                source,
+                status,
+                json.dumps(evidence or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_candidate_facts(
+        self,
+        *,
+        profile_id: str = "default",
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [profile_id]
+        where = "WHERE profile_id = ?"
+        if status:
+            where += " AND status = ?"
+            params.append(status)
+        rows = self.conn.execute(
+            f"SELECT * FROM candidate_facts {where} ORDER BY id",
+            params,
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "profile_id": row["profile_id"],
+                "category": row["category"],
+                "key": row["key"],
+                "value": json.loads(row["value_json"]),
+                "confidence": float(row["confidence"]),
+                "source": row["source"],
+                "status": row["status"],
+                "evidence": json.loads(row["evidence_json"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def update_candidate_fact_status(self, fact_id: int, status: str) -> dict[str, Any] | None:
+        self.conn.execute(
+            "UPDATE candidate_facts SET status = ?, updated_at = ? WHERE id = ?",
+            (status, utc_now(), fact_id),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM candidate_facts WHERE id = ?",
+            (fact_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "profile_id": row["profile_id"],
+            "category": row["category"],
+            "key": row["key"],
+            "value": json.loads(row["value_json"]),
+            "confidence": float(row["confidence"]),
+            "source": row["source"],
+            "status": row["status"],
+            "evidence": json.loads(row["evidence_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_resume_variant(
+        self,
+        *,
+        base_resume_id: int | None,
+        job_id: int | None,
+        profile_id: str,
+        name: str,
+        body: str,
+        claims: list[dict[str, Any]],
+        status: str,
+        policy_result: dict[str, Any] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO resume_variants (
+                base_resume_id, job_id, profile_id, name, body, claims_json,
+                status, policy_result_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                base_resume_id,
+                job_id,
+                profile_id,
+                name,
+                body,
+                json.dumps(claims, ensure_ascii=False),
+                status,
+                json.dumps(policy_result or {}, ensure_ascii=False),
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_resume_variants(self, *, profile_id: str | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if profile_id:
+            where = "WHERE profile_id = ?"
+            params.append(profile_id)
+        rows = self.conn.execute(
+            f"SELECT * FROM resume_variants {where} ORDER BY id DESC",
+            params,
+        ).fetchall()
+        return [_resume_variant_row(row) for row in rows]
+
+    def get_resume_variant(self, variant_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM resume_variants WHERE id = ?",
+            (variant_id,),
+        ).fetchone()
+        return _resume_variant_row(row) if row is not None else None
+
+    def save_application_pack(
+        self,
+        *,
+        job_id: int,
+        source: str,
+        resume_variant_id: str = "",
+        template_id: str = "",
+        cover_letter: str = "",
+        short_message: str = "",
+        payload: dict[str, Any] | None = None,
+        preview: dict[str, Any] | None = None,
+        policy_status: str,
+        policy_reasons: list[str] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO application_packs (
+                job_id, source, resume_variant_id, template_id, cover_letter,
+                short_message, payload_json, preview_json, policy_status,
+                policy_reasons_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                source,
+                resume_variant_id,
+                template_id,
+                cover_letter,
+                short_message,
+                json.dumps(payload or {}, ensure_ascii=False),
+                json.dumps(preview or {}, ensure_ascii=False),
+                policy_status,
+                json.dumps(policy_reasons or [], ensure_ascii=False),
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_application_pack(self, pack_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM application_packs WHERE id = ?",
+            (pack_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "job_id": int(row["job_id"]),
+            "source": row["source"],
+            "resume_variant_id": row["resume_variant_id"],
+            "template_id": row["template_id"],
+            "cover_letter": row["cover_letter"],
+            "short_message": row["short_message"],
+            "payload": json.loads(row["payload_json"]),
+            "preview": json.loads(row["preview_json"]),
+            "policy_status": row["policy_status"],
+            "policy_reasons": json.loads(row["policy_reasons_json"]),
+            "created_at": row["created_at"],
+        }
+
+    def append_replay_event(
+        self,
+        *,
+        run_id: int | None = None,
+        job_id: int | None = None,
+        source: str = "",
+        event_type: str,
+        actor: str = "work_hunter",
+        title: str = "",
+        summary: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO replay_events (
+                run_id, job_id, source, event_type, actor, title, summary,
+                data_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                job_id,
+                source,
+                event_type,
+                actor,
+                title,
+                summary,
+                json.dumps(data or {}, ensure_ascii=False),
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_replay_events(
+        self,
+        *,
+        job_id: int | None = None,
+        run_id: int | None = None,
+        source: str | None = None,
+        event_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if job_id is not None:
+            conditions.append("job_id = ?")
+            params.append(job_id)
+        if run_id is not None:
+            conditions.append("run_id = ?")
+            params.append(run_id)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        limit_sql = " LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            params.append(limit)
+        rows = self.conn.execute(
+            f"SELECT * FROM replay_events {where} ORDER BY id ASC{limit_sql}",
+            params,
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "run_id": row["run_id"],
+                "job_id": row["job_id"],
+                "source": row["source"],
+                "event_type": row["event_type"],
+                "actor": row["actor"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "data": json.loads(row["data_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def get_replay_event(self, event_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM replay_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "run_id": row["run_id"],
+            "job_id": row["job_id"],
+            "source": row["source"],
+            "event_type": row["event_type"],
+            "actor": row["actor"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "data": json.loads(row["data_json"]),
+            "created_at": row["created_at"],
+        }
+
+    def add_replay_screenshot(self, replay_event_id: int, name: str, path: str | Path) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO replay_screenshots (replay_event_id, name, path, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (replay_event_id, str(name or "screenshot"), str(path), utc_now()),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_replay_screenshots(self, replay_event_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM replay_screenshots WHERE replay_event_id = ? ORDER BY id",
+            (replay_event_id,),
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "replay_event_id": row["replay_event_id"],
+                "name": row["name"],
+                "path": row["path"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def get_replay_screenshot(self, replay_event_id: int, name: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT * FROM replay_screenshots
+            WHERE replay_event_id = ? AND name = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (replay_event_id, str(name or "screenshot")),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "replay_event_id": row["replay_event_id"],
+            "name": row["name"],
+            "path": row["path"],
+            "created_at": row["created_at"],
+        }
+
+    def add_browser_recording(self, source: str, recording: dict[str, Any]) -> int:
+        safe_recording = mask_secrets(recording or {})
+        cur = self.conn.execute(
+            """
+            INSERT INTO browser_recordings (source, recording_json, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (
+                str(source or "").strip().lower().replace("-", "_"),
+                json.dumps(safe_recording, ensure_ascii=False),
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_browser_recordings(self, source: str | None = None) -> list[dict[str, Any]]:
+        if source:
+            rows = self.conn.execute(
+                "SELECT * FROM browser_recordings WHERE source = ? ORDER BY id",
+                (str(source).strip().lower().replace("-", "_"),),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM browser_recordings ORDER BY id").fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "source": row["source"],
+                "recording": mask_secrets(json.loads(row["recording_json"])),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def start_ai_run(self, route: str, input_data: dict[str, Any] | None = None) -> int:
+        now = utc_now()
+        cur = self.conn.execute(
+            """
+            INSERT INTO ai_runs (route, status, input_json, output_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(route or ""),
+                "running",
+                json.dumps(mask_secrets(input_data or {}), ensure_ascii=False),
+                "{}",
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def finish_ai_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        output: dict[str, Any] | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE ai_runs
+            SET status = ?, output_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(status or "ok"),
+                json.dumps(mask_secrets(output or {}), ensure_ascii=False),
+                utc_now(),
+                run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def list_ai_runs(self, limit: int | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(
+            f"SELECT * FROM ai_runs ORDER BY id DESC{limit_sql}",
+            params,
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "tool_name": "ai_run",
+                "route": row["route"],
+                "status": row["status"],
+                "input": mask_secrets(json.loads(row["input_json"])),
+                "output": mask_secrets(json.loads(row["output_json"])),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def start_agent_run(self, agent_name: str, input_data: dict[str, Any] | None = None) -> int:
+        now = utc_now()
+        cur = self.conn.execute(
+            """
+            INSERT INTO agent_runs (agent_name, status, input_json, output_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(agent_name or ""),
+                "running",
+                json.dumps(mask_secrets(input_data or {}), ensure_ascii=False),
+                "{}",
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def finish_agent_run(
+        self,
+        run_id: int,
+        *,
+        status: str = "ok",
+        output: dict[str, Any] | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE agent_runs
+            SET status = ?, output_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(status or "ok"),
+                json.dumps(mask_secrets(output or {}), ensure_ascii=False),
+                utc_now(),
+                run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def list_agent_runs(self, limit: int | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(
+            f"SELECT * FROM agent_runs ORDER BY id DESC{limit_sql}",
+            params,
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "agent_name": row["agent_name"],
+                "status": row["status"],
+                "input": mask_secrets(json.loads(row["input_json"])),
+                "output": mask_secrets(json.loads(row["output_json"])),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def append_audit_log(
+        self,
+        *,
+        event_type: str,
+        actor: str = "work_hunter",
+        data: dict[str, Any] | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO audit_logs (event_type, actor, data_json, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                str(event_type or ""),
+                str(actor or "work_hunter"),
+                json.dumps(mask_secrets(data or {}), ensure_ascii=False),
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_audit_logs(self, limit: int | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(limit)
+        rows = self.conn.execute(
+            f"SELECT * FROM audit_logs ORDER BY id DESC{limit_sql}",
+            params,
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "event_type": row["event_type"],
+                "actor": row["actor"],
+                "data": mask_secrets(json.loads(row["data_json"])),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     def start_hh_agent_mcp_run(self, tool_name: str, input_data: dict[str, Any] | None = None) -> int:
+        safe_input = mask_secrets(input_data or {})
         cur = self.conn.execute(
             """
             INSERT INTO hh_agent_mcp_runs (tool_name, input_json, status, started_at)
             VALUES (?, ?, ?, ?)
             """,
-            (tool_name, json.dumps(input_data or {}, ensure_ascii=False), "running", utc_now()),
+            (tool_name, json.dumps(safe_input, ensure_ascii=False), "running", utc_now()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -1476,13 +2313,14 @@ class Storage:
         output: dict[str, Any] | None = None,
         error: str = "",
     ) -> None:
+        safe_output = mask_secrets(output or {})
         self.conn.execute(
             """
             UPDATE hh_agent_mcp_runs
             SET status = ?, output_json = ?, error = ?, finished_at = ?
             WHERE id = ?
             """,
-            (status, json.dumps(output or {}, ensure_ascii=False), error, utc_now(), run_id),
+            (status, json.dumps(safe_output, ensure_ascii=False), error, utc_now(), run_id),
         )
         self.conn.commit()
 
@@ -2412,8 +3250,12 @@ class Storage:
         if resume.id == 0:
             cur = self.conn.execute(
                 """
-                INSERT INTO resumes (name, body, profile_id, is_active, ats_score, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO resumes (
+                    name, body, profile_id, is_active, ats_score,
+                    source_format, imported_from, canonical_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     resume.name,
@@ -2421,6 +3263,9 @@ class Storage:
                     resume.profile_id,
                     int(resume.is_active),
                     resume.ats_score,
+                    resume.source_format,
+                    resume.imported_from,
+                    json.dumps(resume.canonical, ensure_ascii=False),
                     now,
                     now,
                 ),
@@ -2436,6 +3281,9 @@ class Storage:
                     profile_id = ?,
                     is_active = ?,
                     ats_score = ?,
+                    source_format = ?,
+                    imported_from = ?,
+                    canonical_json = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -2445,6 +3293,9 @@ class Storage:
                     resume.profile_id,
                     int(resume.is_active),
                     resume.ats_score,
+                    resume.source_format,
+                    resume.imported_from,
+                    json.dumps(resume.canonical, ensure_ascii=False),
                     now,
                     resume.id,
                 ),
@@ -2466,6 +3317,9 @@ class Storage:
             profile_id=row["profile_id"],
             is_active=bool(row["is_active"]),
             ats_score=row["ats_score"],
+            source_format=row["source_format"],
+            imported_from=row["imported_from"],
+            canonical=json.loads(row["canonical_json"] or "{}"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -2487,6 +3341,9 @@ class Storage:
                 profile_id=row["profile_id"],
                 is_active=bool(row["is_active"]),
                 ats_score=row["ats_score"],
+                source_format=row["source_format"],
+                imported_from=row["imported_from"],
+                canonical=json.loads(row["canonical_json"] or "{}"),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )

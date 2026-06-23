@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config import mask_secrets
 from ..models import CalendarEvent, Resume, SavedSearch
+from ..security.redaction import redact_secrets
+from ..resume_engine import import_resume_file
 from ..services import WorkHunter
 
 
@@ -38,7 +40,185 @@ def make_handler(root: Path):
             if path == "/":
                 self._send_static("index.html")
                 return
-            if path == "/api/jobs":
+            if path == "/api/init/status":
+                app = WorkHunter(root)
+                self._send_json(app.init_report(check=True, with_ai=True, with_browser=True))
+                return
+            if path == "/api/doctor":
+                app = WorkHunter(root)
+                self._send_json(app.doctor_report())
+                return
+            if path == "/api/ai/status":
+                app = WorkHunter(root)
+                self._send_json(app.ai_status())
+                return
+            if path == "/api/ai/runs":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                self._send_json(app.storage.list_ai_runs(limit=_int_arg(query, "limit", 20)))
+                return
+            if path == "/api/onboarding/status":
+                app = WorkHunter(root)
+                self._send_json(app.candidate_completeness())
+                return
+            if path == "/api/onboarding/questions":
+                app = WorkHunter(root)
+                self._send_json(app.onboarding_questions())
+                return
+            if path == "/api/candidate/profile":
+                app = WorkHunter(root)
+                self._send_json(app.active_profile_info())
+                return
+            if path == "/api/candidate/map":
+                app = WorkHunter(root)
+                self._send_json(app.candidate_map())
+                return
+            if path == "/api/candidate/facts":
+                app = WorkHunter(root)
+                self._send_json(app.candidate_facts())
+                return
+            if path == "/api/candidate/completeness":
+                app = WorkHunter(root)
+                self._send_json(app.candidate_completeness())
+                return
+            if path.startswith("/api/replay/jobs/") and path.endswith("/export"):
+                query = parse_qs(parsed.query)
+                job_id = _path_int(path.removesuffix("/export"), "/api/replay/jobs/")
+                app = WorkHunter(root)
+                self._send_text(
+                    app.export_replay_markdown(
+                        job_id=job_id,
+                        source=_str_arg(query, "source"),
+                        event_type=_str_arg(query, "event_type"),
+                    ),
+                    content_type="text/markdown; charset=utf-8",
+                )
+                return
+            if path.startswith("/api/replay/runs/") and path.endswith("/export"):
+                query = parse_qs(parsed.query)
+                run_id = _path_int(path.removesuffix("/export"), "/api/replay/runs/")
+                app = WorkHunter(root)
+                self._send_text(
+                    app.export_replay_markdown(
+                        run_id=run_id,
+                        source=_str_arg(query, "source"),
+                        event_type=_str_arg(query, "event_type"),
+                    ),
+                    content_type="text/markdown; charset=utf-8",
+                )
+                return
+            if path.startswith("/api/replay/events/") and path.endswith("/screenshot"):
+                query = parse_qs(parsed.query)
+                event_id = _path_int(path.removesuffix("/screenshot"), "/api/replay/events/")
+                app = WorkHunter(root)
+                event = app.storage.get_replay_event(event_id)
+                screenshot_name = _str_arg(query, "name") or "screenshot"
+                screenshot_path = _replay_screenshot_path(root, app, event, screenshot_name)
+                if screenshot_path is None:
+                    self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                content = screenshot_path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", mimetypes.guess_type(screenshot_path.name)[0] or "application/octet-stream")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            if path.startswith("/api/replay/jobs/"):
+                query = parse_qs(parsed.query)
+                job_id = _path_int(path, "/api/replay/jobs/")
+                app = WorkHunter(root)
+                self._send_json(
+                    app.replay_for_job(
+                        job_id,
+                        source=_str_arg(query, "source"),
+                        event_type=_str_arg(query, "event_type"),
+                    )
+                )
+                return
+            if path == "/api/replay/runs":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                runs = app.storage.list_hh_campaign_runs(limit=_int_arg(query, "limit", 20))
+                self._send_json([run.to_dict() for run in runs])
+                return
+            if path.startswith("/api/replay/runs/"):
+                query = parse_qs(parsed.query)
+                run_id = _path_int(path, "/api/replay/runs/")
+                app = WorkHunter(root)
+                self._send_json(
+                    app.replay_for_run(
+                        run_id,
+                        source=_str_arg(query, "source"),
+                        event_type=_str_arg(query, "event_type"),
+                    )
+                )
+                return
+            if path == "/api/source-capabilities":
+                app = WorkHunter(root)
+                self._send_json(app.source_capabilities())
+                return
+            if path == "/api/source-status":
+                app = WorkHunter(root)
+                self._send_json(app.source_capabilities())
+                return
+            if path in {"/api/sources/status", "/api/sources/capabilities"}:
+                app = WorkHunter(root)
+                self._send_json(app.source_capabilities())
+                return
+            if path == "/api/security/status":
+                app = WorkHunter(root)
+                self._send_json(app.security_status())
+                return
+            if path == "/api/browser/status":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                self._send_json(app.browser_lab_status(_str_arg(query, "source") or "getmatch"))
+                return
+            if path == "/api/browser-lab/status":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                self._send_json(app.browser_lab_status(_str_arg(query, "source") or "getmatch"))
+                return
+            if path == "/api/campaigns/presets":
+                app = WorkHunter(root)
+                self._send_json(app.list_hh_campaign_presets())
+                return
+            if path == "/api/campaigns":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                runs = app.storage.list_hh_campaign_runs(limit=_int_arg(query, "limit", 20))
+                self._send_json([run.to_dict() for run in runs])
+                return
+            if path.startswith("/api/campaigns/") and path.endswith("/timeline"):
+                run_id = _path_int(path.removesuffix("/timeline"), "/api/campaigns/")
+                app = WorkHunter(root)
+                self._send_json(app.replay_for_run(run_id))
+                return
+            if path.startswith("/api/campaigns/"):
+                run_id = _path_int(path, "/api/campaigns/")
+                app = WorkHunter(root)
+                self._send_json(_campaign_review_payload(app, run_id))
+                return
+            if path == "/api/hh/campaigns":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                runs = app.storage.list_hh_campaign_runs(limit=_int_arg(query, "limit", 20))
+                self._send_json([run.to_dict() for run in runs])
+                return
+            if path.startswith("/api/hh/campaigns/"):
+                run_id = _path_int(path, "/api/hh/campaigns/")
+                app = WorkHunter(root)
+                run = app.storage.get_hh_campaign_run(run_id)
+                items = []
+                for item in app.storage.list_hh_campaign_items(run_id):
+                    payload = item.to_dict()
+                    job = app.storage.get_job(item.job_id)
+                    payload["job"] = job.to_dict() if job else None
+                    items.append(payload)
+                self._send_json({"run": run.to_dict() if run else None, "items": items})
+                return
+            if path in {"/api/jobs", "/api/inbox"}:
                 query = parse_qs(parsed.query)
                 app = WorkHunter(root)
                 jobs = app.list_jobs(
@@ -85,6 +265,33 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 resumes = app.storage.list_resumes()
                 self._send_json([r.to_dict() for r in resumes])
+                return
+            if path == "/api/resumes/assets":
+                app = WorkHunter(root)
+                self._send_json({"items": [r.to_dict() for r in app.storage.list_resumes()]})
+                return
+            if path == "/api/resumes/variants":
+                app = WorkHunter(root)
+                self._send_json(app.storage.list_resume_variants(profile_id=str(app.config.get("profile") or "default")))
+                return
+            if path.startswith("/api/resumes/variants/") and path.endswith("/diff"):
+                variant_id = _path_int(path.removesuffix("/diff"), "/api/resumes/variants/")
+                app = WorkHunter(root)
+                variant = app.storage.get_resume_variant(variant_id)
+                if variant is None:
+                    self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                policy = dict(variant.get("policy_result") or {})
+                self._send_json({"id": variant_id, "diff": str(policy.get("diff") or ""), "variant": variant})
+                return
+            if path.startswith("/api/applications/"):
+                pack_id = _path_int(path, "/api/applications/")
+                app = WorkHunter(root)
+                pack = app.storage.get_application_pack(pack_id)
+                if pack is None:
+                    self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._send_json(pack)
                 return
             if path == "/api/hh/resumes":
                 app = WorkHunter(root)
@@ -238,6 +445,11 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 self._send_json(app.active_profile_info())
                 return
+            if path.startswith("/api/pipeline/jobs/"):
+                app = WorkHunter(root)
+                job_id = _path_int(path, "/api/pipeline/jobs/")
+                self._send_json(app.pipeline_status(job_id))
+                return
             if path == "/api/about":
                 app = WorkHunter(root)
                 self._send_json(app.config.get("about", {}))
@@ -270,6 +482,445 @@ def make_handler(root: Path):
                     return
                 if path == "/api/score":
                     self._send_json({"scored": app.score_jobs(limit=body.get("limit", 10000))})
+                    return
+                if path == "/api/init":
+                    self._send_json(
+                        app.init_report(
+                            check=bool(body.get("check", True)),
+                            refresh_docs=bool(body.get("refresh_docs", False)),
+                            with_ai=bool(body.get("with_ai", False)),
+                            with_browser=bool(body.get("with_browser", False)),
+                            import_wo=body.get("import_wo"),
+                            dry_run=bool(body.get("dry_run", False)),
+                            force=bool(body.get("force", False)),
+                        )
+                    )
+                    return
+                if path == "/api/init/redaction-scan":
+                    self._send_json(_redaction_scan_payload(body))
+                    return
+                if path == "/api/ai/config":
+                    updated = dict(app.config)
+                    ai_config = dict(updated.get("ai") or {})
+                    ai_config = _deep_merge(ai_config, body)
+                    updated["ai"] = ai_config
+                    app.save_config(updated)
+                    self._send_json(mask_secrets(app.config.get("ai") or {}))
+                    return
+                if path == "/api/ai/run":
+                    route = str(body.get("route") or app.config.get("ai", {}).get("default_route") or "smart")
+                    run_id = app.storage.start_ai_run(route, body)
+                    try:
+                        result = app.ai_test(
+                            route=route,
+                            prompt=str(body.get("prompt") or "ping"),
+                            dry_run=bool(body.get("dry_run", False)),
+                        )
+                        app.storage.finish_ai_run(run_id, status=str(result.get("status") or "ok"), output=result)
+                        self._send_json({**result, "ai_run_id": run_id})
+                    except Exception as exc:
+                        app.storage.finish_ai_run(run_id, status="error", output={"error": str(exc)})
+                        raise
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/sync"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/sync").strip("/")
+                    self._send_json(_source_sync_payload(app, source, body))
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/test"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/test").strip("/")
+                    report = app.source_capabilities()
+                    self._send_json({"status": "ok", "source": source, "capabilities": report.get(source)})
+                    return
+                if path == "/api/sources/certification-matrix":
+                    raw_sources = body.get("sources")
+                    sources = [str(source) for source in raw_sources] if isinstance(raw_sources, list) else None
+                    self._send_json(
+                        app.source_certification_matrix(
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                            sources=sources,
+                            evidence=dict(body.get("evidence") or body.get("certification") or {}),
+                        )
+                    )
+                    return
+                if path == "/api/sources/certification-plan":
+                    raw_sources = body.get("sources")
+                    sources = [str(source) for source in raw_sources] if isinstance(raw_sources, list) else None
+                    self._send_json(
+                        app.source_certification_plan(
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                            sources=sources,
+                            evidence=dict(body.get("evidence") or body.get("certification") or {}),
+                        )
+                    )
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/certification-audit"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/certification-audit").strip("/")
+                    self._send_json(
+                        app.source_certification_audit(
+                            source,
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                            evidence=dict(body.get("evidence") or body.get("certification") or {}),
+                        )
+                    )
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/certification-evidence"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/certification-evidence").strip("/")
+                    self._send_json(
+                        app.record_source_certification_evidence(
+                            source,
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                            evidence=dict(body.get("evidence") or body.get("certification") or {}),
+                        )
+                    )
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/redaction-scan"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/redaction-scan").strip("/")
+                    raw_payload = body.get("payload")
+                    payload = raw_payload if isinstance(raw_payload, dict) else {}
+                    self._send_json(
+                        app.record_source_redaction_scan(
+                            source,
+                            payload=payload,
+                            text=str(body.get("text") or ""),
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                        )
+                    )
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/external-apply-target"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/external-apply-target").strip("/")
+                    raw_template = body.get("payload_template")
+                    payload_template = raw_template if isinstance(raw_template, dict) else {}
+                    self._send_json(
+                        app.configure_source_external_apply_target(
+                            source,
+                            session=str(body.get("session") or ""),
+                            url=str(body.get("url") or ""),
+                            method=str(body.get("method") or "POST"),
+                            payload_template=payload_template,
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                        )
+                    )
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/external-apply-from-har"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/external-apply-from-har").strip("/")
+                    raw_hosts = body.get("hosts") or body.get("allowed_hosts") or body.get("host") or []
+                    if isinstance(raw_hosts, str):
+                        hosts = {raw_hosts} if raw_hosts else None
+                    elif isinstance(raw_hosts, list):
+                        hosts = {str(item) for item in raw_hosts if str(item).strip()} or None
+                    else:
+                        hosts = None
+                    self._send_json(
+                        app.configure_source_external_apply_from_har(
+                            source,
+                            Path(str(body.get("path") or body.get("har_path") or "")),
+                            allowed_hosts=hosts,
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                        )
+                    )
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/certify"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/certify").strip("/")
+                    self._send_json(
+                        app.promote_source_certification(
+                            source,
+                            level=int(body.get("level") or body.get("maturity_level") or 5),
+                            evidence=dict(body.get("evidence") or body.get("certification") or {}),
+                        )
+                    )
+                    return
+                if path.startswith("/api/sources/") and path.endswith("/promote-maturity"):
+                    source = path.removeprefix("/api/sources/").removesuffix("/promote-maturity").strip("/")
+                    self._send_json(_promote_source_maturity_payload(app, source, body))
+                    return
+                if path == "/api/init/import-wo/preview":
+                    self._send_json(
+                        app.init_report(
+                            import_wo=str(body.get("source") or ""),
+                            dry_run=True,
+                        )["import_wo"]
+                    )
+                    return
+                if path == "/api/init/import-wo":
+                    self._send_json(
+                        app.init_report(
+                            import_wo=str(body.get("source") or ""),
+                            dry_run=False,
+                        )["import_wo"]
+                    )
+                    return
+                if path == "/api/ai/test":
+                    self._send_json(
+                        app.ai_test(
+                            route=body.get("route"),
+                            prompt=str(body.get("prompt") or "ping"),
+                            dry_run=bool(body.get("dry_run", False)),
+                        )
+                    )
+                    return
+                if path == "/api/onboarding/answer":
+                    self._send_json(
+                        app.answer_onboarding(
+                            str(body.get("question_id") or body.get("id") or ""),
+                            str(body.get("answer") or ""),
+                            source=str(body.get("source") or "web"),
+                        )
+                    )
+                    return
+                if path == "/api/onboarding/confirm-fact":
+                    self._send_json(app.confirm_candidate_fact(int(body.get("fact_id"))))
+                    return
+                if path == "/api/onboarding/reject-fact":
+                    fact = app.storage.update_candidate_fact_status(int(body.get("fact_id")), "rejected")
+                    if fact is None:
+                        self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                        return
+                    app.record_replay_event(
+                        source="candidate",
+                        event_type="candidate_fact_rejected",
+                        title="Candidate fact rejected",
+                        data={"fact": fact},
+                    )
+                    self._send_json(fact)
+                    return
+                if path == "/api/onboarding/generate-profile":
+                    self._send_json(
+                        {
+                            **app.candidate_completeness(),
+                            "profile": app.active_profile_info(),
+                            "facts": app.candidate_facts(),
+                        }
+                    )
+                    return
+                if path == "/api/candidate/confirm-fact":
+                    self._send_json(app.confirm_candidate_fact(int(body.get("fact_id"))))
+                    return
+                if path == "/api/candidate/profile":
+                    self._send_json(app.update_profile(body))
+                    return
+                if path == "/api/candidate/facts":
+                    self._send_json(_candidate_fact_payload(app, body))
+                    return
+                if path == "/api/resume-variants/build":
+                    self._send_json(
+                        app.build_resume_variant(
+                            int(body.get("job_id")),
+                            int(body.get("resume_id")),
+                        )
+                    )
+                    return
+                if path == "/api/resumes/build-variant":
+                    self._send_json(
+                        app.build_resume_variant(
+                            int(body.get("job_id")),
+                            int(body.get("resume_id")),
+                        )
+                    )
+                    return
+                if path == "/api/applications/build-pack":
+                    self._send_json(
+                        app.build_application_pack(
+                            int(body.get("job_id")),
+                            resume_variant=dict(body.get("resume_variant") or {}),
+                            cover_letter=str(body.get("cover_letter") or ""),
+                            short_message=str(body.get("short_message") or ""),
+                            source_payload=dict(body.get("source_payload") or {}),
+                            campaign_policy=dict(body.get("campaign_policy") or {}),
+                        )
+                    )
+                    return
+                if path.startswith("/api/applications/") and path.endswith("/preview"):
+                    pack_id = _path_int(path.removesuffix("/preview"), "/api/applications/")
+                    self._send_json(_application_pack_preview_payload(app, pack_id))
+                    return
+                if path.startswith("/api/applications/") and path.endswith("/dry-run"):
+                    pack_id = _path_int(path.removesuffix("/dry-run"), "/api/applications/")
+                    self._send_json(_application_pack_dry_run_payload(app, pack_id))
+                    return
+                if path.startswith("/api/applications/") and path.endswith("/apply"):
+                    pack_id = _path_int(path.removesuffix("/apply"), "/api/applications/")
+                    self._send_json(_application_pack_apply_payload(app, pack_id, body))
+                    return
+                if path == "/api/browser/setup":
+                    self._send_json(app.browser_lab_setup(str(body.get("source") or "getmatch")))
+                    return
+                if path == "/api/browser/open-login":
+                    self._send_json(
+                        app.browser_lab_open_login(
+                            str(body.get("source") or "getmatch"),
+                            login_url=str(body.get("login_url") or ""),
+                        )
+                    )
+                    return
+                if path == "/api/browser/check-session":
+                    self._send_json(app.browser_lab_status(str(body.get("source") or "getmatch")))
+                    return
+                if path == "/api/browser/record-flow":
+                    source = str(body.get("source") or "getmatch")
+                    status = app.browser_lab_status(source)
+                    self._send_json(
+                        {
+                            "status": "planned",
+                            "source": status["source"],
+                            "submit": False,
+                            "profile_dir": status["profile_dir"],
+                            "screenshots_dir": status["screenshots_dir"],
+                            "next_steps": [
+                                "Open the source in the Browser Session Lab profile.",
+                                "Record the apply flow as HAR or screenshots.",
+                                "Import the redacted artifacts before enabling apply mapping.",
+                            ],
+                        }
+                    )
+                    return
+                if path == "/api/browser/import-har":
+                    hosts = {
+                        str(item).strip().lower()
+                        for item in (body.get("allowed_hosts") or [])
+                        if str(item).strip()
+                    }
+                    self._send_json(
+                        app.browser_lab_import_har(
+                            str(body.get("source") or ""),
+                            str(body.get("path") or ""),
+                            allowed_hosts=hosts or None,
+                        )
+                    )
+                    return
+                if path == "/api/browser/map-form":
+                    self._send_json(
+                        app.browser_lab_map_form(
+                            dict(body.get("form") or {}),
+                            source=str(body.get("source") or ""),
+                            persona=dict(body.get("persona") or {}),
+                            resume=dict(body.get("resume") or {}),
+                            vacancy=dict(body.get("vacancy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                        )
+                    )
+                    return
+                if path == "/api/browser/dry-run":
+                    self._send_json(
+                        app.browser_lab_dry_run_form_fill(
+                            dict(body.get("form") or {}),
+                            source=str(body.get("source") or ""),
+                            persona=dict(body.get("persona") or {}),
+                            resume=dict(body.get("resume") or {}),
+                            vacancy=dict(body.get("vacancy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                        )
+                    )
+                    return
+                if path == "/api/browser/execute-dry-run":
+                    self._send_json(
+                        app.browser_lab_execute_dry_run_form_fill(
+                            dict(body.get("form") or {}),
+                            source=str(body.get("source") or ""),
+                            persona=dict(body.get("persona") or {}),
+                            resume=dict(body.get("resume") or {}),
+                            vacancy=dict(body.get("vacancy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                            headless=bool(body.get("headless", True)),
+                            timeout_ms=int(body.get("timeout_ms") or 15000),
+                        )
+                    )
+                    return
+                if path == "/api/browser-lab/open-login":
+                    self._send_json(
+                        app.browser_lab_open_login(
+                            str(body.get("source") or "getmatch"),
+                            login_url=str(body.get("login_url") or ""),
+                        )
+                    )
+                    return
+                if path == "/api/browser-lab/import-har":
+                    hosts = {
+                        str(item).strip().lower()
+                        for item in (body.get("allowed_hosts") or [])
+                        if str(item).strip()
+                    }
+                    if bool(body.get("configure_external_apply", False)):
+                        self._send_json(
+                            app.configure_source_external_apply_from_har(
+                                str(body.get("source") or ""),
+                                str(body.get("path") or ""),
+                                allowed_hosts=hosts or None,
+                                level=int(body.get("level") or 5),
+                            )
+                        )
+                        return
+                    self._send_json(
+                        app.browser_lab_import_har(
+                            str(body.get("source") or ""),
+                            str(body.get("path") or ""),
+                            allowed_hosts=hosts or None,
+                        )
+                    )
+                    return
+                if path == "/api/browser-lab/forms/map":
+                    self._send_json(
+                        app.browser_lab_map_form(
+                            dict(body.get("form") or {}),
+                            source=str(body.get("source") or ""),
+                            persona=dict(body.get("persona") or {}),
+                            resume=dict(body.get("resume") or {}),
+                            vacancy=dict(body.get("vacancy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                        )
+                    )
+                    return
+                if path == "/api/browser-lab/forms/dry-run":
+                    self._send_json(
+                        app.browser_lab_dry_run_form_fill(
+                            dict(body.get("form") or {}),
+                            source=str(body.get("source") or ""),
+                            persona=dict(body.get("persona") or {}),
+                            resume=dict(body.get("resume") or {}),
+                            vacancy=dict(body.get("vacancy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                        )
+                    )
+                    return
+                if path == "/api/browser-lab/forms/execute-dry-run":
+                    self._send_json(
+                        app.browser_lab_execute_dry_run_form_fill(
+                            dict(body.get("form") or {}),
+                            source=str(body.get("source") or ""),
+                            persona=dict(body.get("persona") or {}),
+                            resume=dict(body.get("resume") or {}),
+                            vacancy=dict(body.get("vacancy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                            headless=bool(body.get("headless", True)),
+                            timeout_ms=int(body.get("timeout_ms") or 15000),
+                        )
+                    )
+                    return
+                if path == "/api/hh/search-campaigns/plan":
+                    self._send_json(
+                        app.plan_hh_search_campaign(
+                            text=body.get("text"),
+                            area=body.get("area"),
+                            professional_role=body.get("professional_role"),
+                            industry=body.get("industry"),
+                            salary=body.get("salary"),
+                            schedule=body.get("schedule"),
+                            experience=body.get("experience"),
+                            employment=body.get("employment"),
+                            date_from=body.get("date_from"),
+                            date_to=body.get("date_to"),
+                            search_field=body.get("search_field"),
+                            employer_id=body.get("employer_id"),
+                            excluded_employer_id=body.get("excluded_employer_id"),
+                            only_with_salary=bool(body.get("only_with_salary", False)),
+                            limit=int(body.get("limit", 100)),
+                            page=int(body.get("page", 0)),
+                            min_score=int(body.get("min_score", 0)),
+                            skip_tests=bool(body.get("skip_tests", False)),
+                            ai_filter_mode=str(body.get("ai_filter_mode") or "off"),
+                            resume_id=body.get("resume_id"),
+                            daily_cap=_optional_body_int(body, "daily_cap"),
+                        )
+                    )
                     return
                 if path == "/api/hh/resumes/sync":
                     self._send_json(app.sync_hh_resumes())
@@ -434,13 +1085,79 @@ def make_handler(root: Path):
                         )
                     )
                     return
+                if path == "/api/campaigns/presets":
+                    self._send_json(
+                        app.save_hh_campaign_preset(
+                            str(body.get("name") or ""),
+                            dict(body.get("params") or {}),
+                        )
+                    )
+                    return
+                if path == "/api/campaigns/plan":
+                    self._send_json(app.plan_hh_campaign(**_campaign_plan_kwargs(app, body)))
+                    return
+                if path == "/api/campaigns/external/plan":
+                    self._send_json(
+                        app.plan_external_campaign(
+                            str(body.get("source") or ""),
+                            limit=int(body.get("limit", 100)),
+                            min_score=int(body.get("min_score", 0)),
+                            daily_cap=_optional_body_int(body, "daily_cap"),
+                        )
+                    )
+                    return
+                if path.startswith("/api/campaigns/") and path.endswith("/run-external"):
+                    run_id = _path_int(path.removesuffix("/run-external"), "/api/campaigns/")
+                    self._send_json(app.confirm_external_campaign(run_id, confirm=bool(body.get("real") or body.get("confirm"))))
+                    return
+                if path.startswith("/api/campaigns/") and path.endswith("/review"):
+                    run_id = _path_int(path.removesuffix("/review"), "/api/campaigns/")
+                    self._send_json(_campaign_review_payload(app, run_id))
+                    return
+                if path.startswith("/api/campaigns/") and path.endswith("/enable"):
+                    run_id = _path_int(path.removesuffix("/enable"), "/api/campaigns/")
+                    app.enable_hh_campaign(run_id)
+                    self._send_json(_campaign_review_payload(app, run_id))
+                    return
+                if path.startswith("/api/campaigns/") and path.endswith("/run"):
+                    run_id = _path_int(path.removesuffix("/run"), "/api/campaigns/")
+                    self._send_json(
+                        app.confirm_enabled_hh_campaign(
+                            run_id,
+                            confirm=bool(body.get("real") or body.get("confirm")),
+                        )
+                    )
+                    return
+                if path.startswith("/api/campaigns/") and path.endswith("/pause"):
+                    run_id = _path_int(path.removesuffix("/pause"), "/api/campaigns/")
+                    self._send_json(app.pause_hh_agent(reason=str(body.get("reason") or f"campaign:{run_id}")))
+                    return
+                if path.startswith("/api/campaigns/") and path.endswith("/resume"):
+                    run_id = _path_int(path.removesuffix("/resume"), "/api/campaigns/")
+                    result = app.resume_hh_agent(reason=str(body.get("reason") or f"campaign:{run_id}"))
+                    self._send_json({**result, "id": run_id})
+                    return
+                if path.startswith("/api/campaigns/") and path.endswith("/kill"):
+                    run_id = _path_int(path.removesuffix("/kill"), "/api/campaigns/")
+                    result = app.pause_hh_agent(reason=str(body.get("reason") or f"campaign_kill:{run_id}"))
+                    run = app.storage.get_hh_campaign_run(run_id)
+                    app.storage.update_hh_campaign_run(
+                        run_id,
+                        status="killed",
+                        counts=dict(run.counts if run else {}),
+                        finished=True,
+                    )
+                    self._send_json({**result, "status": "killed", "id": run_id})
+                    return
                 if path == "/api/hh/campaigns/plan":
                     self._send_json(
                         app.plan_hh_campaign(
                             limit=int(body.get("limit", 100)),
                             min_score=int(body.get("min_score", 0)),
                             skip_tests=bool(body.get("skip_tests", False)),
+                            ai_filter_mode=str(body.get("ai_filter_mode") or "off"),
                             resume_id=body.get("resume_id"),
+                            daily_cap=_optional_body_int(body, "daily_cap"),
                         )
                     )
                     return
@@ -477,6 +1194,16 @@ def make_handler(root: Path):
                     job_id = _path_int(path.removesuffix("/letter-ai"), "/api/jobs/")
                     self._send_json(app.prepare_letter_ai(job_id).to_dict())
                     return
+                if path.startswith("/api/jobs/") and path.endswith("/letter-preview"):
+                    job_id = _path_int(path.removesuffix("/letter-preview"), "/api/jobs/")
+                    self._send_json(
+                        app.cover_letter_preview(
+                            job_id,
+                            template=str(body.get("template") or "A"),
+                            use_for_campaign=bool(body.get("use_for_campaign")),
+                        )
+                    )
+                    return
                 if path == "/api/profile/switch":
                     profile_id = str(body.get("profile", ""))
                     new_profile = app.switch_profile(profile_id)
@@ -485,6 +1212,37 @@ def make_handler(root: Path):
                 if path == "/api/profile":
                     updated = app.update_profile(body)
                     self._send_json(updated)
+                    return
+                if path.startswith("/api/jobs/") and path.endswith("/external-apply/dry-run"):
+                    job_id = _path_int(path.removesuffix("/external-apply/dry-run"), "/api/jobs/")
+                    self._send_json(
+                        app.external_apply_dry_run(
+                            job_id,
+                            form=dict(body.get("form") or {}),
+                            resume_variant=dict(body.get("resume_variant") or {}),
+                            cover_letter=str(body.get("cover_letter") or ""),
+                            short_message=str(body.get("short_message") or ""),
+                            campaign_policy=dict(body.get("campaign_policy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                        )
+                    )
+                    return
+                if path.startswith("/api/jobs/") and path.endswith("/external-apply/confirm"):
+                    job_id = _path_int(path.removesuffix("/external-apply/confirm"), "/api/jobs/")
+                    self._send_json(
+                        app.confirm_external_apply(
+                            job_id,
+                            form=dict(body.get("form") or {}),
+                            resume_variant=dict(body.get("resume_variant") or {}),
+                            cover_letter=str(body.get("cover_letter") or ""),
+                            short_message=str(body.get("short_message") or ""),
+                            campaign_policy=dict(body.get("campaign_policy") or {}),
+                            extra_answers=dict(body.get("extra_answers") or {}),
+                            confirm=bool(body.get("confirm")),
+                            submit=bool(body.get("submit_certified") or body.get("submit")),
+                            campaign_policy_apply=bool(body.get("campaign_policy_apply")),
+                        )
+                    )
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/apply-hh"):
                     job_id = _path_int(path.removesuffix("/apply-hh"), "/api/jobs/")
@@ -570,12 +1328,26 @@ def make_handler(root: Path):
                         )
                     })
                     return
+                if path == "/api/resumes/import":
+                    self._send_json(
+                        app.import_resume(
+                            str(body.get("path") or ""),
+                            activate=bool(body.get("activate", False)),
+                        )
+                    )
+                    return
+                if path == "/api/resumes/parse":
+                    self._send_json(import_resume_file(str(body.get("path") or "")))
+                    return
                 if path == "/api/resumes":
                     resume = Resume(
                         name=body.get("name", ""),
                         body=body.get("body", ""),
                         profile_id=body.get("profile_id", "default"),
                         is_active=body.get("is_active", False),
+                        canonical=dict(body.get("canonical") or {}),
+                        source_format=str(body.get("source_format") or ""),
+                        imported_from=str(body.get("imported_from") or ""),
                     )
                     if body.get("id"):
                         resume.id = body["id"]
@@ -609,6 +1381,27 @@ def make_handler(root: Path):
                         event.id = body["id"]
                     saved_id = app.storage.save_event(event)
                     self._send_json({"id": saved_id})
+                    return
+                if path.startswith("/api/pipeline/jobs/") and path.endswith("/prep-pack"):
+                    job_id = _path_int(path.removesuffix("/prep-pack"), "/api/pipeline/jobs/")
+                    self._send_json(
+                        app.interview_prep_pack(
+                            job_id,
+                            stage=str(body.get("stage") or "tech"),
+                        )
+                    )
+                    return
+                if path.startswith("/api/pipeline/jobs/") and path.endswith("/event"):
+                    job_id = _path_int(path.removesuffix("/event"), "/api/pipeline/jobs/")
+                    self._send_json(
+                        app.schedule_pipeline_event(
+                            job_id,
+                            event_type=str(body.get("event_type") or "follow_up"),
+                            event_at=str(body.get("event_at") or body.get("event_date") or ""),
+                            title=str(body.get("title") or ""),
+                            notes=str(body.get("notes") or ""),
+                        )
+                    )
                     return
                 if path.startswith("/api/events/") and path.endswith("/delete"):
                     event_id = _path_int(path.removesuffix("/delete"), "/api/events/")
@@ -734,6 +1527,199 @@ def make_handler(root: Path):
     return WorkHunterHandler
 
 
+def _campaign_review_payload(app: WorkHunter, run_id: int) -> dict[str, Any]:
+    run = app.storage.get_hh_campaign_run(run_id)
+    items = []
+    for item in app.storage.list_hh_campaign_items(run_id):
+        payload = item.to_dict()
+        job = app.storage.get_job(item.job_id)
+        payload["job"] = job.to_dict() if job else None
+        items.append(payload)
+    return {"run": run.to_dict() if run else None, "items": items}
+
+
+def _campaign_plan_kwargs(app: WorkHunter, body: dict[str, Any]) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    preset = str(body.get("preset") or "").strip()
+    if preset:
+        params.update(app.get_hh_campaign_preset(preset)["params"])
+    for key in ["limit", "min_score", "skip_tests", "ai_filter_mode", "resume_id", "daily_cap"]:
+        if body.get(key) is not None:
+            params[key] = body[key]
+    return {
+        "limit": int(params.get("limit") or 100),
+        "min_score": int(params.get("min_score") or 0),
+        "skip_tests": bool(params.get("skip_tests", False)),
+        "ai_filter_mode": str(params.get("ai_filter_mode") or "off"),
+        "resume_id": params.get("resume_id") or None,
+        "daily_cap": _optional_body_int(params, "daily_cap"),
+    }
+
+
+def _source_sync_payload(app: WorkHunter, source: str, body: dict[str, Any]) -> dict[str, Any]:
+    source_name = source.strip().lower().replace("-", "_")
+    limit = _optional_body_int(body, "limit")
+    if limit == 0:
+        return {source_name: {"status": "planned", "count": 0, "dry_run": True}}
+    result = app.sync_sources(sources=[source_name], limit=limit)
+    if body.get("score", False):
+        result["scored"] = app.score_jobs()
+    return result
+
+
+def _redaction_scan_payload(body: dict[str, Any]) -> dict[str, Any]:
+    text = str(body.get("text") or "")
+    redacted_text = redact_secrets(text)
+    payload = mask_secrets({key: value for key, value in body.items() if key != "text"})
+    return {
+        "status": "ok",
+        "redacted": {
+            **payload,
+            "text": redacted_text,
+        },
+        "findings": {
+            "changed": redacted_text != text or payload != {key: value for key, value in body.items() if key != "text"},
+        },
+    }
+
+
+def _promote_source_maturity_payload(app: WorkHunter, source: str, body: dict[str, Any]) -> dict[str, Any]:
+    source_name = source.strip().lower().replace("-", "_")
+    level = int(body.get("level") or body.get("maturity_level") or 0)
+    external_apply = ((app.config.get("sources") or {}).get(source_name) or {}).get("external_apply") or {}
+    payload_template = body.get("payload_template")
+    if not isinstance(payload_template, dict):
+        payload_template = external_apply.get("payload_template") if isinstance(external_apply, dict) else {}
+    app.configure_source_external_apply_target(
+        source_name,
+        session=str(body.get("session") or (external_apply.get("session") if isinstance(external_apply, dict) else "") or source_name),
+        url=str(body.get("url") or (external_apply.get("url") if isinstance(external_apply, dict) else "") or ""),
+        method=str(body.get("method") or (external_apply.get("method") if isinstance(external_apply, dict) else "") or "POST"),
+        payload_template=payload_template if isinstance(payload_template, dict) else {},
+        level=level,
+    )
+    evidence = body.get("evidence") or body.get("certification")
+    if not isinstance(evidence, dict):
+        evidence = {
+            key: body[key]
+            for key in ("tests", "replay", "redaction", "dry_run")
+            if key in body and isinstance(body[key], dict)
+        }
+    promotion = app.promote_source_certification(source_name, level=level, evidence=evidence if isinstance(evidence, dict) else {})
+    report = app.source_capabilities()
+    return {source_name: {**(report.get(source_name) or {}), "promotion": promotion}}
+
+
+def _candidate_fact_payload(app: WorkHunter, body: dict[str, Any]) -> dict[str, Any]:
+    key = str(body.get("key") or body.get("question_id") or "fact")
+    value = body.get("value", body.get("answer", ""))
+    question_ids = {question["id"] for question in app.onboarding_questions()}
+    if key in question_ids and body.get("answer") is not None:
+        return app.answer_onboarding(
+            key,
+            str(body.get("answer") or ""),
+            source=str(body.get("source") or "web"),
+        )
+    profile_id = str(app.config.get("profile") or "default")
+    fact_id = app.storage.save_candidate_fact(
+        profile_id=profile_id,
+        category=str(body.get("category") or key),
+        key=key,
+        value=value,
+        confidence=float(body.get("confidence") or 0.7),
+        source=str(body.get("source") or "web"),
+        status=str(body.get("status") or "unconfirmed"),
+        evidence=dict(body.get("evidence") or {"tool": "candidate_facts_api"}),
+    )
+    fact = app.storage.list_candidate_facts(profile_id=profile_id)[-1]
+    app.record_replay_event(
+        source="candidate",
+        event_type="candidate_fact_created",
+        title="Candidate fact captured",
+        data={"fact": fact},
+    )
+    return {"status": "recorded", "facts": [{"id": fact_id, **fact}]}
+
+
+def _application_pack_preview_payload(app: WorkHunter, pack_id: int) -> dict[str, Any]:
+    pack = app.storage.get_application_pack(pack_id)
+    if pack is None:
+        raise ValueError(f"Application pack {pack_id} not found")
+    return {
+        "status": "preview",
+        "id": pack_id,
+        "job_id": pack["job_id"],
+        "submit": False,
+        "application_pack": pack,
+        "preview": pack.get("preview") or {},
+    }
+
+
+def _application_pack_dry_run_payload(app: WorkHunter, pack_id: int) -> dict[str, Any]:
+    pack = app.storage.get_application_pack(pack_id)
+    if pack is None:
+        raise ValueError(f"Application pack {pack_id} not found")
+    status = "dry_run_ready" if pack.get("policy_status") == "ready" else "blocked_manual_review"
+    return {
+        "status": status,
+        "id": pack_id,
+        "job_id": pack["job_id"],
+        "submit": False,
+        "policy_status": pack.get("policy_status"),
+        "policy_reasons": pack.get("policy_reasons") or [],
+        "preview": pack.get("preview") or {},
+    }
+
+
+def _application_pack_apply_payload(app: WorkHunter, pack_id: int, body: dict[str, Any]) -> dict[str, Any]:
+    pack = app.storage.get_application_pack(pack_id)
+    if pack is None:
+        raise ValueError(f"Application pack {pack_id} not found")
+    if not bool(body.get("confirm")):
+        return {
+            "status": "blocked",
+            "reason": "confirmation_required",
+            "id": pack_id,
+            "job_id": pack["job_id"],
+            "submit": False,
+        }
+    return {
+        "status": "blocked",
+        "reason": "real_apply_requires_campaign_policy",
+        "id": pack_id,
+        "job_id": pack["job_id"],
+        "submit": False,
+    }
+
+
+def _replay_screenshot_path(root: Path, app: WorkHunter, event: dict[str, Any] | None, name: str) -> Path | None:
+    if event is None:
+        return None
+    stored = app.storage.get_replay_screenshot(int(event["id"]), name)
+    stored_path = _safe_replay_file_path(root, stored.get("path") if stored else "")
+    if stored_path is not None:
+        return stored_path
+    screenshots = (event.get("data") or {}).get("screenshots") or {}
+    if not isinstance(screenshots, dict):
+        return None
+    raw_path = screenshots.get(name) or screenshots.get("path")
+    return _safe_replay_file_path(root, raw_path)
+
+
+def _safe_replay_file_path(root: Path, raw_path: Any) -> Path | None:
+    if not raw_path:
+        return None
+    path = Path(str(raw_path)).resolve()
+    root_path = Path(root).resolve()
+    try:
+        path.relative_to(root_path)
+    except ValueError:
+        return None
+    if not path.exists() or not path.is_file():
+        return None
+    return path
+
+
 def _path_int(path: str, prefix: str) -> int:
     return int(path.removeprefix(prefix).strip("/"))
 
@@ -745,6 +1731,11 @@ def _int_arg(query: dict[str, list[str]], name: str, default: int) -> int:
 
 def _optional_int_arg(query: dict[str, list[str]], name: str) -> int | None:
     value = query.get(name, [None])[0]
+    return int(value) if value not in (None, "") else None
+
+
+def _optional_body_int(body: dict[str, Any], name: str) -> int | None:
+    value = body.get(name)
     return int(value) if value not in (None, "") else None
 
 

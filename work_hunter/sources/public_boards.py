@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from ..models import Job
+from .apply_forms import detect_apply_mechanism
 from .common import absolute_url, clean_text, fetch_url, last_path_part
 
 
@@ -110,6 +111,41 @@ class PublicJobBoardSource:
                     return jobs
         return jobs
 
+    def detail(self, source_id: str) -> Job:
+        for url in self._detail_urls(source_id):
+            try:
+                html = self.fetcher(url)
+            except Exception:
+                continue
+            for job in parse_public_board_html(html, source=self.source_name, base_url=self.base_url):
+                if job.source_id == source_id or job.url.rstrip("/") == url.rstrip("/"):
+                    return job
+            job = _job_from_detail_page(html, source=self.source_name, source_id=source_id, url=url)
+            if job is not None:
+                return job
+        raise RuntimeError(f"{self.source_name} detail not found: {source_id}")
+
+    def apply_mechanism(self, source_id: str) -> dict[str, Any]:
+        fallback: dict[str, Any] | None = None
+        for url in self._detail_urls(source_id):
+            try:
+                html = self.fetcher(url)
+            except Exception:
+                continue
+            mechanism = parse_public_board_apply_mechanism(
+                html,
+                source=self.source_name,
+                source_id=source_id,
+                url=url,
+                base_url=self.base_url,
+            )
+            if mechanism.get("status") == "detected":
+                return mechanism
+            fallback = mechanism
+        if fallback is not None:
+            return fallback
+        raise RuntimeError(f"{self.source_name} apply mechanism not found: {source_id}")
+
     @property
     def base_url(self) -> str:
         return str(self.config.get("base_url") or self.spec.base_url).rstrip("/")
@@ -158,6 +194,36 @@ class PublicJobBoardSource:
             seen.add(url)
             urls.append(url)
 
+    def _detail_urls(self, source_id: str) -> list[str]:
+        raw = str(source_id or "").strip()
+        if not raw:
+            return []
+        if urllib.parse.urlsplit(raw).scheme in {"http", "https"}:
+            return [raw]
+        if raw.startswith("/"):
+            return [absolute_url(f"{self.base_url}/", raw)]
+
+        encoded = urllib.parse.quote(raw.strip("/"))
+        roots: list[str] = []
+        paths = tuple(self.config["paths"] if "paths" in self.config else self.spec.paths)
+        for path in paths:
+            root = str(path).split("?", 1)[0].replace("{page}", "").rstrip("/")
+            if root and root != "/" and root not in roots:
+                roots.append(root)
+        for root in ("/jobs", "/vacancies", "/vacancy", ""):
+            if root not in roots:
+                roots.append(root)
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for root in roots:
+            path = f"{root}/{encoded}" if root else encoded
+            url = absolute_url(f"{self.base_url}/", path)
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+        return urls
+
 
 def public_board_default_config(name: str) -> dict[str, Any]:
     spec = PUBLIC_BOARD_SPECS[name]
@@ -177,6 +243,24 @@ def parse_public_board_html(html: str, *, source: str, base_url: str) -> list[Jo
     jobs.extend(_parse_next_data_jobs(html, source=source, base_url=base_url))
     jobs.extend(_parse_anchor_jobs(html, source=source, base_url=base_url))
     return _dedupe_jobs(jobs)
+
+
+def parse_public_board_apply_mechanism(
+    html: str,
+    *,
+    source: str,
+    source_id: str,
+    url: str,
+    base_url: str,
+) -> dict[str, Any]:
+    return detect_apply_mechanism(
+        html,
+        source=source,
+        source_id=source_id,
+        url=url,
+        base_url=base_url,
+        form_signature=f"{source}_apply_form:v1",
+    )
 
 
 def extract_jobs_from_json_like(data: Any, *, source: str, base_url: str) -> list[Job]:
@@ -693,3 +777,35 @@ def _dedupe_jobs(jobs: list[Job]) -> list[Job]:
         seen.add(key)
         unique.append(job)
     return unique
+
+
+def _job_from_detail_page(html: str, *, source: str, source_id: str, url: str) -> Job | None:
+    title = _extract_html_first(
+        html,
+        (
+            r"<h1\b[^>]*>(.*?)</h1>",
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            r"<title\b[^>]*>(.*?)</title>",
+        ),
+    )
+    if not title:
+        return None
+    description = clean_text(html)
+    return Job(
+        source=source,
+        source_id=source_id,
+        url=url,
+        title=title,
+        company=_company_from_title(title),
+        location=_extract_location_text(description),
+        remote=_is_remote(f"{title} {description}"),
+        description=description or title,
+    )
+
+
+def _extract_html_first(html: str, patterns: tuple[str, ...]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, html or "", flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return clean_text(match.group(1))
+    return ""

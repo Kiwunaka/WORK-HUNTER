@@ -51,6 +51,9 @@ class GetmatchSource:
     def get_offer(self, offer_id: str) -> dict[str, Any]:
         return json.loads(self.fetcher(f"{API_URL}/{urllib.parse.quote(str(offer_id))}"))
 
+    def detail(self, offer_id: str) -> Job:
+        return parse_getmatch_offer(self.get_offer(offer_id))
+
 
 def parse_getmatch_offer(raw: dict[str, Any]) -> Job:
     offer_id = str(raw.get("id") or "")
