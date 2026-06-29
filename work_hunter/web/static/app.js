@@ -21,7 +21,301 @@ const state = {
     events: [],
     tasks: [],
   },
+  sourceSetup: {
+    guide: null,
+    log: [],
+  },
 };
+
+const UX_RU_COPY = {
+  nav: {
+    inbox: ["Вакансии", "Очередь найденных вакансий, фильтры и быстрые действия."],
+    setup: ["Настройка", "Проверка готовности AI, импорта и окружения."],
+    onboarding: ["Онбординг", "Ответы, из которых собирается профиль кандидата."],
+    "candidate-map": ["Карта кандидата", "Факты, навыки и подтверждения профиля."],
+    resumes: ["Резюме", "Импорт, варианты и активное резюме."],
+    "job-detail": ["Карточка вакансии", "Отдельный просмотр вакансии по ID."],
+    calendar: ["Календарь", "Собеседования, дедлайны и напоминания."],
+    favorites: ["Избранное", "Сохранённые вакансии и быстрый возврат к ним."],
+    chat: ["AI Ассистент", "Вопросы по выбранной вакансии и профилю."],
+    agent: ["HH Агент", "Операции, согласования и шаблоны HH."],
+    "application-preview": ["Черновик отклика", "Предпросмотр письма, резюме и внешней формы."],
+    campaigns: ["Кампании", "Планирование и безопасный запуск серий откликов."],
+    pipeline: ["Воронка", "Статусы вакансий и подготовка follow-up."],
+    "interview-prep": ["Подготовка к собеседованию", "Пакет подготовки под этап интервью."],
+    replay: ["История действий", "Таймлайн событий и экспорт отчёта."],
+    "audit-security": ["Аудит безопасности", "Проверки редактирования секретов и безопасных действий."],
+    "browser-lab": ["Лаборатория браузера", "Проверка сессий, HAR и внешних форм."],
+    settings: ["Настройки", "Профиль поиска, AI, токены и автосинхронизация."],
+    sources: ["Источники", "Синхронизация, сертификация и readiness источников."],
+    stats: ["Статистика", "Сводка по вакансиям, источникам и score."],
+    trends: ["Тренды", "AI-обзор рынка по последним вакансиям."],
+    help: ["Справка", "Понятные инструкции, подсказки и частые вопросы."],
+  },
+  headings: {
+    ".shell > .topbar h1": "Очередь вакансий",
+    "#view-setup h1": "Настройка",
+    "#view-onboarding h1": "Онбординг",
+    "#view-candidate-map h1": "Карта кандидата",
+    "#view-application-preview h1": "Черновик отклика",
+    "#view-campaigns h1": "Кампании",
+    "#view-pipeline h1": "Воронка",
+    "#view-interview-prep h1": "Подготовка к собеседованию",
+    "#view-replay h1": "История действий",
+    "#view-audit-security h1": "Аудит безопасности",
+    "#view-browser-lab h1": "Лаборатория браузера",
+    "#view-job-detail h1": "Карточка вакансии",
+    "#view-sources .agent-row-head strong": "Действия источников",
+  },
+  fields: {
+    "ai-test-route": ["AI-маршрут", "Оставь smart для обычной проверки маршрутизации."],
+    "ai-test-prompt": ["Промпт проверки", "Короткий текст для dry run без реального отклика."],
+    "setup-import-wo-source": ["Папка источника", "Локальная папка WO/FLOW для предварительного импорта."],
+    "onboarding-question-select": ["Вопрос профиля", "Выбери блок, который сейчас готов заполнить."],
+    "onboarding-answer": ["Ответ", "Пиши свободно: опыт, ограничения, достижения и предпочтения."],
+    "resume-variant-job-id": ["ID вакансии", "Подставляется автоматически после выбора вакансии."],
+    "resume-variant-resume-id": ["ID резюме", "Оставь пустым, если нужен активный профиль."],
+    "application-preview-job-id": ["ID вакансии", "Вакансия для черновика отклика."],
+    "application-preview-resume-variant-id": ["ID варианта резюме", "Можно оставить пустым для текущего варианта."],
+    "application-preview-letter": ["Сопроводительное письмо", "Текст письма, которое уйдёт вместе с откликом."],
+    "application-preview-payload": ["Payload источника (JSON)", "Доп. поля для площадки. Оставь {} если не нужны."],
+    "external-apply-form-json": ["Внешняя форма (JSON)", "Описание полей формы площадки для dry run."],
+    "campaign-limit": ["Лимит вакансий", "Сколько вакансий максимум взять в план кампании."],
+    "campaign-min-score": ["Мин. score", "Брать в кампанию только вакансии с этим score и выше."],
+    "campaign-daily-cap": ["Лимит в день", "Максимум откликов в сутки. Защита от спама."],
+    "campaign-ai-filter": ["AI-фильтр", "Доп. отсев вакансий через AI: off / light / heavy."],
+    "external-campaign-source": ["Внешний источник", "Площадка для внешней кампании откликов."],
+    "pipeline-job-id": ["ID вакансии", "Вакансия, для которой ведём этап воронки."],
+    "pipeline-stage-select": ["Этап", "Стадия найма: HR, тех, финал или оффер."],
+    "pipeline-event-at": ["Дата и время", "Когда запланировать follow-up или событие."],
+    "interview-prep-job-id": ["ID вакансии", "Вакансия, под которую собрать подготовку."],
+    "interview-prep-stage-select": ["Этап интервью", "Стадия, под которую собрать пакет подготовки."],
+    "replay-job-id": ["ID вакансии", "Фильтр таймлайна по конкретной вакансии."],
+    "replay-run-id": ["ID запуска", "Фильтр таймлайна по конкретному запуску кампании."],
+    "replay-source-filter": ["Источник", "Показать события только выбранной площадки."],
+    "replay-event-type-filter": ["Тип события", "Например application_pack_built."],
+    "browser-lab-source": ["Источник", "Например getmatch, hirehi или careerspace."],
+    "browser-lab-har-path": ["Путь к HAR", "Локальный файл сессии, экспортированный из браузера."],
+    "browser-lab-hosts": ["Разрешённые хосты", "Домены через запятую, которые можно использовать."],
+    "source-action-source": ["Источник", "Выбери адаптер для синхронизации или теста."],
+    "source-action-limit": ["Лимит", "0 означает лимит по умолчанию для источника."],
+    "source-certification-level": ["Уровень", "L5 — внешний отклик, L6 — кампании."],
+    "source-external-target-session": ["Сессия", "Имя локальной сессии для внешнего отклика."],
+    "source-external-target-url": ["URL отклика", "Endpoint площадки, куда уходит отклик."],
+    "source-external-target-method": ["Метод", "HTTP-метод запроса отклика (обычно POST)."],
+    "source-external-target-payload-template": ["Шаблон payload (JSON)", "{source_id} подставится из вакансии."],
+    "source-external-har-path": ["Путь к HAR", "Файл сессии, из которого извлечь настройки отклика."],
+    "source-external-har-hosts": ["Разрешённые хосты", "Домены через запятую для разбора HAR."],
+    "source-redaction-scan-payload": ["Payload (JSON)", "Проверяется на токены, cookie и секреты."],
+    "source-redaction-scan-text": ["Текст-образец", "Любой текст для проверки на утечку секретов."],
+    "source-certification-evidence-json": ["Evidence (JSON)", "Доказательства готовности: тесты, replay и т.д."],
+    "source-setup-source": ["Источник", "Начни с HH: это самый короткий путь к первому безопасному отклику."],
+    "source-setup-level": ["Режим сертификации", "Нужен только для внешних площадок с HAR и dry-run."],
+    "source-setup-har-path": ["Путь к HAR", "Файл HAR, экспортированный из твоего браузера."],
+    "source-setup-har-hosts": ["Разрешённые хосты", "Домены через запятую, например getmatch.ru."],
+    "source-setup-redaction-payload": ["Payload redaction", "Безопасный образец headers/payload для проверки маскирования."],
+    "source-setup-redaction-text": ["Текст redaction", "Текстовый образец для поиска токенов, cookies и секретов."],
+    "source-setup-form-json": ["Форма dry-run", "JSON-описание формы для безопасного заполнения без отправки."],
+    "source-setup-persona-json": ["Персона dry-run", "Факты кандидата, которые можно подставить в форму."],
+    "hh-lab-method": ["Метод", "HTTP-метод запроса к HH API."],
+    "hh-lab-path": ["Путь", "Путь HH API, например /me."],
+    "hh-lab-snippet-name": ["Имя сниппета", "Под этим именем сохранится запрос."],
+    "hh-lab-params": ["Параметры (JSON)", "Query-параметры запроса."],
+    "hh-lab-body": ["Тело (JSON)", "Тело запроса для POST/PUT/PATCH."],
+    "agent-template-name": ["Название", "Короткое имя шаблона письма."],
+    "agent-template-body": ["Текст", "Тело шаблона. Доступны плейсхолдеры вида {name}."],
+    "agent-blacklist-id": ["ID работодателя", "Числовой ID компании на HH."],
+    "agent-blacklist-name": ["Название", "Название компании для чёрного списка."],
+    "agent-blacklist-reason": ["Причина", "Почему компания в чёрном списке."],
+    "agent-resume-template": ["Markdown-шаблон", "Шаблон резюме с плейсхолдерами профиля."],
+    "agent-resume-context": ["Доп. контекст (JSON)", "Поля, которые подставятся в шаблон."],
+    "agent-batch-matrix-input": ["Матрица (JSON)", "Резюме × пресеты × письма × лимиты."],
+    "job-detail-id-input": ["ID вакансии", "Введи ID, чтобы открыть карточку вакансии."],
+    "resume-import-path": ["Путь к файлу", "Локальный путь к резюме (.md/.json) для импорта."],
+    "auto-sync-interval": ["Интервал (минуты)", "0 — выключить автосинхронизацию."],
+    "ai-key-input": ["Ключ OpenRouter", "Хранится локально. Уже сохранённый ключ скрыт как ***"],
+    "ai-model-input": ["Модель", "ID модели OpenRouter, например google/gemini-2.5-flash."],
+    "ai-backend-select": ["Бэкенд AI", "Прямой OpenAI-совместимый API или OpenCode."],
+  },
+};
+
+const CONTROL_HINTS = {
+  "sync-button": ["Синхронизировать", "Синхронизировать вакансии из всех активных источников"],
+  "score-button": ["Пересчитать score", "Проверить и пересчитать релевантность вакансий"],
+  "refresh-button": ["Обновить список", "Заново загрузить очередь вакансий с текущими фильтрами"],
+  "ai-search-button": ["AI-поиск", "Найти вакансии по смысловому запросу"],
+  "export-csv-button": ["Экспорт CSV", "Скачать текущий список вакансий в CSV"],
+  "setup-refresh-button": ["Обновить", "Проверить готовность настроек и AI-маршрутов"],
+  "ai-test-button": ["Проверить AI", "Запустить безопасную dry run проверку AI"],
+  "setup-import-wo-preview-button": ["Предпросмотр", "Показать, что будет импортировано без записи"],
+  "setup-import-wo-apply-button": ["Импортировать", "Применить редактированный импорт в локальный проект"],
+  "onboarding-refresh-button": ["Обновить", "Перезагрузить вопросы и статус профиля"],
+  "onboarding-submit-button": ["Сохранить ответ", "Сохранить ответ и обновить карту кандидата"],
+  "candidate-refresh-button": ["Обновить", "Перезагрузить факты и полноту профиля"],
+  "resume-variant-button": ["Собрать вариант", "Создать адаптацию резюме под вакансию"],
+  "application-preview-button": ["Предпросмотр", "Собрать черновик отклика перед отправкой"],
+  "external-apply-dry-run-button": ["Проверить форму", "Прогнать внешнюю форму без отправки"],
+  "external-apply-confirm-button": ["Подтвердить внешне", "Подтвердить внешний отклик после проверки"],
+  "campaign-refresh-button": ["Обновить", "Перезагрузить кампании и статус паузы"],
+  "campaign-plan-button": ["План HH", "Собрать безопасный план HH-кампании"],
+  "external-campaign-plan-button": ["План внешних", "Собрать план для внешних источников"],
+  "external-campaign-run-button": ["Подтвердить внешние", "Запустить внешний план только после проверки"],
+  "campaign-confirm-run-button": ["Подтвердить запуск", "Запустить HH-кампанию после preflight"],
+  "campaign-kill-switch-button": ["Стоп", "Немедленно поставить кампании на паузу"],
+  "campaign-resume-button": ["Возобновить", "Снять паузу с кампаний"],
+  "pipeline-refresh-button": ["Обновить", "Перезагрузить статус воронки"],
+  "pipeline-prep-pack-button": ["Пакет подготовки", "Собрать материалы для текущего этапа"],
+  "pipeline-schedule-followup-button": ["Запланировать follow-up", "Создать напоминание по выбранному этапу"],
+  "interview-prep-pack-button": ["Собрать подготовку", "Сгенерировать вопросы и план подготовки"],
+  "replay-refresh-button": ["Загрузить", "Загрузить историю действий по фильтрам"],
+  "replay-export-button": ["Экспорт Markdown", "Скачать историю действий как Markdown"],
+  "audit-security-refresh-button": ["Обновить", "Перезагрузить аудит безопасности"],
+  "audit-security-redaction-button": ["Сканировать", "Проверить текст на секреты и приватные данные"],
+  "browser-lab-status-button": ["Статус", "Проверить состояние браузерной сессии"],
+  "browser-lab-open-login-button": ["План входа", "Открыть план безопасного входа в источник"],
+  "browser-lab-import-har-button": ["Импорт HAR", "Импортировать HAR для настройки внешней формы"],
+  "browser-lab-map-form-button": ["Сопоставить форму", "Сопоставить поля формы с профилем кандидата"],
+  "browser-lab-dry-run-button": ["Dry run", "Проверить заполнение формы без отправки"],
+  "browser-lab-execute-dry-run-button": ["Заполнить и скриншот", "Заполнить форму в dry run и сохранить снимок"],
+  "source-sync-button": ["Синхронизировать", "Запустить синхронизацию выбранного источника"],
+  "source-test-button": ["Тест", "Проверить выбранный источник без массового импорта"],
+  "source-certification-plan-button": ["План evidence", "Показать, чего не хватает для сертификации"],
+  "source-external-target-button": ["Настроить", "Сохранить endpoint внешнего отклика"],
+  "source-external-har-button": ["Настроить из HAR", "Извлечь настройки отклика из HAR"],
+  "source-redaction-scan-button": ["Сканировать", "Проверить payload и текст на приватные данные"],
+  "source-certification-evidence-button": ["Записать evidence", "Сохранить доказательство готовности источника"],
+  "source-certification-promote-button": ["Повысить уровень", "Повысить сертификацию источника"],
+  "open-source-setup-button": ["Подключить источник", "Открыть пошаговый мастер подключения площадки"],
+  "sidebar-source-setup-button": ["Подключить источник", "Открыть простой мастер подключения площадки"],
+  "source-setup-refresh-button": ["Обновить", "Перезагрузить статус подключения источника"],
+  "source-setup-run-next": ["Выполнить следующий шаг", "Запустить безопасную встроенную проверку из мастера"],
+  "job-detail-load-button": ["Загрузить", "Открыть карточку вакансии по ID"],
+  "theme-toggle-button": ["Переключить тему", "Сменить светлую и тёмную тему"],
+  "open-onboarding-view": ["Заполнить профиль", "Перейти к вопросам онбординга"],
+  "dismiss-onboarding-guide": ["Скрыть", "Скрыть подсказки первого запуска на этом устройстве"],
+  "chat-send-button": ["Отправить", "Отправить сообщение AI-ассистенту (Enter)"],
+  "add-event-button": ["Событие", "Добавить собеседование, звонок или напоминание"],
+  "save-event-button": ["Сохранить", "Сохранить событие в календарь"],
+  "agent-refresh-button": ["Обновить", "Перезагрузить весь статус HH-агента"],
+  "agent-digest-button": ["Дайджест", "Собрать свежую сводку по HH-аккаунту"],
+  "agent-save-template-button": ["Сохранить", "Сохранить шаблон письма"],
+  "agent-save-blacklist-button": ["Сохранить", "Добавить работодателя в чёрный список"],
+  "agent-resume-preview-button": ["Предпросмотр", "Собрать черновик резюме из markdown-шаблона"],
+  "agent-batch-matrix-button": ["Собрать", "Построить матрицу пресетов кампаний"],
+  "hh-lab-run-button": ["Выполнить", "Отправить запрос к HH API"],
+  "hh-lab-save-snippet-button": ["Сохранить запрос", "Сохранить текущий запрос как сниппет"],
+  "add-resume-button": ["Добавить резюме", "Создать новое резюме вручную"],
+  "resume-import-button": ["Импортировать", "Импортировать резюме из файла"],
+  "save-resume-button": ["Сохранить", "Сохранить резюме"],
+  "save-profile-button": ["Сохранить профиль", "Сохранить настройки профиля поиска"],
+  "rescore-after-save": ["Пересчитать score", "Пересчитать релевантность после изменений"],
+  "save-ai-button": ["Сохранить настройки AI", "Сохранить ключ, модель и бэкенд AI"],
+  "save-auto-sync-button": ["Сохранить", "Включить или выключить автосинхронизацию"],
+  "save-token-button": ["Обновить токен", "Сохранить токен доступа HH локально"],
+  "add-search-button": ["Поиск", "Добавить сохранённый поиск с уведомлениями"],
+  "save-search-button": ["Сохранить", "Сохранить поисковый запрос"],
+  "check-ghost-button": ["Проверить", "Найти вакансии без ответа 7+ дней"],
+  "save-config-button": ["Сохранить JSON", "Сохранить всю конфигурацию (для опытных)"],
+  "refresh-stats-button": ["Обновить", "Пересчитать статистику и воронку"],
+  "load-trends-button": ["Анализировать", "Собрать AI-обзор трендов рынка"],
+};
+
+// Подсказки для вкладок (без отдельных id): по data-атрибуту.
+const TAB_HINTS = {
+  resume: "Советы, ATS-резюме и аудит под вакансию",
+  analysis: "AI-оценка соответствия, саммари и питч опыта",
+  interview: "Вероятные вопросы на собеседовании",
+  "letter-panel": "Сопроводительное письмо: шаблон и AI-версия",
+  notes: "Личные заметки по вакансии",
+  dashboard: "Сводка, операции и последний дайджест HH",
+  inbox: "Очередь задач, outbox и webhooks",
+  approvals: "Очередь согласований действий агента",
+  runs: "Запуски операций и логи",
+  "api-lab": "Песочница HH API с сохранением сниппетов",
+  templates: "Шаблоны сопроводительных писем",
+  "resume-builder": "Сборка резюме и матрица кампаний",
+  blacklist: "Чёрный список работодателей",
+  events: "События и задачи из переписки HH",
+  settings: "Локальный снимок preflight агента",
+};
+
+// Русские названия категорий профиля кандидата.
+const CATEGORY_RU = {
+  identity: "О себе",
+  skills: "Навыки",
+  target: "Цель поиска",
+  experience: "Опыт",
+  portfolio: "Портфолио",
+  constraints: "Ограничения",
+  writing_style: "Стиль письма",
+  resume_assets: "Резюме",
+  permissions: "Разрешения",
+};
+
+// Русские формулировки вопросов онбординга (по id, бэкенд отдаёт английский).
+const ONBOARDING_RU = {
+  identity: {
+    title: "О себе",
+    prompt: "Кто ты, в каком городе, какие языки знаешь и в каком часовом поясе работаешь?",
+    example: "Например: Алексей, Москва, русский и английский (B2), часовой пояс МСК (UTC+3).",
+  },
+  stack: {
+    title: "Технологии",
+    prompt: "Какие технологии, инструменты, фреймворки, базы данных и облака ты реально знаешь? Пиши честно.",
+    example: "Например: Python, FastAPI, Django, PostgreSQL, Redis, Docker, немного Kubernetes.",
+  },
+  roles: {
+    title: "Желаемые роли",
+    prompt: "Какие должности, грейд (junior/middle/senior), сферы и типы задач тебе подходят?",
+    example: "Например: Backend-разработчик (middle/senior), финтех и SaaS, без поддержки legacy на 1С.",
+  },
+  experience: {
+    title: "Опыт работы",
+    prompt: "Опиши реальный опыт: компании, проекты, какой стек использовал и какие были результаты в цифрах.",
+    example: "Например: 4 года backend. В X построил API на FastAPI, ускорил отчёты в 3 раза, вёл 2 джунов.",
+  },
+  projects: {
+    title: "Проекты",
+    prompt: "Какие проекты можно показать, обсудить или дать на них ссылку как доказательство?",
+    example: "Например: pet-проект на GitHub (ссылка), коммерческий проект X (под NDA, расскажу устно).",
+  },
+  achievements: {
+    title: "Достижения",
+    prompt: "Какие достижения можно подтвердить цифрами, ссылками, рекомендациями или артефактами?",
+    example: "Например: сократил расходы на инфраструктуру на 30%, доклад на митапе (ссылка на видео).",
+  },
+  forbidden_claims: {
+    title: "Чего НЕ писать",
+    prompt: "Что Work Hunter никогда не должен указывать в резюме, письмах и откликах? (то, чего ты не умеешь)",
+    example: "Например: не приписывать промышленный Kubernetes, не указывать английский C1, не врать про годы.",
+  },
+  salary_format: {
+    title: "Зарплата и формат",
+    prompt: "Какие условия по зарплате, городу, удалёнке, релокации, графику и формату работы важны?",
+    example: "Например: от 250к на руки, только удалёнка, без релокации, полный день, без ночных дежурств.",
+  },
+  avoid: {
+    title: "Что исключить",
+    prompt: "Какие компании, сферы, темы или типы вакансий стоит исключить из поиска?",
+    example: "Например: без гемблинга и беттинга, без аутстаффа, не рассматриваю стартапы без зарплаты.",
+  },
+  writing_style: {
+    title: "Стиль общения",
+    prompt: "В каком тоне писать сопроводительные письма и сообщения, а чего избегать?",
+    example: "Например: коротко и по делу, на «вы», без канцелярита и без воды, дружелюбно но профессионально.",
+  },
+  resume_assets: {
+    title: "Готовые резюме",
+    prompt: "Какие резюме уже есть: ID резюме на HH, PDF, DOCX, Markdown или JSON?",
+    example: "Например: основное резюме на hh.ru (Backend Python), PDF на английском в папке /resumes.",
+  },
+  apply_permissions: {
+    title: "Разрешения на отклик",
+    prompt: "Где Work Hunter может входить в аккаунт, хранить профиль браузера, готовить и (после подтверждения) отправлять отклики?",
+    example: "Например: можно готовить отклики на hh.ru и getmatch, отправлять только после моего подтверждения.",
+  },
+};
+
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -30,6 +324,26 @@ function setUiError(message = "") {
   if (!box) return;
   box.textContent = message;
   box.hidden = !message;
+}
+
+// Русские статусы вакансий + цветные бейджи.
+const STATUS_RU = {
+  new: ["Новая", "new"],
+  saved: ["В избранном", "saved"],
+  applied: ["Откликнулся", "applied"],
+  hidden: ["Скрыта", "hidden"],
+  ghosted: ["Тишина", "ghosted"],
+  viewed: ["Просмотрена", "viewed"],
+  response: ["Ответ", "applied"],
+  rejected: ["Отказ", "rejected"],
+  interview: ["Интервью", "applied"],
+  offer: ["Оффер", "applied"],
+};
+
+function statusBadge(status) {
+  const key = String(status || "new").toLowerCase();
+  const entry = STATUS_RU[key] || [status || "new", ""];
+  return `<span class="status-badge status-${escapeAttr(entry[1] || key)}">${escapeHtml(entry[0])}</span>`;
 }
 
 async function api(path, options = {}) {
@@ -52,7 +366,44 @@ function renderActionError(output, err) {
     output.textContent = JSON.stringify({ ok: false, error: message }, null, 2);
   }
   setUiError(message);
+  toast(message, "error");
 }
+
+// ── Тосты (всплывающие уведомления) ──────────
+const TOAST_ICONS = { success: "check-circle-2", error: "alert-triangle", info: "info" };
+
+function toast(message, type = "info", timeout = 4200, action = null) {
+  if (!message) return;
+  let host = document.getElementById("toast-container");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "toast-container";
+    host.className = "toast-container";
+    host.setAttribute("aria-live", "polite");
+    document.body.appendChild(host);
+  }
+  const item = document.createElement("div");
+  item.className = `toast toast-${type}`;
+  item.setAttribute("role", type === "error" ? "alert" : "status");
+  const actionHtml = action && action.label
+    ? `<button class="toast-action">${escapeHtml(action.label)}</button>`
+    : "";
+  item.innerHTML = `<i data-lucide="${TOAST_ICONS[type] || "info"}"></i><span>${escapeHtml(String(message))}</span>${actionHtml}<button class="toast-close" aria-label="Закрыть">×</button>`;
+  host.appendChild(item);
+  if (window.lucide) lucide.createIcons();
+  const close = () => {
+    item.classList.add("leaving");
+    setTimeout(() => item.remove(), 220);
+  };
+  item.querySelector(".toast-close")?.addEventListener("click", close);
+  if (action && action.onClick) {
+    item.querySelector(".toast-action")?.addEventListener("click", () => {
+      try { action.onClick(); } finally { close(); }
+    });
+  }
+  if (timeout > 0) setTimeout(close, timeout);
+}
+
 
 async function loadJobs() {
   const source = $("#source-filter").value;
@@ -62,6 +413,7 @@ async function loadJobs() {
   state.jobs = await api(`/api/inbox?${params.toString()}`);
   renderJobs();
   updateSummary();
+  renderOnboardingGuide();
 }
 
 function renderJobs() {
@@ -82,7 +434,7 @@ function renderJobs() {
         <div class="meta">${escapeHtml([job.salary_text, job.location, job.remote ? "remote" : ""].filter(Boolean).join(" · "))}</div>
       </td>
       <td>${escapeHtml(job.source)}</td>
-      <td>${escapeHtml(job.status || "new")}</td>
+      <td>${statusBadge(job.status)}</td>
     `;
     body.appendChild(tr);
   }
@@ -96,6 +448,7 @@ async function selectJob(id) {
   fillSelectedJobControls(id);
   updateChatContext();
   loadJobNote();
+  renderOnboardingGuide();
   try { $("#ai-panels").style.display = "block"; } catch (e) { /* ignore */ }
 }
 
@@ -126,18 +479,18 @@ function renderJobDetailHtml(job, options = {}) {
   const letter = job.latest_letter?.body || "";
   const actions = includeActions ? `
     <div class="detail-actions">
-      <button onclick="markSelected('saved')">Сохранить</button>
-      <button onclick="markSelected('hidden')">Скрыть</button>
-      <button onclick="markSelected('applied')">Откликнулся</button>
-      <button onclick="prepareLetter()">Подготовить письмо</button>
-      <button onclick="prepareLetterAi()">AI письмо</button>
-      <button onclick="fetchFullDescription()">Полное описание</button>
-      <button onclick="applyHh(true)">HH apply plan</button>
-      <button onclick="applyHh(false)" class="primary">Confirm HH apply</button>
-      <button onclick="shareToTelegram()">📤 Telegram</button>
-      <button onclick="smartClassify()">AI классификация</button>
-      <button onclick="parseJobStructure()">Структура</button>
-      <button onclick="runGapAnalysis()">Gap-анализ</button>
+      <button onclick="markSelected('saved')" title="Добавить вакансию в избранное">Сохранить</button>
+      <button onclick="markSelected('hidden')" title="Скрыть вакансию из списка">Скрыть</button>
+      <button onclick="markSelected('applied')" title="Отметить, что отклик отправлен">Откликнулся</button>
+      <button onclick="prepareLetter()" title="Сгенерировать письмо по шаблону">Подготовить письмо</button>
+      <button onclick="prepareLetterAi()" title="Сгенерировать письмо с помощью AI">AI-письмо</button>
+      <button onclick="fetchFullDescription()" title="Загрузить полный текст вакансии с площадки">Полное описание</button>
+      <button onclick="applyHh(true)" title="Собрать безопасный план отклика на HH (без отправки)">План отклика HH</button>
+      <button onclick="applyHh(false)" class="primary" title="Отправить реальный отклик на HH (с подтверждением)">Откликнуться на HH</button>
+      <button onclick="shareToTelegram()" title="Поделиться вакансией в Telegram"><i data-lucide="send"></i>Telegram</button>
+      <button onclick="smartClassify()" title="Классифицировать вакансию через AI">AI-классификация</button>
+      <button onclick="parseJobStructure()" title="Разобрать вакансию на структуру">Структура</button>
+      <button onclick="runGapAnalysis()" title="Сравнить вакансию с активным резюме">Gap-анализ</button>
     </div>
   ` : "";
   const letterEditor = includeLetter ? `
@@ -151,11 +504,11 @@ function renderJobDetailHtml(job, options = {}) {
     ${actions}
     <div class="section-title">Score</div>
     <div class="chips">
-      <span class="chip">total ${escapeHtml(String(score?.total_score ?? "-"))}</span>
-      <span class="chip">title ${escapeHtml(String(score?.title_score ?? "-"))}</span>
-      <span class="chip">skills ${escapeHtml(String(score?.skills_score ?? "-"))}</span>
-      <span class="chip">salary ${escapeHtml(String(score?.salary_score ?? "-"))}</span>
-      <span class="chip">remote ${escapeHtml(String(score?.remote_score ?? "-"))}</span>
+      <span class="chip">итог ${escapeHtml(String(score?.total_score ?? "-"))}</span>
+      <span class="chip">название ${escapeHtml(String(score?.title_score ?? "-"))}</span>
+      <span class="chip">навыки ${escapeHtml(String(score?.skills_score ?? "-"))}</span>
+      <span class="chip">зарплата ${escapeHtml(String(score?.salary_score ?? "-"))}</span>
+      <span class="chip">удалёнка ${escapeHtml(String(score?.remote_score ?? "-"))}</span>
     </div>
     <div class="section-title">Причины</div>
     <div class="chips">${reasons.map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join("") || `<span class="chip">Пока нет причин</span>`}</div>
@@ -179,7 +532,7 @@ async function loadJobDetailView() {
   if (!output) return;
   if (!jobId) {
     output.className = "detail empty";
-    output.innerHTML = "<p>Select a job in Inbox or enter a job ID.</p>";
+    output.innerHTML = "<p>Выбери вакансию во вкладке «Вакансии» или введи её ID.</p>";
     return;
   }
   const job = await api(`/api/jobs/${jobId}`);
@@ -195,9 +548,13 @@ async function syncJobs() {
   setBusy("#sync-button", true);
   try {
     const result = await api("/api/sync", { method: "POST", body: JSON.stringify({ score: true }) });
+    const added = result?.added ?? result?.new ?? result?.imported;
     $("#summary-line").textContent = `Синхронизация завершена: ${JSON.stringify(result)}`;
+    toast(added != null ? `Синхронизация завершена · новых: ${added}` : "Синхронизация завершена", "success");
     await loadJobs();
     await loadSources();
+  } catch (err) {
+    toast("Ошибка синхронизации: " + err.message, "error");
   } finally {
     setBusy("#sync-button", false);
   }
@@ -208,7 +565,10 @@ async function scoreJobs() {
   try {
     const result = await api("/api/score", { method: "POST", body: "{}" });
     $("#summary-line").textContent = `Пересчитано: ${result.scored}`;
+    toast(`Score пересчитан для ${result.scored} вакансий`, "success");
     await loadJobs();
+  } catch (err) {
+    toast("Ошибка пересчёта: " + err.message, "error");
   } finally {
     setBusy("#score-button", false);
   }
@@ -282,7 +642,7 @@ async function applyHh(dryRun = true) {
     return;
   }
 
-  if (!confirm("This will send a real HH application from your account. Continue?")) {
+  if (!confirm("Будет отправлен реальный отклик на HH из твоего аккаунта. Продолжить?")) {
     return;
   }
 
@@ -350,8 +710,9 @@ async function switchProfile(profileId) {
     state.profile = { active: result.active, available: state.profile.available, data: result.data };
     renderProfileForm();
     $("#summary-line").textContent = `Профиль переключён на: ${profileId}. Синхронизируй и пересчитай score.`;
+    toast(`Профиль переключён: ${profileId}`, "success");
   } catch (err) {
-    alert("Ошибка переключения профиля: " + err.message);
+    toast("Ошибка переключения профиля: " + err.message, "error");
   }
 }
 
@@ -369,8 +730,9 @@ async function saveProfile() {
     state.profile.data = updated;
     $("#config-editor").value = JSON.stringify(state.config, null, 2);
     $("#summary-line").textContent = "Профиль сохранён. Синхронизируй источники и пересчитай score для обновления.";
+    toast("Профиль сохранён", "success");
   } catch (err) {
-    alert("Ошибка сохранения профиля: " + err.message);
+    toast("Ошибка сохранения профиля: " + err.message, "error");
   }
 }
 
@@ -396,6 +758,11 @@ async function loadConfig() {
     $("#opencode-model-input").value = state.config.ai.opencode_model || "";
     $("#opencode-agent-input").value = state.config.ai.opencode_agent || "work-hunter-ai";
     $("#opencode-server-input").value = state.config.ai.opencode_server_url || "http://127.0.0.1:4096";
+    if ($("#codex-command-input")) $("#codex-command-input").value = state.config.ai.codex_command || "codex";
+    if ($("#codex-model-input")) $("#codex-model-input").value = state.config.ai.codex_model || "";
+    if ($("#codex-reasoning-select")) $("#codex-reasoning-select").value = state.config.ai.codex_reasoning || "";
+    if ($("#codex-server-input")) $("#codex-server-input").value = state.config.ai.codex_server_url || "";
+    updateAiBackendFields();
   }
 
   if (state.config && state.config.ui && state.config.ui.auto_sync) {
@@ -406,9 +773,14 @@ async function loadConfig() {
 }
 
 async function saveConfig() {
-  const parsed = JSON.parse($("#config-editor").value);
-  state.config = await api("/api/config", { method: "POST", body: JSON.stringify(parsed) });
-  $("#config-editor").value = JSON.stringify(state.config, null, 2);
+  try {
+    const parsed = JSON.parse($("#config-editor").value);
+    state.config = await api("/api/config", { method: "POST", body: JSON.stringify(parsed) });
+    $("#config-editor").value = JSON.stringify(state.config, null, 2);
+    toast("Конфигурация сохранена", "success");
+  } catch (err) {
+    toast("Ошибка JSON: " + err.message, "error");
+  }
 }
 
 async function saveHhToken() {
@@ -424,7 +796,7 @@ async function saveHhToken() {
 
   state.config = await api("/api/config", { method: "POST", body: JSON.stringify(state.config) });
   $("#config-editor").value = JSON.stringify(state.config, null, 2);
-  alert("Настройки HH сохранены в конфигурации.");
+  toast("Настройки HH сохранены", "success");
 }
 
 async function saveAiSettings() {
@@ -441,10 +813,31 @@ async function saveAiSettings() {
   state.config.ai.opencode_model = $("#opencode-model-input").value.trim();
   state.config.ai.opencode_agent = $("#opencode-agent-input").value.trim() || "work-hunter-ai";
   state.config.ai.opencode_server_url = $("#opencode-server-input").value.trim() || "http://127.0.0.1:4096";
+  state.config.ai.codex_command = $("#codex-command-input")?.value.trim() || "codex";
+  state.config.ai.codex_model = $("#codex-model-input")?.value.trim() || "";
+  state.config.ai.codex_reasoning = $("#codex-reasoning-select")?.value || "";
+  state.config.ai.codex_server_url = $("#codex-server-input")?.value.trim() || "";
 
   state.config = await api("/api/config", { method: "POST", body: JSON.stringify(state.config) });
   $("#config-editor").value = JSON.stringify(state.config, null, 2);
-  alert("AI настройки сохранены.");
+  toast("Настройки AI сохранены", "success");
+}
+
+const AI_BACKEND_NOTES = {
+  direct: "Нужен ключ API (например, OpenRouter). Платишь за токены по факту.",
+  codex: "Использует Codex CLI и твою подписку ChatGPT. Один раз выполни в терминале: codex login. Ключ API не нужен.",
+  opencode: "Использует OpenCode (CLI или локальный сервер). Ключ API не нужен.",
+  codex_server: "Запускает локальный codex app-server (через stdio). Тоже нужен вход: codex login. Экспериментально.",
+};
+
+function updateAiBackendFields() {
+  const backend = $("#ai-backend-select")?.value || "direct";
+  document.querySelectorAll("[data-ai-backend]").forEach((el) => {
+    const backends = (el.getAttribute("data-ai-backend") || "").split(/\s+/);
+    el.style.display = backends.includes(backend) ? "" : "none";
+  });
+  const note = $("#ai-backend-note");
+  if (note) note.textContent = AI_BACKEND_NOTES[backend] || "";
 }
 
 async function loadSources() {
@@ -774,7 +1167,8 @@ function setBusy(selector, busy) {
   const button = $(selector);
   if (!button) return;
   button.disabled = busy;
-  button.textContent = busy ? "Работаю..." : button.dataset.label || button.textContent;
+  const label = busy ? "Работаю..." : button.dataset.label || button.dataset.idleLabel || button.textContent.trim();
+  setButtonCopy(button, label, button.title);
 }
 
 function escapeHtml(value) {
@@ -797,6 +1191,767 @@ function escapeJsString(value) {
     .replaceAll("\n", "\\n")
     .replaceAll("\r", "\\r")
     .replaceAll("<", "\\u003c");
+}
+
+function setButtonCopy(button, label, hint = "") {
+  if (!button || !label) return;
+  const icon = button.querySelector("svg, i[data-lucide]");
+  const iconClone = icon ? icon.cloneNode(true) : null;
+  button.textContent = "";
+  if (iconClone) {
+    button.appendChild(iconClone);
+    button.appendChild(document.createTextNode(" "));
+  }
+  button.appendChild(document.createTextNode(label));
+  button.dataset.label = label;
+  button.dataset.idleLabel = label;
+  button.setAttribute("aria-label", hint || label);
+  button.setAttribute("title", hint || label);
+}
+
+function setFieldCopy(controlId, label, hint = "") {
+  const control = document.getElementById(controlId);
+  if (!control) return;
+  const wrapper = control.closest("label");
+  if (wrapper) {
+    let wroteLabel = false;
+    for (const node of Array.from(wrapper.childNodes)) {
+      if (node === control || (node.contains && node.contains(control))) break;
+      if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+        node.textContent = `${label} `;
+        wroteLabel = true;
+        break;
+      }
+    }
+    if (!wroteLabel) wrapper.insertBefore(document.createTextNode(`${label} `), wrapper.firstChild);
+    if (hint && !wrapper.querySelector(`[data-hint-for="${controlId}"]`)) {
+      const help = document.createElement("span");
+      help.className = "field-hint";
+      help.dataset.hintFor = controlId;
+      help.textContent = hint;
+      wrapper.appendChild(help);
+    }
+  }
+  control.setAttribute("aria-label", label);
+  control.setAttribute("title", hint || label);
+}
+
+function applyRussianUxCopy() {
+  for (const button of document.querySelectorAll(".nav-button")) {
+    const copy = UX_RU_COPY.nav[button.dataset.view];
+    if (!copy) continue;
+    setButtonCopy(button, copy[0], copy[1]);
+  }
+  for (const [selector, label] of Object.entries(UX_RU_COPY.headings)) {
+    const element = document.querySelector(selector);
+    if (element) element.textContent = label;
+  }
+  for (const [controlId, copy] of Object.entries(UX_RU_COPY.fields)) {
+    setFieldCopy(controlId, copy[0], copy[1]);
+  }
+  const summary = $("#summary-line");
+  if (summary && !state.jobs.length) {
+    summary.textContent = "Сначала заполни профиль и синхронизируй источники, затем отсортируй вакансии по score.";
+  }
+}
+
+function enhanceButtonHints(root = document) {
+  for (const [id, copy] of Object.entries(CONTROL_HINTS)) {
+    if (id === "source-setup-run-next") continue;
+    const button = root.getElementById ? root.getElementById(id) : document.getElementById(id);
+    if (button) setButtonCopy(button, copy[0], copy[1]);
+  }
+  for (const button of root.querySelectorAll ? root.querySelectorAll("button") : []) {
+    const label = button.textContent.trim() || button.getAttribute("aria-label") || "Действие";
+    if (!button.dataset.label) button.dataset.label = label;
+    if (!button.dataset.idleLabel) button.dataset.idleLabel = button.dataset.label;
+    if (!button.hasAttribute("aria-label")) button.setAttribute("aria-label", label);
+    if (!button.hasAttribute("title")) button.setAttribute("title", label);
+  }
+  enhanceTabHints(root);
+}
+
+function enhanceTabHints(root = document) {
+  const scope = root.querySelectorAll ? root : document;
+  for (const tab of scope.querySelectorAll(".ai-tab, .agent-tab")) {
+    const key = tab.dataset.aiPanel || tab.dataset.agentPanel;
+    const hint = TAB_HINTS[key];
+    tab.setAttribute("role", "tab");
+    if (hint && !tab.dataset.hinted) {
+      tab.setAttribute("title", hint);
+      tab.setAttribute("aria-label", `${tab.textContent.trim()} — ${hint}`);
+      tab.dataset.hinted = "1";
+    }
+  }
+}
+
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+}
+
+function setupKeyboardShortcuts() {
+  document.addEventListener("keydown", (event) => {
+    // Escape: закрыть открытые формы, снять выделение, убрать фокус с поля.
+    if (event.key === "Escape") {
+      const sourceSetup = document.getElementById("source-setup-modal");
+      if (sourceSetup && !sourceSetup.hidden) { closeSourceSetupWizard(); event.preventDefault(); return; }
+      const wizard = document.getElementById("wizard-modal");
+      if (wizard && !wizard.hidden) { closeWizard(); event.preventDefault(); return; }
+      let acted = false;
+      for (const formId of ["event-form", "resume-form", "search-form"]) {
+        const form = document.getElementById(formId);
+        if (form && form.style.display !== "none") { form.style.display = "none"; acted = true; }
+      }
+      if (typeof selectedJobIds !== "undefined" && selectedJobIds.size) { clearBulkSelection(); acted = true; }
+      if (isTypingTarget(document.activeElement)) { document.activeElement.blur(); acted = true; }
+      if (acted) event.preventDefault();
+      return;
+    }
+    if (isTypingTarget(event.target)) return;
+    // "/": быстрый фокус на AI-поиск.
+    if (event.key === "/") {
+      const search = $("#ai-search-input");
+      if (search) {
+        activateView("inbox");
+        search.focus();
+        event.preventDefault();
+      }
+      return;
+    }
+    // "?": показать/скрыть гид первого запуска.
+    if (event.key === "?") {
+      const dismissed = localStorage.getItem("work-hunter-onboarding-dismissed") === "true";
+      if (dismissed) reopenOnboardingGuide();
+      else dismissOnboardingGuide();
+      event.preventDefault();
+    }
+  });
+}
+
+function updateNavA11y(activeView) {
+  for (const button of document.querySelectorAll(".nav-button")) {
+    if (button.dataset.view === activeView) {
+      button.setAttribute("aria-current", "page");
+    } else {
+      button.removeAttribute("aria-current");
+    }
+  }
+}
+
+function onboardingSteps(status = {}, facts = []) {
+  const hasFacts = Array.isArray(facts) && facts.length > 0;
+  const answered = Number(status.answered_count || status.answers || status.completed_questions || 0);
+  const hasProfile = Boolean(state.profile?.data && Object.keys(state.profile.data).length);
+  const hasJobs = state.jobs.length > 0;
+  const ai = state.config?.ai || {};
+  const aiReady = Boolean(ai.api_key || (ai.backend === "opencode" && (ai.opencode_model || ai.opencode_command)));
+  return [
+    {
+      title: "Ответь на вопросы профиля",
+      body: "Система поймёт опыт, ограничения, желаемые роли и сильные доказательства.",
+      done: hasFacts || answered > 0 || hasProfile,
+      view: "onboarding",
+      action: "Заполнить",
+    },
+    {
+      title: "Подключи AI",
+      body: "Добавь ключ OpenRouter или OpenCode — для писем, анализа и подсказок. Можно пропустить.",
+      done: aiReady,
+      view: "settings",
+      action: "Настроить",
+      optional: true,
+    },
+    {
+      title: "Синхронизируй источники",
+      body: "Загрузи свежие вакансии с подключённых площадок и проверь готовность адаптеров.",
+      done: hasJobs,
+      view: "sources",
+      action: "Открыть источники",
+    },
+    {
+      title: "Выбери вакансию",
+      body: "Клик по строке откроет детали, AI-панели, письмо и действия по статусу.",
+      done: Boolean(state.selectedId),
+      view: "inbox",
+      action: "К списку",
+    },
+    {
+      title: "Проверь черновик отклика",
+      body: "Собери предпросмотр перед реальным откликом: письмо, резюме, payload и форму.",
+      done: false,
+      view: "application-preview",
+      action: "Собрать",
+    },
+  ];
+}
+
+function renderOnboardingGuide(status = {}, facts = []) {
+  const guide = $("#onboarding-guide");
+  const strip = $("#ux-help-strip");
+  const list = $("#onboarding-guide-steps");
+  const progress = $("#onboarding-progress span");
+  const reopen = $("#reopen-onboarding-guide");
+  if (!guide || !strip || !list || !progress) return;
+  const dismissed = localStorage.getItem("work-hunter-onboarding-dismissed") === "true";
+  if (dismissed) {
+    guide.hidden = true;
+    strip.hidden = true;
+    if (reopen) reopen.hidden = false;
+    return;
+  }
+  if (reopen) reopen.hidden = true;
+  const steps = onboardingSteps(status, facts);
+  const required = steps.filter((step) => !step.optional);
+  const done = required.filter((step) => step.done).length;
+  const pct = Math.round((done / required.length) * 100);
+  progress.style.width = `${pct}%`;
+  const progressLabel = $("#onboarding-progress");
+  if (progressLabel) progressLabel.setAttribute("aria-valuenow", String(pct));
+  const allDone = done === required.length;
+  list.innerHTML = steps.map((step, index) => `
+    <article class="onboarding-step${step.done ? " done" : ""}">
+      <span class="agent-badge ${step.done ? "ready" : ""}">${step.done ? "готово" : `шаг ${index + 1}`}</span>
+      <strong>${escapeHtml(step.title)}${step.optional ? ' <span class="step-optional">(по желанию)</span>' : ""}</strong>
+      <p>${escapeHtml(step.body)}</p>
+      <button data-onboarding-view="${escapeAttr(step.view)}">${step.done ? "Открыть" : escapeHtml(step.action || "Перейти")}</button>
+    </article>
+  `).join("");
+  const headNote = guide.querySelector(".onboarding-guide-head p");
+  if (headNote) {
+    headNote.textContent = allDone
+      ? "Отлично! Все основные шаги пройдены — можно откликаться на вакансии."
+      : `Пройдено ${done} из ${required.length}. Мини-карта, чтобы не потеряться в большом рабочем столе.`;
+  }
+  const onInbox = $("#view-inbox")?.classList.contains("active") !== false;
+  guide.hidden = !onInbox;
+  strip.hidden = !onInbox;
+  enhanceButtonHints(guide);
+}
+
+function dismissOnboardingGuide() {
+  localStorage.setItem("work-hunter-onboarding-dismissed", "true");
+  const guide = $("#onboarding-guide");
+  const strip = $("#ux-help-strip");
+  const reopen = $("#reopen-onboarding-guide");
+  if (guide) guide.hidden = true;
+  if (strip) strip.hidden = true;
+  if (reopen) reopen.hidden = false;
+  toast("Гид скрыт. Вернуть его можно кнопкой «Гид» вверху.", "info");
+}
+
+function reopenOnboardingGuide() {
+  localStorage.removeItem("work-hunter-onboarding-dismissed");
+  renderOnboardingGuide();
+  activateView("inbox");
+}
+
+// ── Мастер первого отклика ──────────
+const wizardState = { step: 0, jobId: null, letter: "" };
+const WIZARD_TITLES = ["Профиль", "Поиск", "Вакансия", "Письмо", "Готово"];
+const WIZARD_TOTAL = WIZARD_TITLES.length;
+
+function openWizard() {
+  wizardState.step = 0;
+  wizardState.jobId = state.selectedId || null;
+  wizardState.letter = "";
+  const modal = $("#wizard-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  document.body.classList.add("wizard-open");
+  renderWizard();
+}
+
+function closeWizard() {
+  const modal = $("#wizard-modal");
+  if (modal) modal.hidden = true;
+  document.body.classList.remove("wizard-open");
+}
+
+function wizardNext() {
+  if (wizardState.step < WIZARD_TOTAL - 1) {
+    wizardState.step += 1;
+    renderWizard();
+  } else {
+    closeWizard();
+  }
+}
+
+function wizardBack() {
+  if (wizardState.step > 0) {
+    wizardState.step -= 1;
+    renderWizard();
+  }
+}
+
+function wizardTopJobs() {
+  return [...state.jobs]
+    .sort((a, b) => (b.score?.total_score || 0) - (a.score?.total_score || 0))
+    .slice(0, 6);
+}
+
+function renderWizard() {
+  const body = $("#wizard-body");
+  if (!body) return;
+  const stepsEl = $("#wizard-steps");
+  if (stepsEl) {
+    stepsEl.innerHTML = WIZARD_TITLES.map((title, index) => {
+      const cls = index === wizardState.step ? "active" : index < wizardState.step ? "done" : "";
+      return `<span class="wizard-dot ${cls}">${index + 1}. ${escapeHtml(title)}</span>`;
+    }).join("");
+  }
+  const progress = $("#wizard-progress");
+  if (progress) progress.textContent = `Шаг ${wizardState.step + 1} из ${WIZARD_TOTAL}`;
+  const back = $("#wizard-back");
+  if (back) back.disabled = wizardState.step === 0;
+  const next = $("#wizard-next");
+  if (next) next.textContent = wizardState.step === WIZARD_TOTAL - 1 ? "Закрыть" : "Далее";
+
+  if (wizardState.step === 0) {
+    const hasProfile = Boolean(state.profile?.data && Object.keys(state.profile.data).length);
+    body.innerHTML = `
+      <h3>Шаг 1. Профиль кандидата</h3>
+      <p>Чтобы подбор и письма были точными, сначала заполни профиль: опыт, навыки, пожелания по зарплате и формату.</p>
+      <div class="wizard-status ${hasProfile ? "ok" : ""}">${hasProfile ? "✓ Профиль уже заполнен — можно идти дальше." : "Профиль ещё пустой."}</div>
+      <div class="wizard-actions">
+        <button class="primary" onclick="wizardGoOnboarding()"><i data-lucide="user-check"></i>Заполнить профиль</button>
+      </div>
+      <p class="meta">Уже заполнял раньше? Просто нажми «Далее».</p>`;
+  } else if (wizardState.step === 1) {
+    body.innerHTML = `
+      <h3>Шаг 2. Найти вакансии</h3>
+      <p>Загрузим свежие вакансии из подключённых источников. Это безопасно.</p>
+      <div class="wizard-actions">
+        <button id="wizard-sync" class="primary" onclick="wizardSync()"><i data-lucide="refresh-cw"></i>Синхронизировать</button>
+      </div>
+      <div id="wizard-sync-status" class="wizard-status">${state.jobs.length ? `Сейчас в списке: ${state.jobs.length} вакансий.` : "Вакансий пока нет — нажми «Синхронизировать»."}</div>`;
+  } else if (wizardState.step === 2) {
+    const jobs = wizardTopJobs();
+    body.innerHTML = `
+      <h3>Шаг 3. Выбери вакансию</h3>
+      <p>Лучшие по соответствию. Нажми на подходящую.</p>
+      ${jobs.length ? `<div class="wizard-joblist">${jobs.map((job) => `
+        <button class="wizard-job${job.id === wizardState.jobId ? " selected" : ""}" onclick="wizardPickJob(${job.id})">
+          <span class="score">${escapeHtml(String(job.score?.total_score ?? "-"))}</span>
+          <span class="wizard-job-main">
+            <strong>${escapeHtml(job.title || "Без названия")}</strong>
+            <span class="meta">${escapeHtml([job.company, job.source].filter(Boolean).join(" · "))}</span>
+          </span>
+        </button>`).join("")}</div>` : `<div class="wizard-status">Список пуст. Вернись на шаг 2 и синхронизируй источники.</div>`}`;
+  } else if (wizardState.step === 3) {
+    if (!wizardState.jobId) {
+      body.innerHTML = `<h3>Шаг 4. Сопроводительное письмо</h3><div class="wizard-status">Сначала выбери вакансию на шаге 3.</div>`;
+    } else {
+      body.innerHTML = `
+        <h3>Шаг 4. Сопроводительное письмо</h3>
+        <p>Сгенерируй черновик и при желании поправь. Это ещё не отправка.</p>
+        <div class="wizard-actions">
+          <button onclick="wizardLetter('template')"><i data-lucide="file-text"></i>Шаблон</button>
+          <button class="primary" onclick="wizardLetter('ai')"><i data-lucide="sparkles"></i>AI-письмо</button>
+        </div>
+        <textarea id="wizard-letter" class="wizard-letter" rows="9" placeholder="Здесь появится письмо..." oninput="wizardState.letter=this.value">${escapeHtml(wizardState.letter)}</textarea>`;
+    }
+  } else {
+    const job = state.jobs.find((item) => item.id === wizardState.jobId);
+    body.innerHTML = `
+      <h3>Готово! Последний шаг — отклик</h3>
+      <p>Откроем карточку вакансии${job ? ` «${escapeHtml(job.title || "")}»` : ""}. Там есть кнопка <b>«Откликнуться на HH»</b> — реальный отклик уходит только после твоего подтверждения.</p>
+      <div class="wizard-status ok">Письмо ${wizardState.letter.trim() ? "готово и будет подставлено в карточку." : "можно дописать в карточке."}</div>
+      <div class="wizard-actions">
+        <button onclick="wizardCheckPlan()" id="wizard-check-plan"><i data-lucide="scan-line"></i>Проверить план отклика</button>
+        <button class="primary" onclick="wizardFinish()"><i data-lucide="external-link"></i>Открыть вакансию</button>
+      </div>
+      <pre id="wizard-plan-output" class="agent-json" hidden></pre>
+      <p class="meta">«Проверить план отклика» — это безопасная проверка без отправки: покажет, всё ли готово.</p>`;
+  }
+  refreshIcons();
+}
+
+async function wizardCheckPlan() {
+  if (!wizardState.jobId) return;
+  const out = $("#wizard-plan-output");
+  setBusy("#wizard-check-plan", true);
+  try {
+    const result = await api(`/api/jobs/${wizardState.jobId}/apply-plan`, {
+      method: "POST",
+      body: JSON.stringify({ letter: wizardState.letter || "" }),
+    });
+    if (out) {
+      out.hidden = false;
+      out.textContent = JSON.stringify(result, null, 2);
+    }
+    const ready = result?.status === "ready";
+    toast(ready ? "План готов — можно открывать вакансию и отправлять" : `Статус плана: ${result?.status || "см. детали"}`, ready ? "success" : "info");
+  } catch (err) {
+    if (out) { out.hidden = false; out.textContent = "Ошибка: " + err.message; }
+    toast("Не удалось собрать план: " + err.message, "error");
+  } finally {
+    setBusy("#wizard-check-plan", false);
+  }
+}
+
+function wizardGoOnboarding() {
+  closeWizard();
+  activateView("onboarding");
+}
+
+async function wizardSync() {
+  setBusy("#wizard-sync", true);
+  const status = $("#wizard-sync-status");
+  try {
+    await api("/api/sync", { method: "POST", body: JSON.stringify({ score: true }) });
+    await loadJobs();
+    if (status) status.textContent = `Готово! Найдено ${state.jobs.length} вакансий. Жми «Далее».`;
+    toast(`Найдено ${state.jobs.length} вакансий`, "success");
+  } catch (err) {
+    if (status) status.textContent = "Ошибка синхронизации: " + err.message;
+    toast("Ошибка синхронизации: " + err.message, "error");
+  } finally {
+    setBusy("#wizard-sync", false);
+  }
+}
+
+function wizardPickJob(id) {
+  wizardState.jobId = Number(id);
+  renderWizard();
+}
+
+async function wizardLetter(kind) {
+  if (!wizardState.jobId) return;
+  const area = $("#wizard-letter");
+  if (area) area.value = "Генерирую...";
+  try {
+    const path = kind === "ai" ? "letter-ai" : "letter";
+    const draft = await api(`/api/jobs/${wizardState.jobId}/${path}`, { method: "POST", body: "{}" });
+    wizardState.letter = draft.body || "";
+    if (area) area.value = wizardState.letter;
+  } catch (err) {
+    if (area) area.value = "";
+    toast("Не удалось сгенерировать письмо: " + err.message + (kind === "ai" ? " (проверь настройки AI)" : ""), "error");
+  }
+}
+
+async function wizardFinish() {
+  const jobId = wizardState.jobId;
+  const letter = wizardState.letter;
+  closeWizard();
+  if (!jobId) { activateView("inbox"); return; }
+  activateView("inbox", { load: false });
+  await selectJob(jobId);
+  if (letter && $("#letter-box")) $("#letter-box").value = letter;
+  toast("Карточка вакансии открыта — отклик отправится только после подтверждения", "info", 6000);
+}
+
+// ── Мастер подключения источника ──────────
+const SOURCE_SETUP_LANE_LABELS = {
+  hh: "Самый простой путь: вход в HH, резюме, затем подтверждение отклика",
+  certifiable_external: "Внешняя площадка: HAR, проверка, dry-run, затем подтверждение",
+  manual_or_search_only: "Поиск и ручной отклик без обещания auto-apply",
+};
+
+const SOURCE_SETUP_GOAL_LABELS = {
+  ready: "можно использовать",
+  ready_to_certify: "можно включить",
+  blocked: "нужно действие",
+  manual_handoff: "ручной режим",
+};
+
+const SOURCE_SETUP_ACTION_LABELS = {
+  preflight: "Проверить вход в HH",
+  source_status: "Показать статус",
+  source_sync: "Загрузить вакансии",
+  source_test: "Проверить источник",
+  browser_login_plan: "Показать план входа",
+  har_import: "Подключить HAR-файл",
+  redaction_scan: "Проверить секреты",
+  dry_run: "Проверить форму без отправки",
+  certification_audit: "Показать, что осталось",
+  certify: "Включить после проверок",
+};
+
+const SOURCE_SETUP_SOURCE_LABELS = {
+  hh: "HH.ru",
+  habr: "Habr Career",
+  geekjob: "GeekJob",
+  getmatch: "Getmatch",
+  hirehi: "Hirehi",
+  careerspace: "CareerSpace",
+  jabka: "Jabka",
+  telegram: "Telegram",
+  relocate_me: "Relocate.me",
+  another_it: "Another IT",
+  rvc: "RVC",
+};
+
+function openSourceSetupWizard() {
+  const modal = $("#source-setup-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  document.body.classList.add("wizard-open");
+  if (!state.sourceSetup.guide) {
+    loadSourceSetupGuide();
+  } else {
+    renderSourceSetupGuide();
+  }
+}
+
+function closeSourceSetupWizard() {
+  const modal = $("#source-setup-modal");
+  if (modal) modal.hidden = true;
+  document.body.classList.remove("wizard-open");
+}
+
+function sourceSetupSource() {
+  return $("#source-setup-source")?.value || "hh";
+}
+
+function sourceSetupLevel() {
+  const value = Number($("#source-setup-level")?.value || 5);
+  return value === 6 ? 6 : 5;
+}
+
+function sourceSetupSourceLabel(source) {
+  const value = String(source || sourceSetupSource() || "hh");
+  return SOURCE_SETUP_SOURCE_LABELS[value] || value;
+}
+
+function sourceSetupStepCounts(guide) {
+  const steps = Array.isArray(guide?.steps) ? guide.steps : [];
+  return {
+    ready: steps.filter((step) => step.status === "ready").length,
+    blocked: steps.filter((step) => step.status === "blocked").length,
+    total: steps.length,
+  };
+}
+
+function sourceSetupNeedsTechnicalInputs(guide) {
+  return guide?.lane === "certifiable_external";
+}
+
+function sourceSetupPrimaryNote(guide) {
+  if (guide?.lane === "hh") {
+    return "Главная кнопка только проверит вход, резюме и очередь подтверждений. Реальный отклик останется на отдельном экране подтверждения.";
+  }
+  if (guide?.lane === "manual_or_search_only") {
+    return "Для этой площадки мастер доводит до поиска и ручного отклика, без обещания автоматической отправки.";
+  }
+  return "Для внешней площадки сначала нужны HAR и dry-run. Cookies, токены и payload не выводятся в интерфейс без маскирования.";
+}
+
+function resetSourceSetupGuide() {
+  state.sourceSetup.guide = null;
+  state.sourceSetup.log = [];
+  renderSourceSetupLog();
+  loadSourceSetupGuide();
+}
+
+async function loadSourceSetupGuide() {
+  const source = encodeURIComponent(sourceSetupSource());
+  const level = sourceSetupLevel();
+  const status = $("#source-setup-status");
+  if (status) status.innerHTML = `<span class="agent-badge">загрузка</span><span class="meta">Проверяю ${escapeHtml(sourceSetupSourceLabel(sourceSetupSource()))}...</span>`;
+  try {
+    const guide = await api(`/api/source-setup/guide?source=${source}&level=${level}`);
+    state.sourceSetup.guide = guide;
+    appendSourceSetupLog("guide", guide);
+    renderSourceSetupGuide();
+  } catch (err) {
+    renderActionError($("#source-setup-log"), err);
+  }
+}
+
+function renderSourceSetupGuide() {
+  const guide = state.sourceSetup.guide || {};
+  const status = $("#source-setup-status");
+  const steps = $("#source-setup-steps");
+  const next = $("#source-setup-next-action");
+  if (!status || !steps || !next) return;
+  const sourceLabel = sourceSetupSourceLabel(guide.source);
+  const lane = SOURCE_SETUP_LANE_LABELS[guide.lane] || guide.lane || "источник";
+  const goal = SOURCE_SETUP_GOAL_LABELS[guide.goal_status] || guide.goal_status || "проверка";
+  const badgeClass = guide.goal_status === "ready" ? "ready" : guide.goal_status === "blocked" ? "blocked" : "";
+  const counts = sourceSetupStepCounts(guide);
+  const countText = counts.total ? `${counts.ready} из ${counts.total} шагов готово` : "жду проверки";
+  const technicalInputs = $(".source-setup-inputs");
+  if (technicalInputs) {
+    technicalInputs.hidden = !sourceSetupNeedsTechnicalInputs(guide);
+    if (technicalInputs.hidden) technicalInputs.open = false;
+  }
+  status.innerHTML = `
+    <div class="source-setup-status-main">
+      <span class="meta">Подключаем</span>
+      <strong>${escapeHtml(sourceLabel)}</strong>
+      <span class="source-setup-status-text">${escapeHtml(lane)}</span>
+    </div>
+    <span class="agent-badge ${escapeAttr(badgeClass)}">${escapeHtml(goal)}</span>
+    <span class="source-setup-count">${escapeHtml(countText)}</span>
+    ${guide.can_certify ? '<span class="agent-badge ready">можно сертифицировать</span>' : ""}
+  `;
+  steps.innerHTML = (guide.steps || []).map((step) => `
+    <article class="source-setup-step ${escapeAttr(step.status || "pending")}">
+      <span class="agent-badge ${step.status === "ready" ? "ready" : step.status === "blocked" ? "blocked" : ""}">${escapeHtml(sourceSetupStatusLabel(step.status))}</span>
+      <strong>${escapeHtml(step.title || step.id || "")}</strong>
+      <p>${escapeHtml(step.body || "")}</p>
+    </article>
+  `).join("");
+  const action = guide.next_action || {};
+  const primaryAction = action.action || "";
+  const primaryLabel = SOURCE_SETUP_ACTION_LABELS[primaryAction] || action.label || "Следующий шаг";
+  const secondaryActions = (guide.available_actions || []).filter((item) => item !== primaryAction);
+  const actionButtons = secondaryActions.map((item) => `
+    <button data-source-setup-action="${escapeAttr(item)}">${escapeHtml(SOURCE_SETUP_ACTION_LABELS[item] || item)}</button>
+  `).join("");
+  next.innerHTML = `
+    <span class="source-setup-kicker">Что сделать сейчас</span>
+    <strong>${escapeHtml(primaryLabel)}</strong>
+    <p>${escapeHtml(action.description || "Обнови статус, чтобы увидеть рекомендацию.")}</p>
+    <p class="source-setup-primary-note">${escapeHtml(sourceSetupPrimaryNote(guide))}</p>
+    ${secondaryActions.length ? `
+      <details class="source-setup-actions-advanced">
+        <summary>Расширенные проверки</summary>
+        <div class="source-setup-actions">${actionButtons}</div>
+      </details>
+    ` : ""}
+  `;
+  const runNext = $("#source-setup-run-next");
+  if (runNext) {
+    runNext.dataset.nextSourceSetupAction = primaryAction || "source_status";
+    runNext.disabled = !primaryAction;
+    runNext.innerHTML = `<i data-lucide="play"></i>${escapeHtml(primaryLabel)}`;
+    runNext.dataset.label = primaryLabel;
+    runNext.dataset.idleLabel = primaryLabel;
+    runNext.setAttribute("aria-label", primaryLabel);
+    runNext.setAttribute("title", primaryLabel);
+  }
+  renderSourceSetupLog();
+  enhanceButtonHints($("#source-setup-modal") || document);
+  refreshIcons();
+}
+
+function sourceSetupStatusLabel(status) {
+  const value = String(status || "pending");
+  if (value === "ready") return "готово";
+  if (value === "blocked") return "нужно действие";
+  return "ожидает";
+}
+
+function appendSourceSetupLog(kind, payload) {
+  const item = {
+    at: new Date().toLocaleTimeString(),
+    kind,
+    payload,
+  };
+  state.sourceSetup.log = [item, ...state.sourceSetup.log].slice(0, 6);
+  renderSourceSetupLog();
+}
+
+function renderSourceSetupLog() {
+  const log = $("#source-setup-log");
+  const summary = $("#source-setup-log-summary");
+  if (!log) return;
+  if (!state.sourceSetup.log.length) {
+    if (summary) summary.textContent = "пока пуст";
+    log.textContent = "Проверок ещё не было.";
+    return;
+  }
+  if (summary) summary.textContent = `${state.sourceSetup.log.length} записей`;
+  log.textContent = state.sourceSetup.log.map(sourceSetupCompactLogLine).join("\n");
+}
+
+function sourceSetupCompactLogLine(item) {
+  const payload = item.payload || {};
+  const guide = payload.guide || payload;
+  const next = guide?.next_action?.action || payload.action || "";
+  const nextLabel = SOURCE_SETUP_ACTION_LABELS[next] || guide?.next_action?.label || next || "обновить статус";
+  const status = guide.goal_status || payload.status || "ok";
+  const counts = sourceSetupStepCounts(guide);
+  const countText = counts.total ? `${counts.ready}/${counts.total} готово` : "";
+  const submitText = payload.submit === false ? "отправки нет" : "";
+  const pieces = [sourceSetupLogKindLabel(item.kind), sourceSetupGoalLabel(status), countText, submitText].filter(Boolean);
+  return `[${item.at}] ${pieces.join(" · ")}\nследующий шаг: ${nextLabel}`;
+}
+
+function sourceSetupLogKindLabel(kind) {
+  if (kind === "guide") return "статус";
+  return SOURCE_SETUP_ACTION_LABELS[kind] || kind || "проверка";
+}
+
+function sourceSetupGoalLabel(status) {
+  const value = String(status || "");
+  if (value === "blocked") return "нужно действие";
+  if (value === "ready") return "готово";
+  if (value === "ready_to_certify") return "готово к включению";
+  if (value === "manual_handoff") return "ручной режим";
+  if (value === "ok") return "проверено";
+  return value;
+}
+
+function sourceSetupJson(selector, fallback = {}) {
+  const raw = ($(selector)?.value || "").trim();
+  if (!raw) return fallback;
+  return JSON.parse(raw);
+}
+
+function sourceSetupActionPayload(action) {
+  const payload = {
+    action,
+    source: sourceSetupSource(),
+    level: sourceSetupLevel(),
+  };
+  if (action === "har_import") {
+    payload.path = $("#source-setup-har-path")?.value.trim() || "";
+    payload.allowed_hosts = ($("#source-setup-har-hosts")?.value || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  if (action === "redaction_scan") {
+    payload.payload = sourceSetupJson("#source-setup-redaction-payload", {});
+    payload.text = $("#source-setup-redaction-text")?.value || "";
+  }
+  if (action === "dry_run") {
+    payload.form = sourceSetupJson("#source-setup-form-json", {});
+    payload.persona = sourceSetupJson("#source-setup-persona-json", {});
+    payload.headless = true;
+  }
+  if (action === "preflight") {
+    payload.live_auth = false;
+  }
+  return payload;
+}
+
+async function runSourceSetupAction(action) {
+  const actionName = action || state.sourceSetup.guide?.next_action?.action || "source_status";
+  const output = $("#source-setup-log");
+  try {
+    setSourceSetupBusy(true);
+    const result = await api("/api/source-setup/action", {
+      method: "POST",
+      body: JSON.stringify(sourceSetupActionPayload(actionName)),
+    });
+    appendSourceSetupLog(actionName, result);
+    if (result.guide) state.sourceSetup.guide = result.guide;
+    else await loadSourceSetupGuide();
+    renderSourceSetupGuide();
+    const stillBlocked = result.status === "blocked" || result.guide?.goal_status === "blocked";
+    toast(stillBlocked ? "Проверка готова: нужен следующий шаг" : "Проверка выполнена", stillBlocked ? "info" : "success");
+  } catch (err) {
+    renderActionError(output, err);
+  } finally {
+    setSourceSetupBusy(false);
+  }
+}
+
+function setSourceSetupBusy(busy) {
+  for (const button of document.querySelectorAll("#source-setup-run-next, [data-source-setup-action]")) {
+    if (!button.dataset.sourceSetupIdleLabel) {
+      button.dataset.sourceSetupIdleLabel = button.dataset.idleLabel || button.dataset.label || button.textContent.trim();
+    }
+    button.disabled = busy;
+    const label = busy ? "Работаю..." : button.dataset.sourceSetupIdleLabel;
+    setButtonCopy(button, label, button.title);
+  }
 }
 
 function toggleTheme() {
@@ -913,7 +2068,7 @@ async function saveJobNote() {
   if (!state.selectedId) return;
   const note = $("#job-notes-input").value;
   await api(`/api/jobs/${state.selectedId}/note`, { method: "POST", body: JSON.stringify({ body: note }) });
-  alert("Заметка сохранена.");
+  toast("Заметка сохранена", "success");
 }
 
 async function loadJobNote() {
@@ -971,15 +2126,30 @@ async function loadStats() {
 
     const funnelDiv = $("#stats-funnel");
     funnelDiv.innerHTML = "";
-    if (stats.applications_by_status) {
-      const funnel = stats.applications_by_status;
-      const total = stats.total_applications || 1;
-      const stages = ["applied", "viewed", "response", "phone_screen", "interview", "offer"];
-      for (const stage of stages) {
-        const count = funnel[stage] || 0;
-        const pct = Math.round((count / total) * 100);
-        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${Math.max(pct, 2)}%;min-width:40px;"><span>${stage}</span><strong>${count}</strong></div>`;
-      }
+    const funnel = stats.applications_by_status || {};
+    const stages = [
+      ["applied", "Откликнулись"],
+      ["viewed", "Просмотрено"],
+      ["response", "Ответ"],
+      ["phone_screen", "Созвон / скрининг"],
+      ["interview", "Интервью"],
+      ["offer", "Оффер"],
+    ];
+    const base = Math.max(funnel.applied || 0, stats.total_applications || 0, 1);
+    const hasData = stages.some(([key]) => (funnel[key] || 0) > 0);
+    if (!hasData) {
+      funnelDiv.innerHTML = '<p class="meta">Пока нет откликов — воронка появится после первых откликов.</p>';
+    } else {
+      funnelDiv.innerHTML = stages.map(([key, label]) => {
+        const count = funnel[key] || 0;
+        const pct = Math.round((count / base) * 100);
+        const conv = (funnel.applied || 0) > 0 ? Math.round((count / (funnel.applied || 1)) * 100) : 0;
+        return `<div class="stat-bar funnel-row">
+          <span>${label}</span>
+          <div class="bar"><div class="fill" style="width:${count > 0 ? Math.max(pct, 6) : 0}%"></div></div>
+          <span title="${conv}% от откликов">${count}</span>
+        </div>`;
+      }).join("");
     }
   } catch (e) {
     console.error("Stats error:", e);
@@ -1071,6 +2241,7 @@ function switchAiTab(panelName) {
 
 function refreshIcons() {
   if (window.lucide) lucide.createIcons();
+  enhanceButtonHints();
 }
 
 function switchAgentPanel(panelName) {
@@ -1171,7 +2342,7 @@ function renderAgentDigest() {
   if (!box) return;
   const digest = state.agent.digest;
   if (!digest) {
-    box.innerHTML = '<p class="meta">Нет digest.</p>';
+    box.innerHTML = '<p class="meta">Дайджест пуст.</p>';
     return;
   }
   const recommendations = digest.summary?.recommendations || [];
@@ -1180,24 +2351,24 @@ function renderAgentDigest() {
   box.innerHTML = `
     <div class="agent-row">
       <div class="agent-row-head">
-        <strong>HH summary</strong>
+        <strong>Сводка HH</strong>
         <span class="agent-badge">${escapeHtml(String(digest.status || "ok"))}</span>
       </div>
       <div class="agent-inline-stats">
-        <span>resumes: ${escapeHtml(String(digest.summary?.resumes?.total ?? 0))}</span>
-        <span>negotiations: ${escapeHtml(String(digest.summary?.negotiations?.total ?? 0))}</span>
-        <span>contacts: ${escapeHtml(String(digest.summary?.contacts?.total ?? 0))}</span>
-        <span>skipped: ${escapeHtml(String(digest.summary?.skipped?.total ?? 0))}</span>
+        <span>резюме: ${escapeHtml(String(digest.summary?.resumes?.total ?? 0))}</span>
+        <span>переписки: ${escapeHtml(String(digest.summary?.negotiations?.total ?? 0))}</span>
+        <span>контакты: ${escapeHtml(String(digest.summary?.contacts?.total ?? 0))}</span>
+        <span>пропущено: ${escapeHtml(String(digest.summary?.skipped?.total ?? 0))}</span>
       </div>
-      <div class="meta">${recommendations.map(escapeHtml).join(" · ") || "no recommendations"}</div>
+      <div class="meta">${recommendations.map(escapeHtml).join(" · ") || "нет рекомендаций"}</div>
     </div>
     <div class="agent-row">
-      <div class="agent-row-head"><strong>Recent approvals</strong><span class="agent-badge">${approvals.length}</span></div>
-      ${approvals.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.action_type)} · ${escapeHtml(item.status)} · ${escapeHtml(item.reason || "")}</div>`).join("") || '<p class="meta">Нет approvals.</p>'}
+      <div class="agent-row-head"><strong>Недавние согласования</strong><span class="agent-badge">${approvals.length}</span></div>
+      ${approvals.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.action_type)} · ${escapeHtml(item.status)} · ${escapeHtml(item.reason || "")}</div>`).join("") || '<p class="meta">Согласований нет.</p>'}
     </div>
     <div class="agent-row">
-      <div class="agent-row-head"><strong>Recent runs</strong><span class="agent-badge">${runs.length}</span></div>
-      ${runs.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.tool_name)} · ${escapeHtml(item.status)}</div>`).join("") || '<p class="meta">Нет запусков.</p>'}
+      <div class="agent-row-head"><strong>Недавние запуски</strong><span class="agent-badge">${runs.length}</span></div>
+      ${runs.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.tool_name)} · ${escapeHtml(item.status)}</div>`).join("") || '<p class="meta">Запусков нет.</p>'}
     </div>
   `;
   refreshIcons();
@@ -1219,12 +2390,12 @@ function renderAgentApprovals() {
       </div>
       <div class="meta">confidence: ${escapeHtml(String(item.confidence))} · ${escapeHtml(item.reason || "")}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify(item.payload || {}, null, 2))}</pre>
-      <textarea id="agent-modify-${item.id}" class="agent-modify" rows="2" placeholder="Что изменить в payload/сообщении"></textarea>
+      <textarea id="agent-modify-${item.id}" class="agent-modify" rows="2" placeholder="Что изменить в payload или сообщении"></textarea>
       <div class="agent-row-actions">
-        <button onclick="approveAgentApproval(${item.id})"><i data-lucide="check"></i>Approve</button>
-        <button onclick="rejectAgentApproval(${item.id})"><i data-lucide="x"></i>Reject</button>
-        <button onclick="modifyAgentApproval(${item.id})"><i data-lucide="pencil"></i>Modify</button>
-        <button onclick="flagAgentApproval(${item.id})"><i data-lucide="flag"></i>Flag</button>
+        <button onclick="approveAgentApproval(${item.id})" title="Одобрить и разрешить действие"><i data-lucide="check"></i>Одобрить</button>
+        <button onclick="rejectAgentApproval(${item.id})" title="Отклонить действие"><i data-lucide="x"></i>Отклонить</button>
+        <button onclick="modifyAgentApproval(${item.id})" title="Изменить и одобрить"><i data-lucide="pencil"></i>Изменить</button>
+        <button onclick="flagAgentApproval(${item.id})" title="Пометить для ручной проверки"><i data-lucide="flag"></i>Пометить</button>
       </div>
     </div>
   `).join("");
@@ -1244,7 +2415,7 @@ function renderAgentOperations() {
       </div>
       <div class="meta">${escapeHtml(run.started_at || "")} ${run.finished_at ? "→ " + escapeHtml(run.finished_at) : ""}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify(run.output || run.input || {}, null, 2))}</pre>
-      ${run.status === "running" ? `<button onclick="cancelAgentOperation(${run.id})"><i data-lucide="ban"></i>Cancel</button>` : ""}
+      ${run.status === "running" ? `<button onclick="cancelAgentOperation(${run.id})" title="Отменить запущенную операцию"><i data-lucide="ban"></i>Отменить</button>` : ""}
     </div>
   `).join("") : '<p class="meta">Запусков пока нет.</p>';
   logBox.innerHTML = operations.logs.length ? operations.logs.map((log) => `
@@ -1266,13 +2437,13 @@ function renderAgentInbox() {
   const approvals = Array.isArray(state.agent.approvals) ? state.agent.approvals.filter((item) => item.status === "pending") : [];
   const rows = [
     ...approvals.map((item) => ({
-      title: `Approval #${item.id}`,
+      title: `Согласование #${item.id}`,
       badge: item.action_type || "approval",
       body: item.reason || "",
       payload: item.payload || {},
     })),
     ...outbox.map((item) => ({
-      title: `Outbox #${item.id}`,
+      title: `Исходящее #${item.id}`,
       badge: item.status || "outbox",
       body: `${item.channel || ""} ${item.target || ""}`.trim(),
       payload: item.payload || {},
@@ -1293,7 +2464,7 @@ function renderAgentInbox() {
       <p>${escapeHtml(item.body)}</p>
       <pre class="agent-json">${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre>
     </div>
-  `).join("") : `<p class="meta">Inbox is empty.</p>`;
+  `).join("") : `<p class="meta">Входящие пусты.</p>`;
 }
 
 function renderAgentEvents() {
@@ -1309,7 +2480,7 @@ function renderAgentEvents() {
         </div>
         <p>${escapeHtml([item.event_at, item.employer_name, item.vacancy_name].filter(Boolean).join(" · "))}</p>
       </div>
-    `).join("") : `<p class="meta">No agent events yet.</p>`;
+    `).join("") : `<p class="meta">Событий агента пока нет.</p>`;
   }
   if (tasksBox) {
     const tasks = state.agent.tasks || [];
@@ -1321,7 +2492,7 @@ function renderAgentEvents() {
         </div>
         <p>${escapeHtml([item.due_at, item.employer_name, item.vacancy_name].filter(Boolean).join(" · "))}</p>
       </div>
-    `).join("") : `<p class="meta">No agent tasks yet.</p>`;
+    `).join("") : `<p class="meta">Задач агента пока нет.</p>`;
   }
 }
 
@@ -1359,7 +2530,7 @@ function renderAgentBlacklist() {
       </div>
       <div class="meta">${escapeHtml(item.employer_id)} · ${escapeHtml(item.reason || "")}</div>
     </div>
-  `).join("") : '<p class="meta">Blacklist пустой.</p>';
+  `).join("") : '<p class="meta">Чёрный список пуст.</p>';
   refreshIcons();
 }
 
@@ -1380,7 +2551,7 @@ function renderHhLabSnippets() {
   if (!box) return;
   const snippets = state.agent.labSnippets || [];
   if (!snippets.length) {
-    box.innerHTML = '<p class="meta">Snippets list is empty.</p>';
+    box.innerHTML = '<p class="meta">Сохранённых сниппетов нет.</p>';
     return;
   }
   box.innerHTML = snippets.map((item) => `
@@ -1392,9 +2563,9 @@ function renderHhLabSnippets() {
       <div class="meta">${escapeHtml(item.path)}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify({ params: item.params || {}, body: item.body || {} }, null, 2))}</pre>
       <div class="agent-row-actions">
-        <button onclick="fillHhLabRequestByName('${escapeJsString(item.name)}')"><i data-lucide="copy"></i>Load</button>
-        <button onclick="runHhLabSnippet('${escapeJsString(item.name)}')"><i data-lucide="play"></i>Run</button>
-        <button onclick="deleteHhLabSnippet('${escapeJsString(item.name)}')"><i data-lucide="trash-2"></i>Delete</button>
+        <button onclick="fillHhLabRequestByName('${escapeJsString(item.name)}')" title="Загрузить сниппет в редактор"><i data-lucide="copy"></i>Загрузить</button>
+        <button onclick="runHhLabSnippet('${escapeJsString(item.name)}')" title="Выполнить сниппет"><i data-lucide="play"></i>Выполнить</button>
+        <button onclick="deleteHhLabSnippet('${escapeJsString(item.name)}')" title="Удалить сниппет"><i data-lucide="trash-2"></i>Удалить</button>
       </div>
     </div>
   `).join("");
@@ -1653,8 +2824,17 @@ function renderAiReadiness(ai) {
   const box = $("#ai-readiness-list");
   if (!box) return;
   const routes = Object.entries(ai?.routes || {});
+  const note = $("#ai-default-route-note");
+  const defaultRoute = ai?.default_route || "smart";
+  const defaultStatus = ai?.routes?.[defaultRoute] || null;
+  if (note) {
+    const readyText = defaultStatus?.ready
+      ? "готов к безопасной проверке"
+      : "требует настройки";
+    note.textContent = `Основной AI-маршрут: ${defaultRoute}. Если прямой API не заполнен, AI-кнопки используют этот маршрут; сейчас он ${readyText}.`;
+  }
   if (!routes.length) {
-    box.innerHTML = '<p class="meta">No AI routes configured.</p>';
+    box.innerHTML = '<p class="meta">Маршруты AI не настроены.</p>';
     return;
   }
   box.innerHTML = routes.map(([name, route]) => {
@@ -1709,7 +2889,7 @@ async function previewSetupWoImport() {
 
 async function applySetupWoImport() {
   const output = $("#setup-import-wo-output");
-  if (!window.confirm("Apply redacted WO/FLOW import into this local project?")) return;
+  if (!window.confirm("Применить отредактированный импорт WO/FLOW в этот локальный проект?")) return;
   try {
     setBusy("#setup-import-wo-apply-button", true);
     const result = await api("/api/init/import-wo", {
@@ -1731,30 +2911,66 @@ async function loadOnboardingQuestions() {
     api("/api/onboarding/status"),
     api("/api/candidate/facts"),
   ]);
+  const ru = (q) => ONBOARDING_RU[q.id] || { title: q.title || q.id, prompt: q.prompt || "", example: "" };
+  const answeredIds = new Set((Array.isArray(facts) ? facts : []).map((f) => f.key));
   const select = $("#onboarding-question-select");
   if (select) {
-    select.innerHTML = questions.map((q) => `<option value="${escapeAttr(q.id)}">${escapeHtml(q.title || q.id)}</option>`).join("");
+    select.innerHTML = questions.map((q) => {
+      const done = answeredIds.has(q.id) ? "✓ " : "";
+      return `<option value="${escapeAttr(q.id)}">${done}${escapeHtml(ru(q).title)}</option>`;
+    }).join("");
   }
-  $("#onboarding-questions").innerHTML = questions.map((q) => `
-    <div class="agent-row">
-      <div class="agent-row-head"><strong>${escapeHtml(q.title || q.id)}</strong><span class="agent-badge">${escapeHtml(q.category || "")}</span></div>
-      <div class="meta">${escapeHtml(q.prompt || "")}</div>
-    </div>
-  `).join("");
+  updateOnboardingPrompt();
+  $("#onboarding-questions").innerHTML = questions.map((q) => {
+    const r = ru(q);
+    const done = answeredIds.has(q.id);
+    return `
+    <div class="agent-row onboarding-q${done ? " done" : ""}">
+      <div class="agent-row-head">
+        <strong>${escapeHtml(r.title)}</strong>
+        <span class="agent-badge ${done ? "ready" : ""}">${done ? "заполнено" : escapeHtml(CATEGORY_RU[q.category] || q.category || "")}</span>
+      </div>
+      <div class="meta">${escapeHtml(r.prompt)}</div>
+      ${r.example ? `<div class="onboarding-example">${escapeHtml(r.example)}</div>` : ""}
+      <button onclick="pickOnboardingQuestion('${escapeJsString(q.id)}')">${done ? "Изменить ответ" : "Ответить"}</button>
+    </div>`;
+  }).join("") || `<p class="meta">Вопросы профиля пока не загружены. Нажми «Обновить» или проверь подключение.</p>`;
   $("#onboarding-status").textContent = JSON.stringify({ status, facts }, null, 2);
+  renderOnboardingGuide(status, facts);
+  refreshIcons();
+}
+
+function updateOnboardingPrompt() {
+  const select = $("#onboarding-question-select");
+  const answer = $("#onboarding-answer");
+  if (!select || !answer) return;
+  const r = ONBOARDING_RU[select.value];
+  if (r) answer.placeholder = r.example || r.prompt || "Напиши ответ свободным текстом...";
+}
+
+function pickOnboardingQuestion(id) {
+  const select = $("#onboarding-question-select");
+  if (select) { select.value = id; updateOnboardingPrompt(); }
+  const answer = $("#onboarding-answer");
+  if (answer) { answer.focus(); answer.scrollIntoView({ behavior: "smooth", block: "center" }); }
 }
 
 async function submitOnboardingAnswer() {
   const questionId = $("#onboarding-question-select")?.value || "experience";
   const answer = $("#onboarding-answer")?.value || "";
-  if (!answer.trim()) return;
-  await api("/api/onboarding/answer", {
-    method: "POST",
-    body: JSON.stringify({ question_id: questionId, answer, source: "web_ui" }),
-  });
-  $("#onboarding-answer").value = "";
-  await loadOnboardingQuestions();
-  await loadCandidateMap();
+  if (!answer.trim()) { toast("Сначала напиши ответ", "info"); return; }
+  try {
+    await api("/api/onboarding/answer", {
+      method: "POST",
+      body: JSON.stringify({ question_id: questionId, answer, source: "web_ui" }),
+    });
+    $("#onboarding-answer").value = "";
+    await loadOnboardingQuestions();
+    await loadCandidateMap();
+    toast("Ответ сохранён", "success", 6000, { label: "Открыть мастер", onClick: openWizard });
+  } catch (err) {
+    toast("Ошибка сохранения: " + err.message, "error");
+  }
 }
 
 async function loadCandidateMap() {
@@ -1771,9 +2987,9 @@ async function loadCandidateMap() {
       </div>
       <div>${escapeHtml(String(fact.value || ""))}</div>
       <div class="meta">${escapeHtml(fact.source || "")}</div>
-      ${fact.status === "confirmed" ? "" : `<button onclick="confirmCandidateFact(${Number(fact.id)})">Confirm</button>`}
+      ${fact.status === "confirmed" ? "" : `<button onclick="confirmCandidateFact(${Number(fact.id)})" title="Подтвердить факт для использования в резюме">Подтвердить</button>`}
     </div>
-  `).join("") || `<p class="meta">No facts yet.</p>`;
+  `).join("") || `<p class="meta">Фактов пока нет. Заполни онбординг.</p>`;
   $("#candidate-map-output").textContent = JSON.stringify({ profile, completeness }, null, 2);
 }
 
@@ -1805,11 +3021,11 @@ function renderResumeVariantDiff(diff) {
   const removed = diff.removed_lines || [];
   target.innerHTML = `
     <div class="agent-row">
-      <div class="agent-row-head"><strong>Variant diff</strong><span class="agent-badge">${added.length} added / ${removed.length} removed</span></div>
-      <div class="meta">Added</div>
-      <pre class="agent-json">${escapeHtml(added.join("\n") || "none")}</pre>
-      <div class="meta">Removed</div>
-      <pre class="agent-json">${escapeHtml(removed.join("\n") || "none")}</pre>
+      <div class="agent-row-head"><strong>Изменения варианта</strong><span class="agent-badge">+${added.length} / −${removed.length}</span></div>
+      <div class="meta">Добавлено</div>
+      <pre class="agent-json">${escapeHtml(added.join("\n") || "нет")}</pre>
+      <div class="meta">Удалено</div>
+      <pre class="agent-json">${escapeHtml(removed.join("\n") || "нет")}</pre>
     </div>
   `;
 }
@@ -1882,8 +3098,8 @@ async function confirmExternalApply() {
   const body = externalApplyRequestBody(true);
   if (!body) return;
   const message = body.submit_certified
-    ? "Submit through a certified external adapter?"
-    : "Prepare external manual submit handoff?";
+    ? "Отправить через сертифицированный внешний адаптер?"
+    : "Подготовить ручную передачу внешнего отклика?";
   if (!window.confirm(message)) return;
   const result = await api(`/api/jobs/${jobId}/external-apply/confirm`, {
     method: "POST",
@@ -1911,9 +3127,9 @@ async function loadCampaignRuns() {
         <span class="agent-badge ${escapeAttr(run.status || "")}">${escapeHtml(run.status || "")}</span>
       </div>
       <pre class="agent-json">${escapeHtml(JSON.stringify(run.counts || {}, null, 2))}</pre>
-      <button onclick="loadCampaignRun(${Number(run.id)})">Load items</button>
+      <button onclick="loadCampaignRun(${Number(run.id)})" title="Показать вакансии этого запуска">Показать вакансии</button>
     </div>
-  `).join("") || `<p class="meta">No campaign runs.</p>`;
+  `).join("") || `<p class="meta">Запусков кампаний нет.</p>`;
 }
 
 async function loadCampaignRun(runId) {
@@ -1960,7 +3176,7 @@ async function planExternalCampaign() {
 async function confirmCampaignRun() {
   const runId = Number(state.selectedCampaignRunId || 0);
   if (!runId) return;
-  if (!window.confirm("Confirm real HH campaign apply?")) return;
+  if (!window.confirm("Подтвердить реальный запуск HH-кампании с откликами?")) return;
   const result = await api(`/api/hh/campaigns/${runId}/confirm`, {
     method: "POST",
     body: JSON.stringify({ confirm: true }),
@@ -1972,7 +3188,7 @@ async function confirmCampaignRun() {
 async function confirmExternalCampaignRun() {
   const runId = Number(state.selectedCampaignRunId || 0);
   if (!runId) return;
-  if (!window.confirm("Confirm real external campaign apply?")) return;
+  if (!window.confirm("Подтвердить реальный запуск внешней кампании с откликами?")) return;
   const result = await api(`/api/campaigns/${runId}/run-external`, {
     method: "POST",
     body: JSON.stringify({ confirm: true }),
@@ -1982,7 +3198,7 @@ async function confirmExternalCampaignRun() {
 }
 
 async function killCampaigns() {
-  if (!window.confirm("Pause all campaign execution now?")) return;
+  if (!window.confirm("Поставить на паузу все кампании прямо сейчас?")) return;
   try {
     setBusy("#campaign-kill-switch-button", true);
     const result = await api("/api/agent/pause", {
@@ -2054,7 +3270,7 @@ async function schedulePipelineFollowup() {
   if (!jobId) return;
   const eventAt = $("#pipeline-event-at")?.value || "";
   if (!eventAt) {
-    $("#pipeline-status-output").textContent = "Set event date and time first.";
+    $("#pipeline-status-output").textContent = "Сначала укажи дату и время события.";
     return;
   }
   const result = await api(`/api/pipeline/jobs/${jobId}/event`, {
@@ -2084,7 +3300,7 @@ async function loadReplayTimeline() {
       <div class="meta">${escapeHtml(event.created_at || "")}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify(event.data || {}, null, 2))}</pre>
     </div>
-  `).join("") || `<p class="meta">No replay events.</p>`;
+  `).join("") || `<p class="meta">Событий в истории нет.</p>`;
 }
 
 function replayQueryParams() {
@@ -2213,6 +3429,31 @@ async function executeBrowserLabDryRun() {
   $("#browser-lab-output").textContent = JSON.stringify(result, null, 2);
 }
 
+function activateView(viewName, options = {}) {
+  const target = $(`#view-${viewName}`);
+  if (!target) return;
+  document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
+  document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
+  document.querySelector(`.nav-button[data-view="${viewName}"]`)?.classList.add("active");
+  target.classList.add("active");
+  updateNavA11y(viewName);
+  syncOnboardingVisibility(viewName);
+  if (target.scrollIntoView) window.scrollTo({ top: 0, behavior: "smooth" });
+  if (options.load !== false) loadRoadmapViewSafe(viewName);
+}
+
+// Гид первого запуска и подсказки показываем только на экране «Вакансии».
+function syncOnboardingVisibility(viewName) {
+  const onInbox = viewName === "inbox";
+  const dismissed = localStorage.getItem("work-hunter-onboarding-dismissed") === "true";
+  const guide = $("#onboarding-guide");
+  const strip = $("#ux-help-strip");
+  if (guide) guide.hidden = !onInbox || dismissed;
+  if (strip) strip.hidden = !onInbox || dismissed;
+  const reopen = $("#reopen-onboarding-guide");
+  if (reopen) reopen.hidden = !(onInbox && dismissed);
+}
+
 async function loadRoadmapView(view) {
   if (view === "setup") await loadSetupStatus();
   if (view === "onboarding") await loadOnboardingQuestions();
@@ -2237,19 +3478,45 @@ async function loadRoadmapViewSafe(view) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   for (const button of document.querySelectorAll("button")) {
-    button.dataset.label = button.textContent;
+    button.dataset.label = button.textContent.trim();
+    button.dataset.idleLabel = button.dataset.label;
   }
   setupResumeBuilderDefaults();
+  applyRussianUxCopy();
+  enhanceButtonHints();
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.addEventListener("click", () => {
-      document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
-      document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
-      button.classList.add("active");
-      const view = $(`#view-${button.dataset.view}`);
-      if (!view) return;
-      view.classList.add("active");
-      loadRoadmapViewSafe(button.dataset.view);
+      activateView(button.dataset.view);
     });
+  });
+  $("#open-onboarding-view")?.addEventListener("click", () => activateView("onboarding"));
+  $("#dismiss-onboarding-guide")?.addEventListener("click", dismissOnboardingGuide);
+  $("#reopen-onboarding-guide")?.addEventListener("click", reopenOnboardingGuide);
+  $("#open-wizard-button")?.addEventListener("click", openWizard);
+  $("#sidebar-wizard-button")?.addEventListener("click", openWizard);
+  $("#help-wizard-button")?.addEventListener("click", openWizard);
+  $("#open-source-setup-button")?.addEventListener("click", openSourceSetupWizard);
+  $("#sidebar-source-setup-button")?.addEventListener("click", openSourceSetupWizard);
+  $("#sidebar-help-button")?.addEventListener("click", () => activateView("help"));
+  $("#wizard-close")?.addEventListener("click", closeWizard);
+  $("#wizard-back")?.addEventListener("click", wizardBack);
+  $("#wizard-next")?.addEventListener("click", wizardNext);
+  $("#wizard-modal")?.addEventListener("click", (event) => {
+    if (event.target === $("#wizard-modal")) closeWizard();
+  });
+  $("#source-setup-close")?.addEventListener("click", closeSourceSetupWizard);
+  $("#source-setup-refresh-button")?.addEventListener("click", loadSourceSetupGuide);
+  $("#source-setup-run-next")?.addEventListener("click", (event) => runSourceSetupAction(event.currentTarget.dataset.nextSourceSetupAction));
+  $("#source-setup-source")?.addEventListener("change", resetSourceSetupGuide);
+  $("#source-setup-level")?.addEventListener("change", resetSourceSetupGuide);
+  $("#source-setup-modal")?.addEventListener("click", (event) => {
+    if (event.target === $("#source-setup-modal")) closeSourceSetupWizard();
+    const button = event.target.closest("[data-source-setup-action]");
+    if (button) runSourceSetupAction(button.dataset.sourceSetupAction);
+  });
+  $("#onboarding-guide")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-onboarding-view]");
+    if (button) activateView(button.dataset.onboardingView);
   });
   $("#sync-button").addEventListener("click", syncJobs);
   $("#score-button").addEventListener("click", scoreJobs);
@@ -2259,6 +3526,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#save-config-button").addEventListener("click", saveConfig);
   $("#save-token-button").addEventListener("click", saveHhToken);
   $("#save-ai-button").addEventListener("click", saveAiSettings);
+  $("#ai-backend-select")?.addEventListener("change", updateAiBackendFields);
   $("#save-profile-button").addEventListener("click", saveProfile);
   $("#rescore-after-save").addEventListener("click", scoreJobs);
   $("#chat-send-button").addEventListener("click", sendChatMessage);
@@ -2292,6 +3560,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#setup-import-wo-apply-button")?.addEventListener("click", applySetupWoImport);
   $("#onboarding-refresh-button")?.addEventListener("click", loadOnboardingQuestions);
   $("#onboarding-submit-button")?.addEventListener("click", submitOnboardingAnswer);
+  $("#onboarding-question-select")?.addEventListener("change", updateOnboardingPrompt);
   $("#candidate-refresh-button")?.addEventListener("click", loadCandidateMap);
   $("#resume-variant-button")?.addEventListener("click", buildResumeVariant);
   $("#job-detail-load-button")?.addEventListener("click", () => loadJobDetailView().catch((err) => renderActionError($("#job-detail-output"), err)));
@@ -2348,11 +3617,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelector("[data-view='agent']")?.addEventListener("click", () => loadAgentCockpit().catch(console.error));
 
   loadTheme();
+  applyRussianUxCopy();
+  enhanceButtonHints();
+  updateNavA11y("inbox");
+  setupKeyboardShortcuts();
   refreshIcons();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js");
   }
   await Promise.all([loadJobs(), loadConfig(), loadProfile(), loadSources()]);
+  renderOnboardingGuide();
   loadResumes().catch(() => {});
   loadEvents().catch(() => {});
   loadSearches().catch(() => {});
@@ -2387,7 +3661,8 @@ async function saveResume() {
     await api("/api/resumes", { method: "POST", body: JSON.stringify(body) });
     hideResumeForm();
     await loadResumes();
-  } catch (e) { alert("Ошибка: " + e.message); }
+    toast("Резюме сохранено", "success");
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function importResume() {
@@ -2469,7 +3744,8 @@ async function saveEvent() {
     await api("/api/events", { method: "POST", body: JSON.stringify(body) });
     hideEventForm();
     await loadEvents();
-  } catch (e) { alert("Ошибка: " + e.message); }
+    toast("Событие сохранено", "success");
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function loadEvents() {
@@ -2539,7 +3815,7 @@ async function bulkAction(action) {
     clearBulkSelection();
     await loadJobs();
     $("#summary-line").textContent = `${action}: обработано.`;
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function applySmartFilters() {
@@ -2581,7 +3857,7 @@ function renderFilteredJobs(jobs) {
         <div class="meta">${escapeHtml([job.salary_text, job.location, job.remote ? "remote" : ""].filter(Boolean).join(" · "))}</div>
       </td>
       <td>${escapeHtml(job.source)}</td>
-      <td>${escapeHtml(job.status || "new")}</td>
+      <td>${statusBadge(job.status)}</td>
     `;
     body.appendChild(tr);
   }
@@ -2611,7 +3887,8 @@ async function saveSearch() {
     await api("/api/saved-searches", { method: "POST", body: JSON.stringify(body) });
     hideSearchForm();
     await loadSearches();
-  } catch (e) { alert("Ошибка: " + e.message); }
+    toast("Поиск сохранён", "success");
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function loadSearches() {
@@ -2663,7 +3940,7 @@ async function parseJobStructure() {
     const result = await api(`/api/jobs/${state.selectedId}/parse-structure`, { method: "POST", body: "{}" });
     const output = $("#resume-tips-output");
     output.textContent = JSON.stringify(result, null, 2);
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
   setBusy("[onclick='parseJobStructure()']", false);
 }
 
@@ -2671,32 +3948,34 @@ async function runGapAnalysis() {
   if (!state.selectedId) return;
   const resumes = await api("/api/resumes");
   const active = resumes.find(r => r.is_active);
-  if (!active) { alert("Сначала создай и активируй резюме в настройках."); return; }
+  if (!active) { toast("Сначала создай и активируй резюме в настройках.", "info"); return; }
   setBusy("[onclick='runGapAnalysis()']", true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/gap-analysis`, {
       method: "POST", body: JSON.stringify({ resume_id: active.id }),
     });
     $("#resume-tips-output").innerHTML = renderMarkdown(result.content);
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
   setBusy("[onclick='runGapAnalysis()']", false);
 }
 
 async function scoreAtsResume() {
   const text = $("#resume-body-input")?.value || $("#audit-resume-input")?.value;
-  if (!text) { alert("Вставь текст резюме."); return; }
+  if (!text) { toast("Вставь текст резюме.", "info"); return; }
   try {
     const result = await api("/api/resumes/ats-score", { method: "POST", body: JSON.stringify({ resume_text: text }) });
-    alert(`ATS Score: ${result.score}/100\nПроблемы: ${(result.issues||[]).join(", ")}`);
-  } catch (e) { alert("Ошибка: " + e.message); }
+    toast(`ATS Score: ${result.score}/100 · Проблемы: ${(result.issues||[]).join(", ") || "нет"}`, "info", 7000);
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function smartClassify() {
   if (!state.selectedId) return;
   try {
     const result = await api(`/api/jobs/${state.selectedId}/smart-classify`, { method: "POST", body: "{}" });
-    alert(JSON.stringify(result, null, 2));
-  } catch (e) { alert("Ошибка: " + e.message); }
+    const output = $("#resume-tips-output");
+    if (output) { output.textContent = JSON.stringify(result, null, 2); switchAiTab("resume"); }
+    toast("AI-классификация готова — см. вкладку «Резюме»", "success");
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function getInterviewPrep(stage) {
@@ -2707,14 +3986,14 @@ async function getInterviewPrep(stage) {
     });
     $("#ai-fit-reasoning").innerHTML = renderMarkdown(result.content);
     switchAiTab("interview");
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function getBehaviorSuggestions() {
   try {
     const result = await api("/api/behavior/suggest", { method: "POST", body: "{}" });
-    alert(result.content);
-  } catch (e) { alert("Ошибка: " + e.message); }
+    toast(result.content, "info", 8000);
+  } catch (e) { toast("Ошибка: " + e.message, "error"); }
 }
 
 async function loadGhostJobs() {

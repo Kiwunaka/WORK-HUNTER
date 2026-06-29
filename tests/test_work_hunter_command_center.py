@@ -4,6 +4,7 @@ import json
 import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 
 from work_hunter.cli import main as cli_main
 from work_hunter.config import default_config
@@ -84,6 +85,59 @@ def test_ai_runtime_exposes_codex_sdk_as_disabled_experimental_route(tmp_path):
     assert dry_run["request"]["adapter"] == "codex_sdk"
     assert dry_run["request"]["experimental"] is True
     assert dry_run["request"]["enabled"] is False
+
+
+def test_ai_user_features_use_default_route_when_legacy_direct_is_empty(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_run(command, *, capture_output, timeout, check):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "score": 88,
+                    "reasoning": "default route ok",
+                    "tech_stack": ["Python", "FastAPI"],
+                    "seniority_level": "middle",
+                    "real_remote": True,
+                    "has_salary": True,
+                }
+            ).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    app = WorkHunter(root=tmp_path)
+    job_id = app.storage.upsert_job(
+        Job(
+            source="hh",
+            source_id="1",
+            url="https://hh.ru/vacancy/1",
+            title="Python Backend",
+            company="Acme",
+            description="FastAPI PostgreSQL remote role.",
+        )
+    )
+    resume_id = app.storage.save_resume(Resume(name="Main", body="Python backend resume.", is_active=True))
+
+    fit = app.ai_fit(job_id)
+    chat = app.chat([{"role": "user", "content": "Помоги"}], job_id=job_id)
+    trends = app.market_trends(limit=1)
+    audit = app.ats_audit("Python backend resume", job_id=job_id)
+    parsed = app.parse_job_structure(job_id)
+    gap = app.gap_analysis(resume_id, job_id)
+    classified = app.smart_classify(job_id)
+
+    assert fit["score"] == 88
+    assert "default route ok" in chat
+    assert "default route ok" in trends
+    assert "default route ok" in audit
+    assert parsed["tech_stack"] == ["Python", "FastAPI"]
+    assert "default route ok" in gap
+    assert classified["seniority_level"] == "middle"
+    assert len(calls) == 7
+    assert all(command[:2] == ["codex", "exec"] for command in calls)
 
 
 def test_init_check_json_refreshes_product_docs_and_preserves_masked_secrets(tmp_path, capsys):

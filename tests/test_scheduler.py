@@ -5,7 +5,7 @@ from pathlib import Path
 
 from work_hunter.hh_agent.notifications import MemoryNotificationSink
 from work_hunter.cli import main as cli_main
-from work_hunter.scheduler import SafeTaskRunner
+from work_hunter.scheduler import SafeTaskRunner, build_hh_daemon_profile
 
 
 class FakeApp:
@@ -28,6 +28,20 @@ class FakeApp:
     def update_hh_resumes(self):
         self.calls.append(("hh-update-resumes", {}))
         return {"status": "ok", "count": 1}
+
+    def touch_hh_resume_web(self, *, resume_hash=None, confirm=False):
+        self.calls.append(("hh-web-touch-resume", {"resume_hash": resume_hash, "confirm": confirm}))
+        return {"status": "updated", "resume_hash": resume_hash or "active"}
+
+    def scan_hh_chats_web(self, *, max_pages=10):
+        self.calls.append(("hh-chats-scan", {"max_pages": max_pages}))
+        return {"status": "ok", "count": 1}
+
+    def auto_reply_hh_chats_web(self, *, max_pages=10, template="", confirm=False):
+        self.calls.append(
+            ("hh-chats-auto-reply", {"max_pages": max_pages, "template": template, "confirm": confirm})
+        )
+        return {"status": "sent" if confirm else "planned", "count": 1}
 
     def plan_hh_campaign(self, **kwargs):
         self.calls.append(("hh-campaign-plan", kwargs))
@@ -111,6 +125,42 @@ def test_safe_task_runner_plans_mutating_resume_update_by_default(tmp_path):
     }
     assert confirmed["items"][0]["result"] == {"status": "ok", "count": 1}
     assert app.calls == [("hh-update-resumes", {})]
+
+
+def test_safe_task_runner_supports_hh_web_daemon_tasks_with_confirmation_gates(tmp_path):
+    app = FakeApp(tmp_path)
+    runner = SafeTaskRunner(app, root=tmp_path)
+
+    planned = runner.run(
+        [
+            {"task": "hh-web-touch-resume", "resume_hash": "hash"},
+            {"task": "hh-chats-scan", "max_pages": 2},
+            {"task": "hh-chats-auto-reply", "template": "Здравствуйте", "max_pages": 1},
+        ]
+    )
+    confirmed = runner.run(
+        [
+            {"task": "hh-web-touch-resume", "resume_hash": "hash", "confirm": True},
+            {"task": "hh-chats-auto-reply", "template": "Здравствуйте", "max_pages": 1, "confirm": True},
+        ]
+    )
+
+    assert planned["status"] == "completed"
+    assert planned["items"][0]["result"]["status"] == "planned"
+    assert planned["items"][1]["result"] == {"status": "ok", "count": 1}
+    assert planned["items"][2]["result"]["status"] == "planned"
+    assert confirmed["items"][0]["result"]["status"] == "updated"
+    assert confirmed["items"][1]["result"]["status"] == "sent"
+
+
+def test_build_hh_daemon_profile_contains_required_cycles():
+    profile = build_hh_daemon_profile()
+
+    cycles = {item["task"]: item for item in profile["cycles"]}
+    assert cycles["hh-web-touch-resume"]["interval_seconds"] == 4 * 60 * 60
+    assert cycles["hh-campaign-plan"]["interval_seconds"] == 24 * 60 * 60
+    assert cycles["hh-chats-auto-reply"]["interval_seconds"] == 15 * 60
+    assert all(item["confirm_required"] for item in profile["cycles"] if item["mutates"])
 
 
 def test_safe_task_runner_masks_sensitive_task_results_in_memory_and_saved_report(tmp_path):

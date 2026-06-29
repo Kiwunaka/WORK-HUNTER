@@ -85,6 +85,31 @@ def test_endpoint_inventory_redacts_sensitive_response_preview():
     }
 
 
+def test_endpoint_inventory_redacts_resume_identifiers_from_payloads_and_urls():
+    har = {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "POST",
+                        "url": "https://getmatch.ru/api/apply?resume_id=resume-secret",
+                        "headers": [],
+                        "postData": {"text": '{"resume_id":"resume-secret","offer_id":"34397"}'},
+                    },
+                    "response": {"status": 201, "content": {"mimeType": "application/json", "text": "{}"}},
+                }
+            ]
+        }
+    }
+
+    endpoint = endpoint_inventory_from_har(har, allowed_hosts={"getmatch.ru"})[0]
+    serialized = json.dumps(endpoint.to_dict(), ensure_ascii=False)
+
+    assert "resume-secret" not in serialized
+    assert endpoint.url == "https://getmatch.ru/api/apply?resume_id=%2A%2A%2A"
+    assert endpoint.post_data == '{"resume_id":"***","offer_id":"34397"}'
+
+
 def test_analyze_har_returns_ranked_candidate_summary(tmp_path):
     path = tmp_path / "session.har"
     path.write_text(

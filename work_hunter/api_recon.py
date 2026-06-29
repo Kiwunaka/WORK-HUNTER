@@ -20,6 +20,9 @@ SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
     "email",
+    "resume_id",
+    "resume_hash",
+    "hh_resume_id",
     "session",
 )
 

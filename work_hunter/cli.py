@@ -17,7 +17,7 @@ from .external_sessions import (
     list_external_sessions,
     show_external_session,
 )
-from .scheduler import SafeTaskRunner, load_task_plan
+from .scheduler import SafeTaskRunner, build_hh_daemon_profile, load_task_plan
 from .services import WorkHunter
 from .sources import PUBLIC_BOARD_SOURCE_NAMES
 
@@ -116,6 +116,23 @@ def main(argv: list[str] | None = None) -> None:
     hh_resumes.add_argument("--json", action="store_true")
 
     sub.add_parser("hh-update-resumes")
+
+    hh_web_touch_resume = sub.add_parser("hh-web-touch-resume")
+    hh_web_touch_resume.add_argument("--resume-hash")
+    hh_web_touch_resume.add_argument("--confirm", action="store_true")
+
+    hh_chats = sub.add_parser("hh-chats")
+    hh_chats.add_argument("--max-pages", type=int, default=10)
+
+    hh_chat_auto_reply = sub.add_parser("hh-chat-auto-reply")
+    hh_chat_auto_reply.add_argument("--max-pages", type=int, default=10)
+    hh_chat_auto_reply.add_argument("--template", default="")
+    hh_chat_auto_reply.add_argument("--confirm", action="store_true")
+
+    hh_vacancy_tests = sub.add_parser("hh-vacancy-tests")
+    hh_vacancy_tests.add_argument("vacancy_id")
+
+    sub.add_parser("hh-daemon-profile")
 
     hh_create_resume = sub.add_parser("hh-create-resume")
     hh_create_resume.add_argument("--payload")
@@ -543,6 +560,27 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "hh-update-resumes":
         print_json(app.update_hh_resumes())
+        return
+    if args.command == "hh-web-touch-resume":
+        print_json(app.touch_hh_resume_web(resume_hash=args.resume_hash, confirm=args.confirm))
+        return
+    if args.command == "hh-chats":
+        print_json(app.scan_hh_chats_web(max_pages=args.max_pages))
+        return
+    if args.command == "hh-chat-auto-reply":
+        print_json(
+            app.auto_reply_hh_chats_web(
+                max_pages=args.max_pages,
+                template=args.template,
+                confirm=args.confirm,
+            )
+        )
+        return
+    if args.command == "hh-vacancy-tests":
+        print_json(app.extract_hh_vacancy_tests_web(args.vacancy_id))
+        return
+    if args.command == "hh-daemon-profile":
+        print_json(build_hh_daemon_profile())
         return
     if args.command == "hh-create-resume":
         if args.payload_file:

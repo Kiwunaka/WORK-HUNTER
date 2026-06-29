@@ -18,32 +18,38 @@
       <div class="brand-mark"><i data-lucide="briefcase"></i></div>
       <div>
         <strong>Work Hunter</strong>
-        <span>smart job search</span>
+        <span>умный поиск работы</span>
       </div>
     </div>
     <nav>
       <button class="nav-button active" data-view="inbox"><i data-lucide="inbox"></i>Вакансии</button>
-      <button class="nav-button" data-view="setup"><i data-lucide="list-checks"></i>Setup</button>
-      <button class="nav-button" data-view="onboarding"><i data-lucide="user-check"></i>Onboarding</button>
-      <button class="nav-button" data-view="candidate-map"><i data-lucide="map"></i>Candidate Map</button>
-      <button class="nav-button" data-view="resumes"><i data-lucide="file-text"></i>Resumes</button>
-      <button class="nav-button" data-view="job-detail"><i data-lucide="file-search"></i>Job Detail</button>
+      <button class="nav-button" data-view="setup"><i data-lucide="list-checks"></i>Настройка</button>
+      <button class="nav-button" data-view="onboarding"><i data-lucide="user-check"></i>Онбординг</button>
+      <button class="nav-button" data-view="candidate-map"><i data-lucide="map"></i>Карта кандидата</button>
+      <button class="nav-button" data-view="resumes"><i data-lucide="file-text"></i>Резюме</button>
+      <button class="nav-button" data-view="job-detail"><i data-lucide="file-search"></i>Карточка вакансии</button>
       <button class="nav-button" data-view="calendar"><i data-lucide="calendar"></i>Календарь</button>
       <button class="nav-button" data-view="favorites"><i data-lucide="heart"></i>Избранное</button>
       <button class="nav-button" data-view="chat"><i data-lucide="bot"></i>AI Ассистент</button>
       <button class="nav-button" data-view="agent"><i data-lucide="radar"></i>HH Агент</button>
-      <button class="nav-button" data-view="application-preview"><i data-lucide="file-check-2"></i>Application</button>
-      <button class="nav-button" data-view="campaigns"><i data-lucide="send"></i>Campaigns</button>
-      <button class="nav-button" data-view="pipeline"><i data-lucide="route"></i>Pipeline</button>
-      <button class="nav-button" data-view="interview-prep"><i data-lucide="notebook-tabs"></i>Interview Prep</button>
-      <button class="nav-button" data-view="replay"><i data-lucide="history"></i>Replay</button>
-      <button class="nav-button" data-view="audit-security"><i data-lucide="shield-check"></i>Audit</button>
-      <button class="nav-button" data-view="browser-lab"><i data-lucide="monitor-dot"></i>Browser Lab</button>
+      <button class="nav-button" data-view="application-preview"><i data-lucide="file-check-2"></i>Черновик отклика</button>
+      <button class="nav-button" data-view="campaigns"><i data-lucide="send"></i>Кампании</button>
+      <button class="nav-button" data-view="pipeline"><i data-lucide="route"></i>Воронка</button>
+      <button class="nav-button" data-view="interview-prep"><i data-lucide="notebook-tabs"></i>Подготовка к собеседованию</button>
+      <button class="nav-button" data-view="replay"><i data-lucide="history"></i>История действий</button>
+      <button class="nav-button" data-view="audit-security"><i data-lucide="shield-check"></i>Аудит безопасности</button>
+      <button class="nav-button" data-view="browser-lab"><i data-lucide="monitor-dot"></i>Лаборатория браузера</button>
       <button class="nav-button" data-view="settings"><i data-lucide="settings"></i>Настройки</button>
       <button class="nav-button" data-view="sources"><i data-lucide="database"></i>Источники</button>
       <button class="nav-button" data-view="stats"><i data-lucide="bar-chart-3"></i>Статистика</button>
       <button class="nav-button" data-view="trends"><i data-lucide="trending-up"></i>Тренды</button>
+      <button class="nav-button" data-view="help"><i data-lucide="life-buoy"></i>Справка</button>
     </nav>
+    <div class="sidebar-cta-wrap">
+      <button id="sidebar-source-setup-button" class="sidebar-cta"><i data-lucide="plug-zap"></i>Подключить источник</button>
+      <button id="sidebar-wizard-button" class="sidebar-cta"><i data-lucide="wand-2"></i>Мастер первого отклика</button>
+      <button id="sidebar-help-button" class="sidebar-help"><i data-lucide="life-buoy"></i>Справка и помощь</button>
+    </div>
     <div class="theme-toggle">
       <button id="theme-toggle-button" title="Переключить тему"><i data-lucide="moon"></i> Тёмная</button>
     </div>
@@ -60,14 +66,39 @@
     <header class="topbar">
       <div>
         <h1>Очередь вакансий</h1>
-        <p id="summary-line">Синхронизируй источники, затем отсортируй по score.</p>
+        <p id="summary-line" aria-live="polite">Синхронизируй источники, затем отсортируй по score.</p>
       </div>
       <div class="actions">
+        <button id="reopen-onboarding-guide" hidden><i data-lucide="compass"></i>Гид</button>
         <button id="sync-button" class="primary">Синхронизировать</button>
         <button id="score-button">Пересчитать score</button>
       </div>
     </header>
-    <div id="ui-error-line" class="ui-error-line" hidden></div>
+    <div id="ui-error-line" class="ui-error-line" role="alert" aria-live="assertive" hidden></div>
+
+    <section id="ux-help-strip" class="ux-help-strip" aria-label="Короткие подсказки по интерфейсу">
+      <div>
+        <strong>Быстрый старт</strong>
+        <span>Заполни профиль, синхронизируй источники, выбери вакансию и проверь черновик отклика. Горячие клавиши: <kbd>/</kbd> — поиск, <kbd>?</kbd> — гид, <kbd>Esc</kbd> — закрыть.</span>
+      </div>
+      <div class="button-row compact">
+        <button id="open-source-setup-button" class="primary"><i data-lucide="plug-zap"></i>Подключить источник</button>
+        <button id="open-wizard-button" class="primary"><i data-lucide="wand-2"></i>Мастер первого отклика</button>
+        <button id="open-onboarding-view"><i data-lucide="user-check"></i>Заполнить профиль</button>
+        <button id="dismiss-onboarding-guide"><i data-lucide="x"></i>Скрыть</button>
+      </div>
+    </section>
+
+    <section id="onboarding-guide" class="onboarding-guide" aria-live="polite">
+      <div class="onboarding-guide-head">
+        <div>
+          <h2>Путь первого запуска</h2>
+          <p>Мини-карта, чтобы не потеряться в большом рабочем столе.</p>
+        </div>
+        <div id="onboarding-progress" class="onboarding-progress" role="progressbar" aria-label="Прогресс онбординга" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+      </div>
+      <div id="onboarding-guide-steps" class="onboarding-steps"></div>
+    </section>
 
     <section id="view-inbox" class="view active">
       <div class="bulk-toolbar" id="bulk-toolbar" style="display:none;">
@@ -80,7 +111,7 @@
 
       <div class="filters" style="flex-wrap:wrap;">
         <label>Источник
-          <select id="source-filter">
+          <select id="source-filter" title="Показывать вакансии только с выбранной площадки">
             <option value="">Все</option>
             <option value="hh">HH</option>
             <option value="habr">Habr</option>
@@ -88,11 +119,11 @@
             <option value="telegram">Telegram</option>
           </select>
         </label>
-        <label>Min score
-          <input id="min-score-filter" type="number" value="0" min="0" max="100">
+        <label>Мин. score
+          <input id="min-score-filter" type="number" value="0" min="0" max="100" title="Скрыть вакансии со score ниже значения (0–100)">
         </label>
         <label>AI-поиск
-          <input id="ai-search-input" type="text" placeholder="Например: удалёнка FastAPI от 200к...">
+          <input id="ai-search-input" type="text" placeholder="Например: удалёнка FastAPI от 200к..." title="Опиши вакансию словами — AI подберёт похожие">
         </label>
         <button id="ai-search-button">Искать</button>
         <label>
@@ -102,7 +133,7 @@
           <input type="checkbox" id="filter-with-salary"> С зарплатой
         </label>
         <label>Уровень
-          <select id="filter-level">
+          <select id="filter-level" title="Фильтр по грейду из названия вакансии">
             <option value="">Все</option>
             <option value="junior">Junior</option>
             <option value="middle">Middle</option>
@@ -197,16 +228,16 @@
                   <button onclick="prepareLetterAi()" class="primary">AI письмо</button>
                 </div>
                 <div style="display:flex;gap:8px;margin-top:8px;align-items:end;flex-wrap:wrap;">
-                  <label>Template
+                  <label>Шаблон
                     <select id="letter-template-select">
-                      <option value="A">A · short</option>
-                      <option value="B">B · technical</option>
-                      <option value="C">C · friendly</option>
-                      <option value="D">D · confident</option>
+                      <option value="A">A · короткое</option>
+                      <option value="B">B · техническое</option>
+                      <option value="C">C · дружелюбное</option>
+                      <option value="D">D · уверенное</option>
                     </select>
                   </label>
-                  <button id="letter-preview-button" onclick="previewHumanLetter(false)"><i data-lucide="eye"></i>Preview</button>
-                  <button id="letter-use-campaign-button" onclick="previewHumanLetter(true)" class="primary"><i data-lucide="send"></i>Use for campaign</button>
+                  <button id="letter-preview-button" onclick="previewHumanLetter(false)"><i data-lucide="eye"></i>Предпросмотр</button>
+                  <button id="letter-use-campaign-button" onclick="previewHumanLetter(true)" class="primary"><i data-lucide="send"></i>В кампанию</button>
                 </div>
                 <pre id="letter-preview-output" class="agent-json" style="margin-top:8px;"></pre>
               </div>
@@ -225,26 +256,28 @@
 
     <section id="view-setup" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Setup</h1>
+        <h1>Настройка</h1>
         <div class="actions">
-          <button id="setup-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
-          <button id="ai-test-button" class="primary"><i data-lucide="zap"></i>AI dry run</button>
+          <button id="setup-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
+          <button id="ai-test-button" class="primary"><i data-lucide="zap"></i>Проверить AI</button>
         </div>
       </div>
+      <p class="view-hint">Проверь, что AI-маршруты, окружение и импорт готовы к работе. Действия безопасны и ничего не отправляют.</p>
       <div class="panel">
         <div class="agent-form-grid">
           <label>AI route <input id="ai-test-route" value="smart"></label>
           <label>Prompt <input id="ai-test-prompt" value="ping"></label>
         </div>
+        <div id="ai-default-route-note" class="source-setup-primary-note"></div>
         <div id="ai-readiness-list" class="agent-list"></div>
         <pre id="setup-summary" class="agent-json"></pre>
       </div>
       <div class="panel">
         <div class="panel-head">
-          <h2>WO/FLOW import</h2>
+          <h2>Импорт WO/FLOW</h2>
           <div class="button-row">
-            <button id="setup-import-wo-preview-button" class="primary" data-label="Preview"><i data-lucide="eye"></i>Preview</button>
-            <button id="setup-import-wo-apply-button" data-label="Apply"><i data-lucide="file-check"></i>Apply</button>
+            <button id="setup-import-wo-preview-button" class="primary" data-label="Preview"><i data-lucide="eye"></i>Предпросмотр</button>
+            <button id="setup-import-wo-apply-button" data-label="Apply"><i data-lucide="file-check"></i>Импортировать</button>
           </div>
         </div>
         <div class="agent-form-grid">
@@ -256,15 +289,16 @@
 
     <section id="view-onboarding" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Onboarding</h1>
-        <button id="onboarding-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
+        <h1>Онбординг</h1>
+        <button id="onboarding-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
       </div>
+      <p class="view-hint">Ответь на вопросы по очереди — система соберёт из ответов профиль кандидата, факты и сильные стороны. Чем больше деталей, тем точнее подбор и письма.</p>
       <div class="panel">
         <div class="agent-form-grid">
-          <label>Question <select id="onboarding-question-select"></select></label>
-          <label style="grid-column:1/-1;">Answer <textarea id="onboarding-answer" rows="5"></textarea></label>
+          <label>Вопрос <select id="onboarding-question-select"></select></label>
+          <label style="grid-column:1/-1;">Ответ <textarea id="onboarding-answer" rows="5" placeholder="Например: 4 года backend на Python, FastAPI и PostgreSQL, вёл команду из 3 человек..."></textarea></label>
         </div>
-        <button id="onboarding-submit-button" class="primary"><i data-lucide="save"></i>Save answer</button>
+        <button id="onboarding-submit-button" class="primary"><i data-lucide="save"></i>Сохранить ответ</button>
         <div id="onboarding-questions" class="agent-list"></div>
         <pre id="onboarding-status" class="agent-json"></pre>
       </div>
@@ -272,17 +306,18 @@
 
     <section id="view-candidate-map" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Candidate Map</h1>
-        <button id="candidate-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
+        <h1>Карта кандидата</h1>
+        <button id="candidate-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
       </div>
+      <p class="view-hint">Все факты о тебе, собранные из онбординга. Подтверждай факты — только подтверждённые используются в резюме и письмах.</p>
       <div class="panel">
         <div id="candidate-facts-list" class="agent-list"></div>
         <pre id="candidate-map-output" class="agent-json"></pre>
       </div>
       <div class="panel">
         <div class="panel-head">
-          <h2>Resume variant</h2>
-          <button id="resume-variant-button" class="primary"><i data-lucide="layers"></i>Build</button>
+          <h2>Вариант резюме</h2>
+          <button id="resume-variant-button" class="primary"><i data-lucide="layers"></i>Собрать</button>
         </div>
         <div class="agent-form-grid">
           <label>Job ID <input id="resume-variant-job-id" type="number"></label>
@@ -295,105 +330,116 @@
 
     <section id="view-application-preview" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Application Preview</h1>
-        <button id="application-preview-button" class="primary"><i data-lucide="eye"></i>Preview</button>
+        <h1>Черновик отклика</h1>
+        <button id="application-preview-button" class="primary"><i data-lucide="eye"></i>Предпросмотр</button>
       </div>
+      <p class="view-hint">Проверь отклик до отправки. Для обычного отклика хватит ID вакансии и письма — нажми «Предпросмотр». Поля для внешних площадок спрятаны в «Расширенном».</p>
       <div class="panel">
         <div class="agent-form-grid">
           <label>Job ID <input id="application-preview-job-id" type="number"></label>
           <label>Resume variant ID <input id="application-preview-resume-variant-id"></label>
-          <label style="grid-column:1/-1;">Cover letter <textarea id="application-preview-letter" rows="5"></textarea></label>
-          <label style="grid-column:1/-1;">Source payload JSON <textarea id="application-preview-payload" rows="5" spellcheck="false">{}</textarea></label>
-          <label style="grid-column:1/-1;">External form JSON <textarea id="external-apply-form-json" rows="5" spellcheck="false">{"form_url":"","fields":[]}</textarea></label>
-        </div>
-        <div class="button-row" style="justify-content:flex-start;margin-bottom:8px;">
-          <label class="inline-check"><input id="external-apply-submit-certified" type="checkbox"> Submit through certified adapter</label>
-          <button id="external-apply-dry-run-button"><i data-lucide="scan-line"></i>Dry run external</button>
-          <button id="external-apply-confirm-button"><i data-lucide="clipboard-check"></i>Confirm external</button>
+          <label style="grid-column:1/-1;">Сопроводительное письмо <textarea id="application-preview-letter" rows="5"></textarea></label>
         </div>
         <pre id="application-preview-output" class="agent-json"></pre>
+
+        <details class="advanced-block">
+          <summary>Расширенное: внешний отклик (не HH)</summary>
+          <p class="meta advanced-note">Нужно только для откликов на внешних площадках через форму/адаптер. Для HH не требуется.</p>
+          <div class="agent-form-grid">
+            <label style="grid-column:1/-1;">Source payload JSON <textarea id="application-preview-payload" rows="5" spellcheck="false">{}</textarea></label>
+            <label style="grid-column:1/-1;">External form JSON <textarea id="external-apply-form-json" rows="5" spellcheck="false">{"form_url":"","fields":[]}</textarea></label>
+          </div>
+          <div class="button-row" style="justify-content:flex-start;margin-bottom:8px;">
+            <label class="inline-check"><input id="external-apply-submit-certified" type="checkbox"> Отправить через сертифицированный адаптер</label>
+            <button id="external-apply-dry-run-button"><i data-lucide="scan-line"></i>Проверить форму</button>
+            <button id="external-apply-confirm-button"><i data-lucide="clipboard-check"></i>Подтвердить отклик</button>
+          </div>
+        </details>
       </div>
     </section>
 
     <section id="view-campaigns" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Campaigns</h1>
-        <button id="campaign-refresh-button"><i data-lucide="refresh-cw"></i>Refresh</button>
+        <h1>Кампании</h1>
+        <button id="campaign-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
       </div>
+      <p class="view-hint">Массовые отклики с защитой: дневной лимит, минимальный score и кнопка «Стоп». Реальная отправка только после подтверждения.</p>
       <div class="panel">
         <div class="panel-head">
-          <h2>Plan HH campaign</h2>
+          <h2>План HH-кампании</h2>
           <div class="button-row">
             <span id="campaign-pause-state" class="agent-badge">unknown</span>
-            <button id="campaign-plan-button" class="primary"><i data-lucide="play"></i>Plan</button>
-            <button id="external-campaign-plan-button"><i data-lucide="radio"></i>Plan external</button>
-            <button id="external-campaign-run-button"><i data-lucide="send-horizontal"></i>Confirm external</button>
-            <button id="campaign-confirm-run-button"><i data-lucide="send"></i>Confirm run</button>
-            <button id="campaign-kill-switch-button" data-label="Kill switch"><i data-lucide="octagon-alert"></i>Kill switch</button>
-            <button id="campaign-resume-button" data-label="Resume"><i data-lucide="rotate-ccw"></i>Resume</button>
+            <button id="campaign-plan-button" class="primary"><i data-lucide="play"></i>Спланировать</button>
+            <button id="external-campaign-plan-button"><i data-lucide="radio"></i>План внешних</button>
+            <button id="external-campaign-run-button"><i data-lucide="send-horizontal"></i>Запустить внешние</button>
+            <button id="campaign-confirm-run-button"><i data-lucide="send"></i>Подтвердить запуск</button>
+            <button id="campaign-kill-switch-button" data-label="Kill switch"><i data-lucide="octagon-alert"></i>Стоп</button>
+            <button id="campaign-resume-button" data-label="Resume"><i data-lucide="rotate-ccw"></i>Возобновить</button>
           </div>
         </div>
         <div class="agent-form-grid three">
-          <label>Limit <input id="campaign-limit" type="number" value="50"></label>
-          <label>Min score <input id="campaign-min-score" type="number" value="70"></label>
-          <label>Daily cap <input id="campaign-daily-cap" type="number" value="10"></label>
-          <label>AI filter <select id="campaign-ai-filter"><option value="off">off</option><option value="light">light</option><option value="heavy">heavy</option></select></label>
-          <label>External source <select id="external-campaign-source"><option value="geekjob">GeekJob</option><option value="habr">Habr</option><option value="getmatch">Getmatch</option><option value="hirehi">hirehi</option><option value="careerspace">careerspace</option><option value="jabka">jabka.work</option></select></label>
+          <label>Лимит вакансий <input id="campaign-limit" type="number" value="50"></label>
+          <label>Мин. score <input id="campaign-min-score" type="number" value="70"></label>
+          <label>Лимит в день <input id="campaign-daily-cap" type="number" value="10"></label>
+          <label>AI-фильтр <select id="campaign-ai-filter"><option value="off">выкл</option><option value="light">лёгкий</option><option value="heavy">строгий</option></select></label>
+          <label>Внешний источник <select id="external-campaign-source"><option value="geekjob">GeekJob</option><option value="habr">Habr</option><option value="getmatch">Getmatch</option><option value="hirehi">hirehi</option><option value="careerspace">careerspace</option><option value="jabka">jabka.work</option></select></label>
         </div>
         <pre id="campaign-plan-output" class="agent-json"></pre>
       </div>
       <div class="panel">
-        <h2>Runs</h2>
+        <h2>Запуски</h2>
         <div id="campaign-runs-list" class="agent-list"></div>
       </div>
     </section>
 
     <section id="view-pipeline" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Pipeline</h1>
+        <h1>Воронка</h1>
         <div class="actions">
-          <button id="pipeline-refresh-button" class="primary"><i data-lucide="refresh-cw"></i>Refresh</button>
-          <button id="pipeline-prep-pack-button"><i data-lucide="notebook-tabs"></i>Prep pack</button>
+          <button id="pipeline-refresh-button" class="primary"><i data-lucide="refresh-cw"></i>Обновить</button>
+          <button id="pipeline-prep-pack-button"><i data-lucide="notebook-tabs"></i>Пакет подготовки</button>
         </div>
       </div>
+      <p class="view-hint">Веди вакансию по этапам найма и планируй follow-up, чтобы не терять контакт с работодателем.</p>
       <div class="panel">
         <div class="agent-form-grid three">
           <label>Job ID <input id="pipeline-job-id" type="number"></label>
-          <label>Stage
+          <label>Этап
             <select id="pipeline-stage-select">
               <option value="hr">HR</option>
-              <option value="tech" selected>Tech</option>
-              <option value="final">Final</option>
-              <option value="offer">Offer</option>
+              <option value="tech" selected>Технический</option>
+              <option value="final">Финал</option>
+              <option value="offer">Оффер</option>
             </select>
           </label>
-          <label>Event at <input id="pipeline-event-at" type="datetime-local"></label>
+          <label>Дата и время <input id="pipeline-event-at" type="datetime-local"></label>
         </div>
         <div class="button-row" style="justify-content:flex-start;margin-bottom:8px;">
-          <button id="pipeline-schedule-followup-button"><i data-lucide="calendar-plus"></i>Schedule follow-up</button>
+          <button id="pipeline-schedule-followup-button"><i data-lucide="calendar-plus"></i>Запланировать follow-up</button>
         </div>
         <pre id="pipeline-status-output" class="agent-json"></pre>
       </div>
       <div class="panel">
-        <h2>Interview prep</h2>
+        <h2>Подготовка к интервью</h2>
         <pre id="pipeline-prep-output" class="agent-json"></pre>
       </div>
     </section>
 
     <section id="view-interview-prep" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Interview Prep</h1>
-        <button id="interview-prep-pack-button" class="primary"><i data-lucide="notebook-tabs"></i>Build prep pack</button>
+        <h1>Подготовка к собеседованию</h1>
+        <button id="interview-prep-pack-button" class="primary"><i data-lucide="notebook-tabs"></i>Собрать подготовку</button>
       </div>
+      <p class="view-hint">Сгенерируй пакет под конкретный этап: вероятные вопросы, темы для повторения и план ответа.</p>
       <div class="panel">
         <div class="agent-form-grid">
           <label>Job ID <input id="interview-prep-job-id" type="number"></label>
-          <label>Stage
+          <label>Этап
             <select id="interview-prep-stage-select">
               <option value="hr">HR</option>
-              <option value="tech" selected>Tech</option>
-              <option value="final">Final</option>
-              <option value="offer">Offer</option>
+              <option value="tech" selected>Технический</option>
+              <option value="final">Финал</option>
+              <option value="offer">Оффер</option>
             </select>
           </label>
         </div>
@@ -403,30 +449,32 @@
 
     <section id="view-replay" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Replay</h1>
-        <button id="replay-refresh-button" class="primary"><i data-lucide="history"></i>Load</button>
+        <h1>История действий</h1>
+        <button id="replay-refresh-button" class="primary"><i data-lucide="history"></i>Загрузить</button>
       </div>
+      <p class="view-hint">Полный таймлайн действий по вакансии или кампании — для контроля и разбора. Можно выгрузить в Markdown.</p>
       <div class="panel">
         <div class="agent-form-grid">
           <label>Job ID <input id="replay-job-id" type="number"></label>
           <label>Run ID <input id="replay-run-id" type="number"></label>
-          <label>Source <input id="replay-source-filter" placeholder="hh"></label>
-          <label>Event type <input id="replay-event-type-filter" placeholder="application_pack_built"></label>
+          <label>Источник <input id="replay-source-filter" placeholder="hh"></label>
+          <label>Тип события <input id="replay-event-type-filter" placeholder="application_pack_built"></label>
         </div>
-        <button id="replay-export-button"><i data-lucide="download"></i>Export markdown</button>
+        <button id="replay-export-button"><i data-lucide="download"></i>Экспорт в Markdown</button>
         <div id="replay-timeline-list" class="agent-list"></div>
       </div>
     </section>
 
     <section id="view-audit-security" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Audit</h1>
-        <button id="audit-security-refresh-button" class="primary"><i data-lucide="shield-check"></i>Refresh</button>
+        <h1>Аудит безопасности</h1>
+        <button id="audit-security-refresh-button" class="primary"><i data-lucide="shield-check"></i>Обновить</button>
       </div>
+      <p class="view-hint">Проверка защиты: маскирование секретов и готовность безопасных действий. Используй сканер перед отправкой данных наружу.</p>
       <div class="panel">
         <div class="panel-head">
-          <h2>Redaction scan</h2>
-          <button id="audit-security-redaction-button" class="primary" data-label="Scan"><i data-lucide="scan-line"></i>Scan</button>
+          <h2>Сканер секретов</h2>
+          <button id="audit-security-redaction-button" class="primary" data-label="Scan"><i data-lucide="scan-line"></i>Сканировать</button>
         </div>
         <textarea id="audit-security-redaction-text" rows="5" spellcheck="false">Authorization: Bearer token
 client_secret=secret</textarea>
@@ -439,34 +487,35 @@ client_secret=secret</textarea>
 
     <section id="view-browser-lab" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Browser Lab</h1>
+        <h1>Лаборатория браузера</h1>
         <div class="actions">
-          <button id="browser-lab-status-button"><i data-lucide="activity"></i>Status</button>
-          <button id="browser-lab-open-login-button" class="primary"><i data-lucide="log-in"></i>Open login plan</button>
+          <button id="browser-lab-status-button"><i data-lucide="activity"></i>Статус</button>
+          <button id="browser-lab-open-login-button" class="primary"><i data-lucide="log-in"></i>План входа</button>
         </div>
       </div>
+      <p class="view-hint">Безопасная работа с сессиями и формами внешних площадок: импорт HAR, сопоставление полей и dry run без отправки.</p>
       <div class="panel">
         <div class="agent-form-grid">
-          <label>Source <input id="browser-lab-source" value="getmatch"></label>
-          <label>HAR path <input id="browser-lab-har-path" placeholder="C:\path\session.har"></label>
-          <label>Allowed hosts <input id="browser-lab-hosts" placeholder="getmatch.ru"></label>
+          <label>Источник <input id="browser-lab-source" value="getmatch"></label>
+          <label>Путь к HAR <input id="browser-lab-har-path" placeholder="C:\path\session.har"></label>
+          <label>Разрешённые хосты <input id="browser-lab-hosts" placeholder="getmatch.ru"></label>
         </div>
-        <label class="inline-check"><input id="browser-lab-configure-external-apply" type="checkbox"> Configure external apply target from HAR</label>
-        <button id="browser-lab-import-har-button"><i data-lucide="file-input"></i>Import HAR</button>
+        <label class="inline-check"><input id="browser-lab-configure-external-apply" type="checkbox"> Настроить цель отклика из HAR</label>
+        <button id="browser-lab-import-har-button"><i data-lucide="file-input"></i>Импорт HAR</button>
         <pre id="browser-lab-output" class="agent-json"></pre>
       </div>
       <div class="panel">
         <div class="panel-head">
-          <h2>Form dry-run</h2>
+          <h2>Проверка формы (dry run)</h2>
           <div class="button-row">
-            <button id="browser-lab-map-form-button"><i data-lucide="map"></i>Map form</button>
+            <button id="browser-lab-map-form-button"><i data-lucide="map"></i>Сопоставить форму</button>
             <button id="browser-lab-dry-run-button" class="primary"><i data-lucide="mouse-pointer-click"></i>Dry run</button>
-            <button id="browser-lab-execute-dry-run-button"><i data-lucide="camera"></i>Fill + screenshot</button>
+            <button id="browser-lab-execute-dry-run-button"><i data-lucide="camera"></i>Заполнить + скриншот</button>
           </div>
         </div>
-        <label>Persona JSON</label>
+        <label>Персона (JSON)</label>
         <textarea id="browser-lab-persona-json" rows="4" spellcheck="false">{"facts":{"email":"","summary":""}}</textarea>
-        <label>Form JSON</label>
+        <label>Форма (JSON)</label>
         <textarea id="browser-lab-form-json" rows="8" spellcheck="false">{"form_url":"","fields":[{"name":"email","label":"Email","required":true}]}</textarea>
       </div>
     </section>
@@ -555,48 +604,53 @@ client_secret=secret</textarea>
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <div>
           <h1>HH Агент</h1>
-          <p id="agent-status-line">Локальная кабина для запусков, approvals, шаблонов и blacklist.</p>
+          <p id="agent-status-line">Локальная кабина: запуски, согласования, шаблоны и чёрный список.</p>
         </div>
         <div class="actions">
           <button id="agent-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
-          <button id="agent-digest-button" class="primary"><i data-lucide="sparkles"></i>Digest</button>
+          <button id="agent-digest-button" class="primary"><i data-lucide="sparkles"></i>Дайджест</button>
         </div>
       </div>
+      <p class="view-hint">Это «пульт» для работы с аккаунтом hh.ru. Новичку достаточно вкладок <b>Обзор</b> и <b>Согласования</b>. Остальное — для тонкой настройки, можно не трогать. Наведи на вкладку — появится подсказка.</p>
 
+      <div class="agent-tabgroup-label">Основное</div>
       <div class="agent-tabs">
-        <button class="agent-tab active" data-agent-panel="dashboard"><i data-lucide="layout-dashboard"></i>Dashboard</button>
-        <button class="agent-tab" data-agent-panel="inbox"><i data-lucide="inbox"></i>Inbox</button>
-        <button class="agent-tab" data-agent-panel="approvals"><i data-lucide="check-check"></i>Approvals</button>
-        <button class="agent-tab" data-agent-panel="runs"><i data-lucide="activity"></i>Runs</button>
-        <button class="agent-tab" data-agent-panel="api-lab"><i data-lucide="flask-conical"></i>API Lab</button>
-        <button class="agent-tab" data-agent-panel="templates"><i data-lucide="file-text"></i>Templates</button>
-        <button class="agent-tab" data-agent-panel="resume-builder"><i data-lucide="layers"></i>Resume</button>
-        <button class="agent-tab" data-agent-panel="blacklist"><i data-lucide="shield-x"></i>Blacklist</button>
-        <button class="agent-tab" data-agent-panel="events"><i data-lucide="calendar-clock"></i>Events</button>
-        <button class="agent-tab" data-agent-panel="settings"><i data-lucide="sliders-horizontal"></i>Settings</button>
+        <button class="agent-tab active" data-agent-panel="dashboard"><i data-lucide="layout-dashboard"></i>Обзор</button>
+        <button class="agent-tab" data-agent-panel="approvals"><i data-lucide="check-check"></i>Согласования</button>
+        <button class="agent-tab" data-agent-panel="inbox"><i data-lucide="inbox"></i>Входящие</button>
+        <button class="agent-tab" data-agent-panel="events"><i data-lucide="calendar-clock"></i>События</button>
+      </div>
+      <div class="agent-tabgroup-label">Продвинутое (необязательно)</div>
+      <div class="agent-tabs">
+        <button class="agent-tab" data-agent-panel="templates"><i data-lucide="file-text"></i>Шаблоны</button>
+        <button class="agent-tab" data-agent-panel="resume-builder"><i data-lucide="layers"></i>Резюме</button>
+        <button class="agent-tab" data-agent-panel="runs"><i data-lucide="activity"></i>Запуски</button>
+        <button class="agent-tab" data-agent-panel="api-lab"><i data-lucide="flask-conical"></i>API-песочница</button>
+        <button class="agent-tab" data-agent-panel="blacklist"><i data-lucide="shield-x"></i>Чёрный список</button>
+        <button class="agent-tab" data-agent-panel="settings"><i data-lucide="sliders-horizontal"></i>Параметры</button>
       </div>
 
       <div id="agent-panel-dashboard" class="agent-panel active">
         <div class="agent-metrics">
           <div class="stat-card">
-            <h3>Auth</h3>
+            <h3>Авторизация</h3>
             <div class="stat-number small" id="agent-auth-status">—</div>
             <p id="agent-auth-note">—</p>
           </div>
           <div class="stat-card">
-            <h3>Pending</h3>
+            <h3>В очереди</h3>
             <div class="stat-number" id="agent-pending-count">0</div>
-            <p>approval queue</p>
+            <p>очередь согласований</p>
           </div>
           <div class="stat-card">
-            <h3>Runs</h3>
+            <h3>Запуски</h3>
             <div class="stat-number" id="agent-runs-count">0</div>
-            <p>MCP / local ops</p>
+            <p>MCP / локальные операции</p>
           </div>
           <div class="stat-card">
-            <h3>Decisions</h3>
+            <h3>Решения</h3>
             <div class="stat-number" id="agent-decisions-count">0</div>
-            <p>AI audit</p>
+            <p>аудит AI</p>
           </div>
         </div>
 
@@ -606,18 +660,18 @@ client_secret=secret</textarea>
             <span class="meta" id="agent-operation-note"></span>
           </div>
           <div class="agent-operation-grid">
-            <button data-agent-operation="preflight"><i data-lucide="shield-check"></i>Preflight</button>
-            <button data-agent-operation="sync-resumes"><i data-lucide="download"></i>Sync resumes</button>
-            <button data-agent-operation="update-resumes"><i data-lucide="upload-cloud"></i>Update resumes</button>
-            <button data-agent-operation="sync-negotiations"><i data-lucide="messages-square"></i>Sync negotiations</button>
-            <button data-agent-operation="clear-skipped"><i data-lucide="eraser"></i>Clear skipped</button>
-            <button data-agent-operation="refresh-token"><i data-lucide="key-round"></i>Refresh token</button>
+            <button data-agent-operation="preflight" title="Проверка готовности агента: авторизация, лимиты, окружение"><i data-lucide="shield-check"></i>Проверка готовности</button>
+            <button data-agent-operation="sync-resumes" title="Загрузить резюме из аккаунта HH в локальную базу"><i data-lucide="download"></i>Загрузить резюме</button>
+            <button data-agent-operation="update-resumes" title="Отправить обновления резюме обратно в HH"><i data-lucide="upload-cloud"></i>Обновить резюме</button>
+            <button data-agent-operation="sync-negotiations" title="Подтянуть переписку и отклики из HH"><i data-lucide="messages-square"></i>Синхр. переписку</button>
+            <button data-agent-operation="clear-skipped" title="Очистить список пропущенных вакансий"><i data-lucide="eraser"></i>Очистить пропуски</button>
+            <button data-agent-operation="refresh-token" title="Обновить токен доступа HH"><i data-lucide="key-round"></i>Обновить токен</button>
           </div>
         </div>
 
         <div class="panel">
           <div class="panel-head">
-            <h2>Последний digest</h2>
+            <h2>Последний дайджест</h2>
             <button onclick="loadAgentDigest()"><i data-lucide="refresh-cw"></i>Обновить</button>
           </div>
           <div id="agent-digest-list" class="agent-list"></div>
@@ -628,8 +682,8 @@ client_secret=secret</textarea>
         <div class="panel">
           <div class="panel-head">
             <div>
-              <h2>Agent inbox</h2>
-              <p>Outbox, webhooks, pending work and latest digest items.</p>
+              <h2>Входящие агента</h2>
+              <p>Исходящие, webhooks, задачи в работе и свежие пункты дайджеста.</p>
             </div>
           </div>
           <div id="agent-inbox-list" class="agent-list"></div>
@@ -639,7 +693,7 @@ client_secret=secret</textarea>
       <div id="agent-panel-approvals" class="agent-panel">
         <div class="panel">
           <div class="panel-head">
-            <h2>Approval queue</h2>
+            <h2>Очередь согласований</h2>
             <button onclick="loadAgentApprovals()"><i data-lucide="refresh-cw"></i>Обновить</button>
           </div>
           <div id="agent-approvals-list" class="agent-list"></div>
@@ -649,7 +703,7 @@ client_secret=secret</textarea>
       <div id="agent-panel-runs" class="agent-panel">
         <div class="panel">
           <div class="panel-head">
-            <h2>Runs и логи</h2>
+            <h2>Запуски и логи</h2>
             <button onclick="loadAgentOperations()"><i data-lucide="refresh-cw"></i>Обновить</button>
           </div>
           <div id="agent-runs-list" class="agent-list"></div>
@@ -661,15 +715,15 @@ client_secret=secret</textarea>
       <div id="agent-panel-api-lab" class="agent-panel">
         <div class="panel">
           <div class="panel-head">
-            <h2>HH API Lab</h2>
+            <h2>Песочница HH API</h2>
             <div class="actions">
-              <button id="hh-lab-run-button" class="primary"><i data-lucide="play"></i>Run</button>
-              <button id="hh-lab-save-snippet-button"><i data-lucide="save"></i>Save snippet</button>
+              <button id="hh-lab-run-button" class="primary"><i data-lucide="play"></i>Выполнить</button>
+              <button id="hh-lab-save-snippet-button"><i data-lucide="save"></i>Сохранить запрос</button>
             </div>
           </div>
           <div id="hh-lab-quick-calls" class="agent-operation-grid"></div>
           <div class="hh-lab-editor">
-            <label>Method
+            <label>Метод
               <select id="hh-lab-method">
                 <option value="GET">GET</option>
                 <option value="POST">POST</option>
@@ -678,14 +732,14 @@ client_secret=secret</textarea>
                 <option value="DELETE">DELETE</option>
               </select>
             </label>
-            <label>Path <input id="hh-lab-path" value="/me" placeholder="/me"></label>
-            <label>Snippet name <input id="hh-lab-snippet-name" placeholder="my-call"></label>
-            <label>Params JSON <textarea id="hh-lab-params" rows="7" spellcheck="false">{}</textarea></label>
-            <label>Body JSON <textarea id="hh-lab-body" rows="7" spellcheck="false"></textarea></label>
+            <label>Путь <input id="hh-lab-path" value="/me" placeholder="/me"></label>
+            <label>Имя сниппета <input id="hh-lab-snippet-name" placeholder="my-call"></label>
+            <label>Параметры JSON <textarea id="hh-lab-params" rows="7" spellcheck="false">{}</textarea></label>
+            <label>Тело JSON <textarea id="hh-lab-body" rows="7" spellcheck="false"></textarea></label>
           </div>
-          <div class="section-title">Output</div>
+          <div class="section-title">Ответ</div>
           <pre id="hh-lab-output" class="hh-lab-output">{}</pre>
-          <div class="section-title">Saved snippets</div>
+          <div class="section-title">Сохранённые сниппеты</div>
           <div id="hh-lab-snippets-list" class="agent-list"></div>
         </div>
       </div>
@@ -693,7 +747,7 @@ client_secret=secret</textarea>
       <div id="agent-panel-templates" class="agent-panel">
         <div class="panel">
           <div class="panel-head">
-            <h2>Letter templates</h2>
+            <h2>Шаблоны писем</h2>
             <button id="agent-save-template-button" class="primary"><i data-lucide="save"></i>Сохранить</button>
           </div>
           <div class="agent-form-grid">
@@ -708,16 +762,16 @@ client_secret=secret</textarea>
         <div class="panel">
           <div class="panel-head">
             <div>
-              <h2>Resume template preview</h2>
-              <p>Markdown template + active profile/about -> HH payload draft.</p>
+              <h2>Предпросмотр шаблона резюме</h2>
+              <p>Markdown-шаблон + активный профиль → черновик payload для HH.</p>
             </div>
-            <button id="agent-resume-preview-button" class="primary"><i data-lucide="eye"></i>Preview</button>
+            <button id="agent-resume-preview-button" class="primary"><i data-lucide="eye"></i>Предпросмотр</button>
           </div>
           <div class="agent-form-grid">
-            <label style="grid-column:1/-1;">Markdown template
+            <label style="grid-column:1/-1;">Markdown-шаблон
               <textarea id="agent-resume-template" rows="12" spellcheck="false"></textarea>
             </label>
-            <label style="grid-column:1/-1;">Extra context JSON
+            <label style="grid-column:1/-1;">Доп. контекст JSON
               <textarea id="agent-resume-context" rows="4" spellcheck="false">{}</textarea>
             </label>
           </div>
@@ -726,12 +780,12 @@ client_secret=secret</textarea>
         <div class="panel">
           <div class="panel-head">
             <div>
-              <h2>Batch preset matrix</h2>
-              <p>resumes x search presets x letters x limits, with secrets and local scripts stripped.</p>
+              <h2>Матрица пресетов</h2>
+              <p>резюме × пресеты поиска × письма × лимиты, без секретов и локальных скриптов.</p>
             </div>
-            <button id="agent-batch-matrix-button"><i data-lucide="grid-3x3"></i>Build</button>
+            <button id="agent-batch-matrix-button"><i data-lucide="grid-3x3"></i>Собрать</button>
           </div>
-          <label>Matrix JSON
+          <label>Матрица JSON
             <textarea id="agent-batch-matrix-input" rows="10" spellcheck="false"></textarea>
           </label>
           <pre id="agent-batch-matrix-output" class="agent-json"></pre>
@@ -741,13 +795,13 @@ client_secret=secret</textarea>
       <div id="agent-panel-blacklist" class="agent-panel">
         <div class="panel">
           <div class="panel-head">
-            <h2>Employer blacklist</h2>
+            <h2>Чёрный список работодателей</h2>
             <button id="agent-save-blacklist-button" class="primary"><i data-lucide="save"></i>Сохранить</button>
           </div>
           <div class="agent-form-grid three">
-            <label>Employer ID <input id="agent-blacklist-id" placeholder="123456"></label>
+            <label>ID работодателя <input id="agent-blacklist-id" placeholder="123456"></label>
             <label>Название <input id="agent-blacklist-name" placeholder="Компания"></label>
-            <label>Причина <input id="agent-blacklist-reason" placeholder="spam, low fit, blacklist"></label>
+            <label>Причина <input id="agent-blacklist-reason" placeholder="спам, не подходит, блокировка"></label>
           </div>
           <div id="agent-blacklist-list" class="agent-list"></div>
         </div>
@@ -757,17 +811,17 @@ client_secret=secret</textarea>
         <div class="panel">
           <div class="panel-head">
             <div>
-              <h2>Events and tasks</h2>
-              <p>Negotiation-derived interviews, tests, offers, rejections and follow-ups.</p>
+              <h2>События и задачи</h2>
+              <p>Собеседования, тесты, офферы, отказы и follow-up из переписки.</p>
             </div>
           </div>
           <div class="agent-split-list">
             <div>
-              <h3>Events</h3>
+              <h3>События</h3>
               <div id="agent-events-list" class="agent-list"></div>
             </div>
             <div>
-              <h3>Tasks</h3>
+              <h3>Задачи</h3>
               <div id="agent-tasks-list" class="agent-list"></div>
             </div>
           </div>
@@ -778,8 +832,8 @@ client_secret=secret</textarea>
         <div class="panel">
           <div class="panel-head">
             <div>
-              <h2>Agent settings</h2>
-              <p>Read-only local preflight snapshot.</p>
+              <h2>Параметры агента</h2>
+              <p>Локальный снимок preflight только для чтения.</p>
             </div>
           </div>
           <pre id="agent-settings-output" class="agent-json"></pre>
@@ -790,14 +844,15 @@ client_secret=secret</textarea>
     <section id="view-resumes" class="view">
       <div class="panel">
         <div class="panel-head">
-          <h2>Resumes</h2>
-          <button id="add-resume-button" class="primary" onclick="showResumeForm()">+ Resume</button>
+          <h2>Резюме</h2>
+          <button id="add-resume-button" class="primary" onclick="showResumeForm()"><i data-lucide="plus"></i>Добавить резюме</button>
         </div>
+        <p class="view-hint">Импортируй резюме из файла или создай вручную. Активное резюме (★) используется для откликов и AI-подсказок.</p>
         <div class="agent-form-grid">
-          <label>Import path <input id="resume-import-path" placeholder="C:\path\resume.md"></label>
-          <label><input id="resume-import-activate" type="checkbox"> Activate imported resume</label>
+          <label>Путь к файлу <input id="resume-import-path" placeholder="C:\path\resume.md"></label>
+          <label class="inline-check"><input id="resume-import-activate" type="checkbox"> Активировать после импорта</label>
         </div>
-        <button id="resume-import-button"><i data-lucide="upload"></i>Import</button>
+        <button id="resume-import-button"><i data-lucide="upload"></i>Импортировать</button>
         <pre id="resume-import-output" class="agent-json"></pre>
         <div id="resume-form" style="display:none;margin-bottom:10px;">
           <label>Название <input id="resume-name-input" style="width:100%;" placeholder="Python Backend"></label>
@@ -813,16 +868,17 @@ client_secret=secret</textarea>
 
     <section id="view-job-detail" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Job Detail</h1>
-        <button id="job-detail-load-button" class="primary"><i data-lucide="refresh-cw"></i>Load</button>
+        <h1>Карточка вакансии</h1>
+        <button id="job-detail-load-button" class="primary"><i data-lucide="refresh-cw"></i>Загрузить</button>
       </div>
+      <p class="view-hint">Отдельный экран вакансии: введи ID или выбери вакансию в списке — здесь будет полная карточка.</p>
       <div class="panel">
         <div class="agent-form-grid">
           <label>Job ID <input id="job-detail-id-input" type="number"></label>
         </div>
       </div>
       <div id="job-detail-output" class="detail empty">
-        <p>Select a job in Inbox or enter a job ID.</p>
+        <p>Выбери вакансию во вкладке «Вакансии» или введи её ID.</p>
       </div>
     </section>
 
@@ -860,44 +916,70 @@ client_secret=secret</textarea>
       </div>
       <div class="panel">
         <div class="panel-head">
-          <h2>AI backend</h2>
+          <h2>Бэкенд AI</h2>
         </div>
+        <p class="view-hint">AI помогает писать письма, анализировать вакансии и давать подсказки. Выбери, что у тебя есть. Всё хранится только локально.</p>
         <div style="display: flex; flex-direction: column; gap: 8px;">
-          <label>Backend
+          <label>Что используем
             <select id="ai-backend-select" style="width: 100%; padding: 4px;">
-              <option value="direct">Direct OpenAI-compatible</option>
-              <option value="opencode">OpenCode</option>
+              <option value="direct">Ключ API (OpenRouter и совместимые)</option>
+              <option value="codex">Codex CLI — вход по подписке ChatGPT (без ключа)</option>
+              <option value="opencode">OpenCode (CLI или сервер)</option>
+              <option value="codex_server">Codex app-server (экспериментально)</option>
             </select>
           </label>
-          <label>OpenRouter API Key
+          <p class="ai-backend-note meta" id="ai-backend-note"></p>
+
+          <label data-ai-backend="direct">Ключ OpenRouter API
             <input type="password" id="ai-key-input" placeholder="sk-or-v1-..." style="width: 100%; padding: 4px;">
           </label>
-          <label>Модель (OpenRouter model ID)
+          <label data-ai-backend="direct">Модель (ID модели OpenRouter)
             <input type="text" id="ai-model-input" placeholder="google/gemini-2.5-flash" style="width: 100%; padding: 4px;">
           </label>
-          <label>OpenCode transport
-            <select id="opencode-transport-select" style="width: 100%; padding: 4px;">
-              <option value="cli">CLI: opencode run</option>
-              <option value="server">Server: opencode serve</option>
+
+          <label data-ai-backend="codex codex_server">Модель Codex (необязательно)
+            <input type="text" id="codex-model-input" placeholder="gpt-5.5" style="width: 100%; padding: 4px;">
+          </label>
+          <label data-ai-backend="codex codex_server">Команда Codex
+            <input type="text" id="codex-command-input" placeholder="codex" style="width: 100%; padding: 4px;">
+          </label>
+          <label data-ai-backend="codex">Уровень рассуждений
+            <select id="codex-reasoning-select" style="width: 100%; padding: 4px;">
+              <option value="">по умолчанию</option>
+              <option value="low">низкий (быстрее)</option>
+              <option value="medium">средний</option>
+              <option value="high">высокий (умнее)</option>
             </select>
           </label>
-          <label>OpenCode command
+          <input type="hidden" id="codex-server-input" value="">
+          <div class="ai-help" data-ai-backend="codex codex_server">
+            <strong>Как войти (один раз):</strong> установи Codex CLI и выполни в терминале <code>codex login</code> — вход по подписке ChatGPT. После этого ключ API не нужен. Проверить: <code>codex login status</code>.
+          </div>
+
+          <label data-ai-backend="opencode">Транспорт OpenCode
+            <select id="opencode-transport-select" style="width: 100%; padding: 4px;">
+              <option value="cli">CLI: opencode run</option>
+              <option value="server">Сервер: opencode serve</option>
+            </select>
+          </label>
+          <label data-ai-backend="opencode">Команда OpenCode
             <input type="text" id="opencode-command-input" placeholder="opencode" style="width: 100%; padding: 4px;">
           </label>
-          <label>OpenCode model
+          <label data-ai-backend="opencode">Модель OpenCode
             <input type="text" id="opencode-model-input" placeholder="provider/model" style="width: 100%; padding: 4px;">
           </label>
-          <label>OpenCode agent
+          <label data-ai-backend="opencode">Агент OpenCode
             <input type="text" id="opencode-agent-input" placeholder="work-hunter-ai" style="width: 100%; padding: 4px;">
           </label>
-          <label>OpenCode server URL
+          <label data-ai-backend="opencode">URL сервера OpenCode
             <input type="text" id="opencode-server-input" placeholder="http://127.0.0.1:4096" style="width: 100%; padding: 4px;">
           </label>
-          <button id="save-ai-button" class="primary">Сохранить AI настройки</button>
+          <button id="save-ai-button" class="primary">Сохранить настройки AI</button>
         </div>
       </div>
       <div class="panel">
-        <h2>Авто-синхронизация</h2>
+        <h2>Автосинхронизация</h2>
+        <p class="view-hint">Периодически подтягивать свежие вакансии в фоне.</p>
         <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;">
           <label>Интервал (минуты, 0 = выкл)
             <input type="number" id="auto-sync-interval" value="0" min="0" max="1440" style="width:100px;">
@@ -911,10 +993,10 @@ client_secret=secret</textarea>
           <h2>Ключи и токены HH</h2>
           <div class="inline-form" style="display: flex; flex-direction: column; gap: 8px;">
             <div style="display: flex; gap: 8px;">
-              <input type="password" id="hh-token-input" placeholder="HH Access Token" style="flex: 1; padding: 4px;">
+              <input type="password" id="hh-token-input" placeholder="Токен доступа HH" style="flex: 1; padding: 4px;">
               <button id="save-token-button">Обновить токен</button>
             </div>
-            <label style="font-size: 0.9em; cursor: pointer;">
+            <label class="inline-check" style="font-size: 0.9em; cursor: pointer;">
               <input type="checkbox" id="hh-allow-broad"> Разрешить реальные отклики (allow_broad_apply)
             </label>
           </div>
@@ -944,28 +1026,31 @@ client_secret=secret</textarea>
         <p class="meta">Вакансии без ответа 7+ дней после отклика.</p>
         <div id="ghost-jobs-list" class="source-list"></div>
       </div>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Конфигурация (JSON)</h2>
+      <details class="advanced-block">
+        <summary>Расширенное: конфигурация (JSON)</summary>
+        <p class="meta advanced-note">Полный конфиг в JSON для опытных. Обычные настройки удобнее менять в полях выше — меняй здесь только если знаешь, что делаешь.</p>
+        <div class="panel-head" style="margin-top:10px;">
+          <h3>Конфигурация (JSON)</h3>
           <button id="save-config-button" class="primary">Сохранить JSON</button>
         </div>
         <textarea id="config-editor" spellcheck="false"></textarea>
-      </div>
+      </details>
     </section>
 
     <section id="view-sources" class="view">
       <div class="panel">
         <h2>Источники</h2>
+        <p class="view-hint">Площадки, откуда берутся вакансии. Для начала просто выбери источник и нажми «Синхронизировать». Остальное — для продвинутых.</p>
         <div class="source-row">
           <div class="agent-row-head">
-            <strong>Source actions</strong>
+            <strong>Действия источников</strong>
             <div class="button-row compact">
-              <button id="source-sync-button" class="primary" data-label="Sync">Sync</button>
-              <button id="source-test-button" data-label="Test">Test</button>
+              <button id="source-sync-button" class="primary" data-label="Sync">Синхронизировать</button>
+              <button id="source-test-button" data-label="Test">Тест</button>
             </div>
           </div>
           <div class="source-form-grid">
-            <label>Source
+            <label>Источник
               <select id="source-action-source">
                 <option value="geekjob">geekjob</option>
                 <option value="habr">habr</option>
@@ -975,158 +1060,164 @@ client_secret=secret</textarea>
                 <option value="jabka">jabka</option>
               </select>
             </label>
-            <label>Limit
+            <label>Лимит
               <input type="number" id="source-action-limit" value="0" min="0">
             </label>
           </div>
           <pre id="source-action-output" class="agent-json"></pre>
         </div>
-        <div id="source-certification-summary" class="meta"></div>
-        <div id="source-certification-matrix" class="source-list"></div>
-        <div class="source-row">
-          <div class="agent-row-head">
-            <strong>Certification plan</strong>
-            <button id="source-certification-plan-button" class="primary">Plan evidence</button>
-          </div>
-          <div class="source-form-grid">
-            <label>Level
-              <select id="source-certification-level">
-                <option value="5" selected>L5</option>
-                <option value="6">L6</option>
-              </select>
-            </label>
-          </div>
-          <pre id="source-certification-plan-output" class="agent-json"></pre>
-        </div>
-        <div class="source-row">
-          <div class="agent-row-head">
-            <strong>External apply target</strong>
-            <button id="source-external-target-button" class="primary">Configure</button>
-          </div>
-          <div class="source-form-grid">
-            <label>Source
-              <select id="source-external-target-source">
-                <option value="geekjob">geekjob</option>
-                <option value="habr">habr</option>
-                <option value="getmatch">getmatch</option>
-                <option value="hirehi" selected>hirehi</option>
-                <option value="careerspace">careerspace</option>
-                <option value="jabka">jabka</option>
-              </select>
-            </label>
-            <label>Session
-              <input id="source-external-target-session" value="hirehi" autocomplete="off">
-            </label>
-            <label>Method
-              <select id="source-external-target-method">
-                <option value="POST">POST</option>
-                <option value="GET">GET</option>
-                <option value="PUT">PUT</option>
-                <option value="PATCH">PATCH</option>
-              </select>
-            </label>
-            <label class="source-form-wide">URL
-              <input id="source-external-target-url" placeholder="https://example.com/apply" autocomplete="off">
-            </label>
-            <label class="source-form-wide">Payload template JSON
-              <textarea id="source-external-target-payload-template" rows="4" spellcheck="false">{"jobId":"{source_id}"}</textarea>
-            </label>
-          </div>
-          <pre id="source-external-target-output" class="agent-json"></pre>
-        </div>
-        <div class="source-row">
-          <div class="agent-row-head">
-            <strong>External apply from HAR</strong>
-            <button id="source-external-har-button" class="primary">Configure from HAR</button>
-          </div>
-          <div class="source-form-grid">
-            <label>Source
-              <select id="source-external-har-source">
-                <option value="geekjob">geekjob</option>
-                <option value="habr">habr</option>
-                <option value="getmatch" selected>getmatch</option>
-                <option value="hirehi">hirehi</option>
-                <option value="careerspace">careerspace</option>
-                <option value="jabka">jabka</option>
-              </select>
-            </label>
-            <label class="source-form-wide">HAR path
-              <input id="source-external-har-path" placeholder="C:\path\session.har" autocomplete="off">
-            </label>
-            <label class="source-form-wide">Allowed hosts
-              <input id="source-external-har-hosts" placeholder="getmatch.ru" autocomplete="off">
-            </label>
-          </div>
-          <pre id="source-external-har-output" class="agent-json"></pre>
-        </div>
-        <div class="source-row">
-          <div class="agent-row-head">
-            <strong>Redaction scan</strong>
-            <button id="source-redaction-scan-button" class="primary">Scan</button>
-          </div>
-          <div class="source-form-grid">
-            <label>Source
-              <select id="source-redaction-scan-source">
-                <option value="geekjob">geekjob</option>
-                <option value="habr">habr</option>
-                <option value="getmatch">getmatch</option>
-                <option value="hirehi" selected>hirehi</option>
-                <option value="careerspace">careerspace</option>
-                <option value="jabka">jabka</option>
-              </select>
-            </label>
-            <label class="source-form-wide">Payload JSON
-              <textarea id="source-redaction-scan-payload" rows="4" spellcheck="false">{"headers":{"Authorization":"Bearer ..."}}</textarea>
-            </label>
-            <label class="source-form-wide">Text sample
-              <textarea id="source-redaction-scan-text" rows="3" spellcheck="false">client_secret=...</textarea>
-            </label>
-          </div>
-          <pre id="source-redaction-scan-output" class="agent-json"></pre>
-        </div>
-        <div class="source-row">
-          <div class="agent-row-head">
-            <strong>Certification evidence</strong>
-            <button id="source-certification-evidence-button" class="primary">Record</button>
-          </div>
-          <div style="display:grid;grid-template-columns:180px 1fr;gap:8px;margin-top:8px;align-items:start;">
-            <label>Source
-              <select id="source-certification-source">
-                <option value="geekjob">geekjob</option>
-                <option value="habr">habr</option>
-                <option value="getmatch">getmatch</option>
-                <option value="hirehi">hirehi</option>
-                <option value="careerspace">careerspace</option>
-                <option value="jabka">jabka</option>
-              </select>
-            </label>
-            <label>Evidence JSON
-              <textarea id="source-certification-evidence-json" rows="4" spellcheck="false">{"tests":{"status":"passed","command":"pytest hirehi"}}</textarea>
-            </label>
-          </div>
-          <pre id="source-certification-evidence-output" class="agent-json"></pre>
-        </div>
-        <div class="source-row">
-          <div class="agent-row-head">
-            <strong>Certification promotion</strong>
-            <button id="source-certification-promote-button" class="primary">Promote</button>
-          </div>
-          <div class="source-form-grid">
-            <label>Source
-              <select id="source-certification-promote-source">
-                <option value="geekjob">geekjob</option>
-                <option value="habr">habr</option>
-                <option value="getmatch">getmatch</option>
-                <option value="hirehi" selected>hirehi</option>
-                <option value="careerspace">careerspace</option>
-                <option value="jabka">jabka</option>
-              </select>
-            </label>
-          </div>
-          <pre id="source-certification-promote-output" class="agent-json"></pre>
-        </div>
+        <div class="section-title">Готовность источников</div>
         <div id="source-readiness-list" class="source-list"></div>
         <div id="sources-list" class="source-list"></div>
+
+        <details class="advanced-block">
+          <summary>Расширенное: сертификация и внешние отклики</summary>
+          <p class="meta advanced-note">Нужно только если ты настраиваешь реальные отклики на внешних площадках (не HH). Большинству это не требуется.</p>
+          <div id="source-certification-summary" class="meta"></div>
+          <div id="source-certification-matrix" class="source-list"></div>
+          <div class="source-row">
+            <div class="agent-row-head">
+              <strong>План сертификации</strong>
+              <button id="source-certification-plan-button" class="primary">Показать требования</button>
+            </div>
+            <div class="source-form-grid">
+              <label>Уровень
+                <select id="source-certification-level">
+                  <option value="5" selected>L5</option>
+                  <option value="6">L6</option>
+                </select>
+              </label>
+            </div>
+            <pre id="source-certification-plan-output" class="agent-json"></pre>
+          </div>
+          <div class="source-row">
+            <div class="agent-row-head">
+              <strong>Цель внешнего отклика</strong>
+              <button id="source-external-target-button" class="primary">Настроить</button>
+            </div>
+            <div class="source-form-grid">
+              <label>Источник
+                <select id="source-external-target-source">
+                  <option value="geekjob">geekjob</option>
+                  <option value="habr">habr</option>
+                  <option value="getmatch">getmatch</option>
+                  <option value="hirehi" selected>hirehi</option>
+                  <option value="careerspace">careerspace</option>
+                  <option value="jabka">jabka</option>
+                </select>
+              </label>
+              <label>Сессия
+                <input id="source-external-target-session" value="hirehi" autocomplete="off">
+              </label>
+              <label>Метод
+                <select id="source-external-target-method">
+                  <option value="POST">POST</option>
+                  <option value="GET">GET</option>
+                  <option value="PUT">PUT</option>
+                  <option value="PATCH">PATCH</option>
+                </select>
+              </label>
+              <label class="source-form-wide">URL
+                <input id="source-external-target-url" placeholder="https://example.com/apply" autocomplete="off">
+              </label>
+              <label class="source-form-wide">Шаблон payload (JSON)
+                <textarea id="source-external-target-payload-template" rows="4" spellcheck="false">{"jobId":"{source_id}"}</textarea>
+              </label>
+            </div>
+            <pre id="source-external-target-output" class="agent-json"></pre>
+          </div>
+          <div class="source-row">
+            <div class="agent-row-head">
+              <strong>Внешний отклик из HAR</strong>
+              <button id="source-external-har-button" class="primary">Настроить из HAR</button>
+            </div>
+            <div class="source-form-grid">
+              <label>Источник
+                <select id="source-external-har-source">
+                  <option value="geekjob">geekjob</option>
+                  <option value="habr">habr</option>
+                  <option value="getmatch" selected>getmatch</option>
+                  <option value="hirehi">hirehi</option>
+                  <option value="careerspace">careerspace</option>
+                  <option value="jabka">jabka</option>
+                </select>
+              </label>
+              <label class="source-form-wide">Путь к HAR
+                <input id="source-external-har-path" placeholder="C:\path\session.har" autocomplete="off">
+              </label>
+              <label class="source-form-wide">Разрешённые хосты
+                <input id="source-external-har-hosts" placeholder="getmatch.ru" autocomplete="off">
+              </label>
+            </div>
+            <pre id="source-external-har-output" class="agent-json"></pre>
+          </div>
+          <div class="source-row">
+            <div class="agent-row-head">
+              <strong>Сканер секретов</strong>
+              <button id="source-redaction-scan-button" class="primary">Сканировать</button>
+            </div>
+            <div class="source-form-grid">
+              <label>Источник
+                <select id="source-redaction-scan-source">
+                  <option value="geekjob">geekjob</option>
+                  <option value="habr">habr</option>
+                  <option value="getmatch">getmatch</option>
+                  <option value="hirehi" selected>hirehi</option>
+                  <option value="careerspace">careerspace</option>
+                  <option value="jabka">jabka</option>
+                </select>
+              </label>
+              <label class="source-form-wide">Payload (JSON)
+                <textarea id="source-redaction-scan-payload" rows="4" spellcheck="false">{"headers":{"Authorization":"Bearer ..."}}</textarea>
+              </label>
+              <label class="source-form-wide">Текст-образец
+                <textarea id="source-redaction-scan-text" rows="3" spellcheck="false">client_secret=...</textarea>
+              </label>
+            </div>
+            <pre id="source-redaction-scan-output" class="agent-json"></pre>
+          </div>
+          <div class="source-row">
+            <div class="agent-row-head">
+              <strong>Доказательства сертификации</strong>
+              <button id="source-certification-evidence-button" class="primary">Записать</button>
+            </div>
+            <div style="display:grid;grid-template-columns:180px 1fr;gap:8px;margin-top:8px;align-items:start;">
+              <label>Источник
+                <select id="source-certification-source">
+                  <option value="geekjob">geekjob</option>
+                  <option value="habr">habr</option>
+                  <option value="getmatch">getmatch</option>
+                  <option value="hirehi">hirehi</option>
+                  <option value="careerspace">careerspace</option>
+                  <option value="jabka">jabka</option>
+                </select>
+              </label>
+              <label>Evidence (JSON)
+                <textarea id="source-certification-evidence-json" rows="4" spellcheck="false">{"tests":{"status":"passed","command":"pytest hirehi"}}</textarea>
+              </label>
+            </div>
+            <pre id="source-certification-evidence-output" class="agent-json"></pre>
+          </div>
+          <div class="source-row">
+            <div class="agent-row-head">
+              <strong>Повышение уровня</strong>
+              <button id="source-certification-promote-button" class="primary">Повысить</button>
+            </div>
+            <div class="source-form-grid">
+              <label>Источник
+                <select id="source-certification-promote-source">
+                  <option value="geekjob">geekjob</option>
+                  <option value="habr">habr</option>
+                  <option value="getmatch">getmatch</option>
+                  <option value="hirehi" selected>hirehi</option>
+                  <option value="careerspace">careerspace</option>
+                  <option value="jabka">jabka</option>
+                </select>
+              </label>
+            </div>
+            <pre id="source-certification-promote-output" class="agent-json"></pre>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -1176,7 +1267,224 @@ client_secret=secret</textarea>
         <p class="meta">Нажми «Анализировать» чтобы получить AI-отчёт о трендах рынка на основе последних вакансий.</p>
       </div>
     </section>
+
+    <section id="view-help" class="view">
+      <div class="topbar" style="padding:0;margin-bottom:12px;">
+        <h1>Справка и помощь</h1>
+        <button id="help-wizard-button" class="primary"><i data-lucide="wand-2"></i>Мастер первого отклика</button>
+      </div>
+      <p class="view-hint">Коротко и по делу: как всё устроено и что нажимать. Раскрывай нужный раздел. Не понятно что-то на экране — наведи курсор на кнопку или поле, появится подсказка.</p>
+
+      <details class="advanced-block" open>
+        <summary>С чего начать (за 4 шага)</summary>
+        <div class="help-body">
+          <ol>
+            <li><b>Заполни профиль</b> — вкладка «Онбординг». Чем подробнее, тем точнее подбор и письма.</li>
+            <li><b>Подключи поиск</b> — «Источники» → выбери площадку → «Синхронизировать». Появятся вакансии.</li>
+            <li><b>Выбери вакансию</b> — на «Вакансиях» кликни строку, справа откроются детали и AI-панели.</li>
+            <li><b>Проверь отклик</b> — кнопка «План отклика HH» (безопасно, без отправки), затем «Откликнуться на HH» с подтверждением.</li>
+          </ol>
+          <p class="meta">Проще всего пройти это через <b>Мастер первого отклика</b> — кнопка вверху или в левом меню.</p>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>Подключение hh.ru (токен)</summary>
+        <div class="help-body">
+          <p>Для реальных откликов нужен доступ к твоему аккаунту hh.ru. Токен вставляется в «Настройки» → «Ключи и токены HH».</p>
+          <ul>
+            <li>Токен доступа живёт около <b>2 недель</b> и обновляется автоматически.</li>
+            <li>Галочку <b>«Разрешить реальные отклики»</b> включай только когда готов отправлять отклики по-настоящему.</li>
+            <li>Все данные хранятся <b>локально на твоём устройстве</b> и никуда не передаются.</li>
+            <li>Совет: скрывай номер телефона от работодателя в резюме, если рассылаешь отклики.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>Какой AI выбрать</summary>
+        <div class="help-body">
+          <p>AI помогает писать сопроводительные письма, оценивать соответствие и подсказывать. Настраивается в «Настройки» → «Бэкенд AI».</p>
+          <ul>
+            <li><b>Codex CLI (подписка ChatGPT)</b> — без ключа API. Один раз в терминале: <code>codex login</code>. Рекомендуется, если есть подписка ChatGPT.</li>
+            <li><b>Ключ API (OpenRouter)</b> — платишь за токены по факту; вставь ключ и модель.</li>
+            <li><b>OpenCode / Codex app-server</b> — для продвинутых, локальные движки.</li>
+          </ul>
+          <p class="meta">Можно работать и без AI: письма по шаблону доступны всегда.</p>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>Поиск вакансий и язык запросов</summary>
+        <div class="help-body">
+          <p>В поиске hh.ru можно использовать операторы, чтобы отсеять лишнее:</p>
+          <ul>
+            <li><code>(Python OR Django) NOT PHP NOT Java</code> — Python или Django, но без PHP и Java.</li>
+            <li>Кавычки ищут точную фразу: <code>"backend developer"</code>.</li>
+          </ul>
+          <p>В приложении: фильтры по источнику, минимальному score, уровню и удалёнке; есть <b>AI-поиск</b> — опиши вакансию словами.</p>
+          <p class="meta">Подробно про язык запросов hh.ru: <a href="https://hh.ru/article/1175" target="_blank" rel="noreferrer noopener">hh.ru/article/1175</a></p>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>Отклики: безопасность и лимиты</summary>
+        <div class="help-body">
+          <ul>
+            <li>Реальный отклик уходит <b>только после подтверждения</b>. Сначала всегда есть «План отклика» (проверка без отправки).</li>
+            <li>Лимит hh.ru — примерно <b>200 откликов в сутки</b>. Не превышай, чтобы не попасть под ограничения.</li>
+            <li><b>Не вставляй ссылки</b> в сопроводительные письма — это повышает риск теневого бана.</li>
+            <li>Кампании имеют дневной лимит и кнопку <b>«Стоп»</b> на случай, если что-то пошло не так.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>AI-фильтр кампаний: light и heavy</summary>
+        <div class="help-body">
+          <ul>
+            <li><b>выкл</b> — без AI-отсева, берём все подходящие по score.</li>
+            <li><b>лёгкий (light)</b> — быстрая оценка по названию и ключевым навыкам.</li>
+            <li><b>строгий (heavy)</b> — полный анализ: должность, навыки, опыт, задачи. Точнее, но медленнее и дороже.</li>
+          </ul>
+          <p class="meta">Пропущенные вакансии сохраняются с причиной — можно разобрать позже.</p>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>HH Агент: что делают операции</summary>
+        <div class="help-body">
+          <ul>
+            <li><b>Проверка готовности</b> — проверяет авторизацию, лимиты и окружение перед запуском.</li>
+            <li><b>Загрузить / Обновить резюме</b> — «Обновить резюме» поднимает дату публикации (как кнопка «Обновить дату» на hh.ru).</li>
+            <li><b>Синхр. переписку</b> — подтягивает отклики и сообщения работодателей.</li>
+            <li><b>Согласования</b> — очередь действий агента: одобрить / отклонить / изменить перед выполнением.</li>
+            <li><b>Очистить отклики</b> — массовая отмена откликов; <b>Чёрный список</b> — исключить работодателей.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>Горячие клавиши</summary>
+        <div class="help-body">
+          <ul>
+            <li><kbd>/</kbd> — перейти к поиску вакансий.</li>
+            <li><kbd>?</kbd> — показать или скрыть гид первого запуска.</li>
+            <li><kbd>Esc</kbd> — закрыть мастер, форму или снять выделение.</li>
+            <li><kbd>Enter</kbd> в чате — отправить сообщение AI-ассистенту.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>Частые вопросы</summary>
+        <div class="help-body">
+          <p><b>Список вакансий пустой.</b> Зайди в «Источники» и нажми «Синхронизировать». Проверь фильтр «Мин. score».</p>
+          <p><b>Кончились подходящие вакансии.</b> Склонируй резюме и сделай его активным — можно откликаться по второму кругу.</p>
+          <p><b>AI-письмо не генерируется.</b> Проверь «Настройки» → «Бэкенд AI» (для Codex выполни <code>codex login</code>, для ключа — проверь ключ и модель).</p>
+          <p><b>Отклик не отправляется.</b> Это нормально без подтверждения. Включи «Разрешить реальные отклики» и подтверди отправку.</p>
+        </div>
+      </details>
+
+      <details class="advanced-block">
+        <summary>О проекте</summary>
+        <div class="help-body">
+          <p>Work Hunter — локальный помощник для поиска работы: сбор вакансий, оценка соответствия, письма, подготовка и безопасная отправка откликов.</p>
+          <p class="meta">Идея выросла из открытого инструмента <a href="https://github.com/s3rgeym/hh-applicant-tool" target="_blank" rel="noreferrer noopener">hh-applicant-tool</a>, но сильно расширена: веб-кабинет, AI, кампании, воронка найма и аудит безопасности.</p>
+        </div>
+      </details>
+    </section>
   </main>
+
+  <div id="wizard-modal" class="wizard-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="wizard-title">
+    <div class="wizard">
+      <div class="wizard-head">
+        <div>
+          <h2 id="wizard-title">Мастер первого отклика</h2>
+          <div class="wizard-steps" id="wizard-steps"></div>
+        </div>
+        <button class="wizard-close" id="wizard-close" aria-label="Закрыть мастер" title="Закрыть">×</button>
+      </div>
+      <div class="wizard-body" id="wizard-body"></div>
+      <div class="wizard-foot">
+        <button id="wizard-back"><i data-lucide="chevron-left"></i>Назад</button>
+        <span class="wizard-progress meta" id="wizard-progress"></span>
+        <button id="wizard-next" class="primary">Далее<i data-lucide="chevron-right"></i></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="source-setup-modal" class="wizard-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="source-setup-title">
+    <div class="wizard source-setup">
+      <div class="wizard-head">
+        <div>
+          <h2 id="source-setup-title">Мастер подключения источника</h2>
+          <p class="meta">Простой путь: выбери площадку, нажми главную кнопку, выполни подсказку. Отклики отсюда не отправляются.</p>
+        </div>
+        <button class="wizard-close" id="source-setup-close" aria-label="Закрыть мастер подключения" title="Закрыть">×</button>
+      </div>
+      <div class="wizard-body">
+        <div class="source-setup-grid">
+          <label class="source-form-wide">Источник
+            <select id="source-setup-source">
+              <option value="hh" selected>HH.ru (рекомендуется)</option>
+              <option value="habr">Habr Career</option>
+              <option value="geekjob">GeekJob</option>
+              <option value="getmatch">Getmatch</option>
+              <option value="hirehi">Hirehi</option>
+              <option value="careerspace">CareerSpace</option>
+              <option value="jabka">Jabka</option>
+              <option value="telegram">Telegram</option>
+              <option value="relocate_me">Relocate.me</option>
+              <option value="another_it">Another IT</option>
+              <option value="rvc">RVC</option>
+            </select>
+          </label>
+        </div>
+        <div id="source-setup-status" class="source-setup-status"></div>
+        <div id="source-setup-steps" class="source-setup-steps"></div>
+        <div id="source-setup-next-action" class="source-setup-next"></div>
+        <details class="advanced-block source-setup-inputs">
+          <summary>Технические настройки для внешних площадок</summary>
+          <div class="source-setup-grid">
+            <label class="source-form-wide">Режим сертификации
+              <select id="source-setup-level">
+                <option value="5" selected>L5: один реальный отклик через подтверждение</option>
+                <option value="6">L6: кампании через подтверждение</option>
+              </select>
+            </label>
+            <label class="source-form-wide">Путь к HAR
+              <input id="source-setup-har-path" placeholder="C:\path\session.har" autocomplete="off">
+            </label>
+            <label class="source-form-wide">Разрешённые хосты
+              <input id="source-setup-har-hosts" placeholder="getmatch.ru" autocomplete="off">
+            </label>
+            <label class="source-form-wide">Payload для redaction scan
+              <textarea id="source-setup-redaction-payload" rows="3" spellcheck="false">{"headers":{"Authorization":"Bearer ..."}}</textarea>
+            </label>
+            <label class="source-form-wide">Текст для redaction scan
+              <textarea id="source-setup-redaction-text" rows="2" spellcheck="false">client_secret=...</textarea>
+            </label>
+            <label class="source-form-wide">Форма dry-run (JSON)
+              <textarea id="source-setup-form-json" rows="4" spellcheck="false">{"form_url":"","fields":[{"name":"email","label":"Email","required":true}]}</textarea>
+            </label>
+            <label class="source-form-wide">Персона dry-run (JSON)
+              <textarea id="source-setup-persona-json" rows="3" spellcheck="false">{"facts":{"email":"","summary":""}}</textarea>
+            </label>
+          </div>
+        </details>
+        <details class="source-setup-log-shell">
+          <summary>Журнал проверок <span id="source-setup-log-summary">пока пуст</span></summary>
+          <pre id="source-setup-log" class="source-setup-log"></pre>
+        </details>
+      </div>
+      <div class="wizard-foot">
+        <button id="source-setup-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
+        <span class="wizard-progress meta">Секреты маскируются, отправки нет</span>
+        <button id="source-setup-run-next" class="primary"><i data-lucide="play"></i>Выполнить следующий шаг</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>

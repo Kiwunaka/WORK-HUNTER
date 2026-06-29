@@ -189,10 +189,12 @@ def test_static_ui_exposes_ai_readiness_and_error_ux():
 
     assert 'id="ui-error-line"' in html
     assert 'id="ai-readiness-list"' in html
+    assert 'id="ai-default-route-note"' in html
     assert "function setUiError" in js
     assert "function renderAiReadiness" in js
     assert "/api/ai/status" in js
-    assert "No AI routes configured" in js
+    assert "Основной AI-маршрут" in js
+    assert "Маршруты AI не настроены" in js
 
 
 def test_static_ui_exposes_setup_wo_import_controls():
@@ -572,3 +574,135 @@ def test_static_ui_exposes_human_cover_letter_preview_controls():
     assert "async function previewHumanLetter" in js
     assert "use_for_campaign" in js
     assert "/letter-preview" in js
+
+
+def test_static_ui_exposes_russian_ux_copy_and_button_hints():
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "const UX_RU_COPY" in js
+    assert "const CONTROL_HINTS" in js
+    assert "function applyRussianUxCopy" in js
+    assert "function enhanceButtonHints" in js
+
+    for text in [
+        "Настройка",
+        "Карта кандидата",
+        "Черновик отклика",
+        "Кампании",
+        "Подготовка к собеседованию",
+        "Лаборатория браузера",
+        "Синхронизировать вакансии из всех активных источников",
+        "Проверить и пересчитать релевантность вакансий",
+    ]:
+        assert text in js
+
+    assert 'setAttribute("title"' in js
+    assert 'setAttribute("aria-label"' in js
+    assert 'setAttribute("aria-current", "page")' in js
+
+
+def test_static_ui_exposes_onboarding_guidance_surface():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    for control_id in [
+        "ux-help-strip",
+        "onboarding-guide",
+        "onboarding-progress",
+        "onboarding-guide-steps",
+        "dismiss-onboarding-guide",
+    ]:
+        assert f'id="{control_id}"' in html
+
+    assert "function renderOnboardingGuide" in js
+    assert "function dismissOnboardingGuide" in js
+    assert "work-hunter-onboarding-dismissed" in js
+    assert "Ответь на вопросы профиля" in js
+    assert "Синхронизируй источники" in js
+    assert "Выбери вакансию" in js
+
+
+def test_static_css_supports_help_states_and_accessible_focus():
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+
+    for selector in [
+        ".ux-help-strip",
+        ".onboarding-guide",
+        ".onboarding-progress",
+        ".onboarding-step",
+        ".field-hint",
+        "button:focus-visible",
+        "input:focus-visible",
+    ]:
+        assert selector in css
+
+
+def test_service_worker_cache_version_tracks_ux_asset_refresh():
+    sw = (STATIC / "sw.js").read_text(encoding="utf-8")
+
+    assert 'CACHE_NAME = "work-hunter-v8"' in sw
+
+
+def test_static_ui_exposes_source_setup_wizard():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+
+    for control_id in [
+        "sidebar-source-setup-button",
+        "open-source-setup-button",
+        "source-setup-modal",
+        "source-setup-source",
+        "source-setup-level",
+        "source-setup-status",
+        "source-setup-steps",
+        "source-setup-next-action",
+        "source-setup-log",
+        "source-setup-har-path",
+        "source-setup-har-hosts",
+        "source-setup-redaction-payload",
+        "source-setup-form-json",
+    ]:
+        assert f'id="{control_id}"' in html
+
+    for marker in [
+        "Мастер подключения источника",
+        "function openSourceSetupWizard",
+        "function loadSourceSetupGuide",
+        "async function runSourceSetupAction",
+        "/api/source-setup/guide",
+        "/api/source-setup/action",
+        "certifiable_external",
+        "manual_or_search_only",
+    ]:
+        assert marker in js
+
+    for selector in [
+        ".source-setup-grid",
+        ".source-setup-step",
+        ".source-setup-next",
+        ".source-setup-log",
+        ".source-setup-status-main",
+        ".source-setup-log-shell",
+    ]:
+        assert selector in css
+
+
+def test_static_ui_source_setup_defaults_to_simple_hh_path():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert '<option value="hh" selected>HH.ru (рекомендуется)</option>' in html
+    assert '<details class="advanced-block source-setup-inputs">' in html
+    assert "Технические настройки для внешних площадок" in html
+    assert "Журнал проверок" in html
+    assert "Самый простой путь" in js
+    assert "Проверить вход в HH" in js
+    assert "Подключить HAR-файл" in js
+    assert "Расширенные проверки" in js
+    assert "function sourceSetupCompactLogLine" in js
+    assert "function sourceSetupNeedsTechnicalInputs" in js
+    assert "resetSourceSetupGuide" in js
+    assert "const primaryLabel = SOURCE_SETUP_ACTION_LABELS[primaryAction] || action.label" in js
+    assert "runNext.innerHTML = `<i data-lucide=\"play\"></i>${escapeHtml(primaryLabel)}`;" in js
+    assert 'if (id === "source-setup-run-next") continue;' in js

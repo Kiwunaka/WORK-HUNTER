@@ -1,7 +1,7 @@
 {
   "name": "Work Hunter",
   "short_name": "WH",
-  "description": "Personal local job-search command center with AI helpers",
+  "description": "Личный локальный командный центр поиска работы с AI-помощниками",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f5f7fb",

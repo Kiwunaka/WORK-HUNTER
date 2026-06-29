@@ -5,7 +5,8 @@ import { SpreadsheetFile, Workbook } from "@oai/artifact-tool";
 
 const outputDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(outputDir, "..", "..");
-const today = "2026-06-23";
+const today = "2026-06-24";
+const currentPytestEvidence = "Current-cycle automated retest: python -m pytest -q -> 481 passed in 129.14s on 2026-06-24. Pytest emitted an ignored Windows temp cleanup PermissionError after completion.";
 const workbookPath = path.join(outputDir, "work_hunter_feature_ledger.xlsx");
 const overridesPath = path.join(outputDir, "qa-overrides.json");
 
@@ -67,6 +68,7 @@ const featureRows = [
   story("WH-US-035", "Sources", "Web/API", "As the owner, I can run safe per-source sync and test actions.", "Source sync with limit=0 returns planned/dry-run; source test reports adapter status and errors without real application side effects.", "work_hunter/web/static/app.js:syncSelectedSource,testSelectedSource; work_hunter/services.py:sync_sources,source_capabilities", "/api/sources/{source}/sync, /api/sources/{source}/test", "tests/test_api_design_aliases.py::test_generic_source_and_browser_api_aliases", "Medium"),
   story("WH-US-036", "Sources", "Web/API", "As the owner, I can manage source certification evidence, plans, redaction scans, and promotions.", "Certification plan describes missing evidence; evidence/redaction endpoints persist proof; promotion blocks incomplete evidence and never silently increases maturity.", "work_hunter/web/static/app.js:loadSourceCertificationPlan,recordSourceCertificationEvidence,recordSourceRedactionScan,promoteSourceCertification", "/api/sources/certification-plan, /api/sources/{source}/certification-evidence, /api/sources/{source}/redaction-scan, /api/sources/{source}/certify", "tests/test_source_adapter_registry.py", "High"),
   story("WH-US-037", "Sources", "Web/API", "As the owner, I can configure external apply targets directly or from HAR files.", "Target configuration saves session/method/url/template without promotion; HAR import redacts secrets and can configure apply targets when requested.", "work_hunter/web/static/app.js:configureSourceExternalApplyTarget,configureSourceExternalApplyFromHar", "/api/sources/{source}/external-apply-target, /api/sources/{source}/external-apply-from-har", "tests/test_source_adapter_registry.py::test_source_external_apply_target_api_configures_session_and_url; tests/test_browser_session_lab.py::test_getmatch_har_import_configures_external_apply_target_from_recon", "High"),
+  story("WH-US-057", "Sources", "Web/API", "As a newcomer, I can use a global Source Setup Wizard that explains how to connect HH or another source without exposing secrets or sending applications.", "The wizard opens from global entry points, defaults to the simple HH path, classifies the source lane, shows steps/next action/logs, masks diagnostics, hides HAR/dry-run/redaction in advanced controls, allows only whitelisted safe actions, and ends at existing explicit confirm flows rather than submitting applications.", "work_hunter/web/static/index.html:source-setup-modal; work_hunter/web/static/app.js:openSourceSetupWizard,loadSourceSetupGuide,runSourceSetupAction; work_hunter/services.py:source_setup_guide,source_setup_action; work_hunter/web/server.py:/api/source-setup/*", "/api/source-setup/guide, /api/source-setup/action", "tests/test_source_setup_wizard.py; tests/test_static_ui_roadmap.py::test_static_ui_source_setup_defaults_to_simple_hh_path", "High"),
   story("WH-US-038", "Browser Lab", "Web/API", "As the owner, I can manage browser-lab login/session status and HAR import for external sources.", "Browser Lab reports source status, opens planned login profiles, imports HAR with allowed hosts, and redacts recorded session data.", "work_hunter/web/static/app.js:loadBrowserLabStatus,openBrowserLabLogin,importBrowserLabHar", "/api/browser-lab/status, /api/browser-lab/open-login, /api/browser-lab/import-har", "tests/test_browser_session_lab.py; tests/test_static_ui_roadmap.py::test_static_ui_exposes_browser_session_lab_controls", "High"),
   story("WH-US-039", "Browser Lab", "Web/API", "As the owner, I can map, dry-run, and execute dry-run form fills without submitting unknown forms.", "Form mapping uses persona/source payload context, dry-run produces planned fill actions and screenshots, execute-dry-run fills but does not submit.", "work_hunter/web/static/app.js:mapBrowserLabForm,dryRunBrowserLabForm,executeBrowserLabDryRun", "/api/browser-lab/forms/map, /api/browser-lab/forms/dry-run, /api/browser-lab/forms/execute-dry-run", "tests/test_browser_session_lab.py::test_browser_lab_form_mapping_and_dry_run_never_submit_unknown_forms", "Critical"),
   story("WH-US-040", "Security", "Web/API", "As the owner, I can audit security status and run ad-hoc redaction scans.", "Audit view shows source/security status and redaction scan output where bearer tokens, cookies, and client secrets are masked.", "work_hunter/web/static/app.js:loadSecurityStatus,runAuditSecurityRedactionScan; work_hunter/services.py:security_status", "/api/security/status, /api/init/redaction-scan", "tests/test_security_redaction.py; tests/test_static_ui_roadmap.py::test_static_ui_exposes_audit_security_redaction_scan", "High"),
@@ -86,6 +88,88 @@ const featureRows = [
   story("WH-US-054", "CLI", "CLI/API", "As the owner, I can run API recon, API discovery/probe, external session import/list/show/call, and external adapter planning.", "Recon tools redact secret values, restrict hosts, classify endpoints, and require unsafe flags for real mutating lab calls.", "work_hunter/cli.py:api-recon-har,api-discover-url,api-probe-url,external-session", "work-hunter api-* external-*", "tests/test_api_recon.py; tests/test_api_discovery.py; tests/test_api_probe.py; tests/test_external_sessions.py", "High"),
   story("WH-US-055", "MCP", "MCP/API", "As an agent workflow, I can access Work Hunter through MCP tools while preserving safety policy.", "MCP exposes discovery/action tools, blocks silent real applications, records redacted runs, and surfaces dry-run/manual review states.", "work_hunter/mcp_server.py; work_hunter/hh_agent/mcp_handlers.py", "python -m work_hunter mcp", "tests/test_mcp_surface.py; tests/test_mcp_safety.py; tests/test_hh_agent_mcp.py", "Critical"),
   story("WH-US-056", "Safety", "System", "As the owner, I can trust local storage, audit logs, replay records, and redaction helpers to keep secrets private.", "Storage and security helpers mask tokens/cookies/client secrets in config, logs, replay, AI runs, source evidence, and reports.", "work_hunter/storage.py; work_hunter/security/redaction.py; work_hunter/config.py", "redaction utilities and storage methods", "tests/test_security_redaction.py; tests/test_scheduler.py; tests/test_agent_orchestrator.py", "Critical"),
+];
+
+const referenceRows = [
+  reference("s3rgeym/hh-applicant-tool", "https://github.com/s3rgeym/hh-applicant-tool", "fb4667a3d31d59a5c98a39c0b208c8b9abc093df", "Simple local HH automation with cover letters, apply-time tests, optional employer email/chat follow-up, local personal-data storage, multi-account/resume support, CLI/headless operation, AI filtering, captcha handling, skipped-job tracking, and UI.", "WH-US-015, WH-US-028, WH-US-029, WH-US-042, WH-US-044, WH-US-048, WH-US-052, WH-US-056, WH-US-057", "Primary GitHub README opened 2026-06-24; key-features section includes cover letters, apply tests, chat, local data safety, multi-account/resume, CLI/headless, AI filtering, captcha, skipped jobs, and UI."),
+  reference("0FL01/hh-applicant-tool", "https://github.com/0FL01/hh-applicant-tool", "cfc3d6fcab7f4714340c7ec83c308c0a32e3611a", "Operational command baseline: authorize, profile selection, dry-run apply-vacancies, excluded filters, update-resumes, reply-employers, live logs, config get/set/edit, SQLite query/export, and negotiation cleanup.", "WH-US-023, WH-US-028, WH-US-029, WH-US-042, WH-US-044, WH-US-045, WH-US-052", "Primary GitHub README opened 2026-06-24; command examples show authorize/profile/dry-run/apply/update/reply/log/config/query/cleanup flows."),
+  reference("s3rgeym/hh-ai-responder", "https://github.com/s3rgeym/hh-ai-responder/tree/main", "a277e1992e9310f4bdea5d1ded1986974d59ffb1", "Always-on responder baseline: search URL/cookie fallback, OpenAI-compatible env config, AI model/key/prompts/contacts, Docker compose, and OS start scripts for local startup.", "WH-US-020, WH-US-033, WH-US-042, WH-US-044, WH-US-045, WH-US-050, WH-US-052", "Primary GitHub README opened 2026-06-24; env/Docker/start-script section shows env-first configuration and startup ergonomics to keep Work Hunter aligned with."),
+];
+
+const currentQaRows = [
+  qa("2026-06-24 API smoke", "WH-US-001", "PASS", "GET /api/init/status", "Init readiness returned status ok for seeded qa-root."),
+  qa("2026-06-24 API smoke", "WH-US-005", "PASS", "GET /api/inbox?limit=200", "Returned 3 seeded jobs."),
+  qa("2026-06-24 API smoke", "WH-US-009", "PASS", "GET /api/jobs/1", "Returned HH job detail with status new."),
+  qa("2026-06-24 API smoke", "WH-US-021", "PASS", "GET /api/onboarding/questions", "Returned 12 onboarding questions."),
+  qa("2026-06-24 API smoke", "WH-US-022", "PASS", "GET /api/candidate/map", "Returned candidate identity/target/facts payload."),
+  qa("2026-06-24 API smoke", "WH-US-024", "PASS", "GET /api/resumes", "Returned 1 seeded resume."),
+  qa("2026-06-24 API smoke", "WH-US-030", "PASS", "GET /api/events", "Returned 1 seeded calendar event."),
+  qa("2026-06-24 API smoke", "WH-US-031", "PASS", "GET /api/pipeline/jobs/1", "Returned pipeline status with 1 related event."),
+  qa("2026-06-24 API smoke", "WH-US-034", "PASS", "GET /api/source-status", "Returned source registry/capability status."),
+  qa("2026-06-24 API smoke", "WH-US-040", "PASS", "GET /api/security/status", "Returned doctor/security status without secret exposure in summary."),
+  qa("2026-06-24 API smoke", "WH-US-041", "PASS", "GET /api/replay/jobs/1", "Endpoint returned a valid replay payload; seeded job had 0 job-specific events."),
+  qa("2026-06-24 API smoke", "WH-US-049", "PASS", "GET /api/stats", "Returned total_jobs=3 and source/status/score distribution."),
+  qa("2026-06-24 API smoke", "WH-US-057", "PASS", "GET /api/source-setup/guide?source=hh&level=5", "Returned 4-step HH guide with goal_status blocked in no-token QA root."),
+  qa("2026-06-24 API smoke", "WH-US-057", "PASS", "POST /api/source-setup/action preflight", "Whitelisted preflight action returned source=hh status=blocked and did not submit applications."),
+  qa("2026-06-24 rendered smoke", "WH-US-057", "PASS", "Browser DOM: open Source Setup", "Opened http://127.0.0.1:8796, clicked Подключить источник, saw selectedSource=hh, HH.ru status, hidden HAR/L5 controls, compact collapsed log, and clean console."),
+  qa("2026-06-24 rendered smoke", "WH-US-057", "PASS", "Browser DOM: run safe HH check", "Clicked Проверить вход в HH; log showed нужно действие, 1/4 готово, отправки нет; toast said Проверка готова: нужен следующий шаг; console stayed clean."),
+  qa("2026-06-24 rendered smoke", "WH-US-057", "BLOCKED_TOOL", "Browser screenshot evidence", "Rendered DOM/interaction QA passed, but built-in Browser screenshot capture timed out with Page.captureScreenshot for the local tab."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-002", "PASS", "POST /api/ai/test dry_run", "Returned status=dry_run for route=smart without requiring a real provider call."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-007", "PASS", "POST /api/jobs/search-ai", "Query FastAPI returned Python Backend Engineer from the seeded job queue."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-008", "PASS", "GET /api/jobs/export?source=hh", "CSV export contained Python Backend Engineer; PowerShell Invoke-WebRequest has a host download prompt bug, so WebClient was used for verification."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-010", "PASS", "POST /api/jobs/2/status saved", "Copied QA root persisted status=saved and returned response=ok."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-011", "PASS", "POST /api/jobs/bulk hidden", "Bulk action processed 2 copied-root jobs and hidden filter returned at least 2 jobs."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-013", "PASS", "POST /api/jobs/1/note", "Saved note body round-tripped as QA note smoke 2."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-015", "PASS", "POST /api/jobs/1/letter", "Rule-based letter returned 407 chars and included seeded Acme/Python context."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-016", "PASS", "POST /api/jobs/1/letter-preview", "Preview returned campaign_letter, variants, selected_template, and use_for_campaign fields."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-017", "BLOCKED_CONFIG", "POST /api/ats-audit", "Endpoint returned HTTP 400 JSON: AI config incomplete: api_key, base_url, or model missing. This is expected without AI provider setup."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-021", "PASS", "POST /api/onboarding/answer", "Answer recorded 1 candidate fact with status=recorded."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-022", "PASS", "POST /api/candidate/facts + confirm", "Created fact_id=3 and confirm returned status=confirmed."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-023", "PASS", "POST /api/profile update", "Profile update persisted must_have_skills=FastAPI,PostgreSQL."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-025", "PASS", "POST /api/resume-variants/build", "Built variant_id=1 with ready response and nonempty body."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-026", "PASS", "POST /api/applications/build-pack", "Created application pack_id=1 with policy=ready and masked Authorization/Cookie secrets."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-027", "PASS", "POST /api/jobs/3/external-apply/dry-run", "Returned blocked_manual_review with submit=false; no external submit was attempted."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-028", "PASS", "POST /api/jobs/1/apply-plan", "Returned blocked apply plan and did not submit a real HH application."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-029", "PASS", "POST /api/jobs/1/confirm-apply confirm=false", "Returned status=blocked for missing explicit confirmation."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-032", "PASS", "POST /api/pipeline/jobs/1/prep-pack", "Prep pack returned sections, star_answers, salary_script, tech_stack, and status fields."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-032", "PASS", "POST /api/pipeline/jobs/1/event", "Scheduled follow-up event returned status=scheduled and event.id=2 on copied QA root."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-033", "PASS", "POST /api/saved-searches + GET /api/ghost-jobs", "Saved search returned ok and ghost-jobs endpoint returned an array payload."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-035", "PASS", "POST /api/sources/geekjob/test", "Returned source=geekjob with capabilities and status fields."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-036", "PASS", "POST /api/sources/hirehi/redaction-scan", "Recorded redaction evidence and masked Authorization, Cookie, and client_secret samples."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-038", "PASS", "GET /api/browser-lab/status?source=getmatch", "Returned source=getmatch browser-lab status payload."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-040", "PASS", "POST /api/init/redaction-scan", "Redaction scan masked bearer token, cookie, and client_secret samples."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-042", "PASS", "POST /api/hh/campaigns/plan", "Dry gated campaign planning created run_id=2 with 1 item and status=planned; no confirm/send was executed."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-043", "PASS", "POST /api/campaigns/external/plan", "External campaign plan blocked with reason=external_source_requires_l6_campaign_certification."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-044", "PASS", "GET /api/agent/preflight + digest", "Agent cockpit APIs returned preflight counts and digest sections without side effects."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-047", "PASS", "POST /api/templates and /api/blacklist lifecycle", "Template and blacklist save/list/delete lifecycle passed on copied QA root."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-049", "PASS", "POST /api/market-trends", "Returned nonempty market trend content for limit=3."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-051", "PASS", "CLI doctor/list/status", "doctor returned status=ok; list --limit 2 printed seeded jobs; status 1 saved updated copied-root job status."),
+  qa("2026-06-24 API/CLI smoke 2", "WH-US-053", "PASS", "CLI source status + certification-matrix", "source status listed registry capabilities; certification-matrix --level 5 returned blocked matrix with missing evidence by source."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-006", "PASS", "Static JS smart-filter signals", "applySmartFilters is wired to remote/salary/level controls and renderFilteredJobs without a backend refetch."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-014", "PASS", "Static JS Telegram share signals", "shareToTelegram builds a https://t.me/share/url link via encodeURIComponent and window.open; no backend state is mutated."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-003", "PASS", "/api/init/import-wo preview+apply", "Preview returned status=preview, apply returned status=imported, AGENTS.md was written on copied QA root, and fake Bearer/api-key/Cookie secrets were masked."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-004", "PASS", "POST /api/sync score=true", "Fake collector returned geekjob status=ok count=1; scoring ran and returned scored=4 without external network."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-012", "PASS", "GET /api/jobs/1", "Returned dedicated job detail for Python Backend Engineer with status=new."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-018", "BLOCKED_CONFIG", "POST selected-job AI analysis endpoints", "ai-fit, summarize, interview-questions, and pitch returned HTTP 400 AI config incomplete, expected until an AI provider is configured."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-019", "BLOCKED_CONFIG", "fetch-full + parse/gap/smart-classify", "fetch-full returned HTTP 200 on patched local HTML; parse/gap/smart-classify surfaced AI config errors as expected without provider setup."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-020", "BLOCKED_CONFIG", "POST /api/chat", "Returned HTTP 400 with AI config incomplete; chat UI path requires provider setup before functional AI replies."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-037", "PASS", "External target + HAR configure APIs", "Direct target and HAR-derived target both returned status=configured; fake Authorization/Cookie/resume secrets were masked."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-039", "PASS", "Browser Lab map/dry-run/execute-dry-run", "API smoke returned submit=false for dry-run and execute-dry-run; targeted browser-lab tests passed 3/3 for mapping, executor, and web API no-submit behavior."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-045", "PASS", "Agent run/status/cancel APIs", "agent/run digest returned an operation id, operation-status loaded, and cancelling a seeded running operation returned status=cancelled."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-046", "PASS", "Approval modify/approve/reject/flag APIs", "Four seeded approvals returned statuses modified, approved, rejected, and flagged."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-048", "PASS", "HH API Lab quick/custom/snippet APIs", "Quick calls listed me/resumes/negotiations/vacancies; fake /me call returned status=ok with secrets masked; snippet save/list/delete passed."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-050", "BLOCKED_CONFIG", "POST /api/market-trends", "Endpoint returned HTTP 200 with inline AI config incomplete message; trend generation awaits AI provider setup."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-052", "PASS", "CLI hh-auth-status/account/resumes", "hh-auth-status, hh-account set-token, and hh-resumes --json exited 0; fake token/client_secret were masked."),
+  qa("2026-06-24 API/CLI smoke 3", "WH-US-054", "PASS", "CLI api-recon/external-session/adapter-plan", "api-recon-har, external-session import/list/show, and external-adapter-plan exited 0 with no hits for fake Authorization/Cookie/access_token/resume_id secrets after the redaction fix."),
+  qa("2026-06-24 AI route retest", "WH-US-017", "PASS", "Default-route AI service retest", "Fixed legacy direct/backend gap: ATS audit now uses the configured default AI route when direct API fields are empty; targeted AI/UI tests passed 14/14."),
+  qa("2026-06-24 AI route retest", "WH-US-018", "PASS", "Default-route AI service retest", "ai_fit plus related selected-job AI actions are covered by default-route chat_completion fallback; targeted AI/UI tests passed 14/14."),
+  qa("2026-06-24 AI route retest", "WH-US-019", "PASS", "Default-route AI service retest", "parse_job_structure, gap_analysis, and smart_classify now use the configured default AI route when legacy direct is empty; targeted AI/UI tests passed 14/14."),
+  qa("2026-06-24 AI route retest", "WH-US-020", "PASS", "Default-route AI service retest", "Chat now uses the configured default AI route when legacy direct is empty; targeted AI/UI tests passed 14/14."),
+  qa("2026-06-24 AI route retest", "WH-US-050", "PASS", "Default-route AI service retest", "Market trends now use the configured default AI route when legacy direct is empty; targeted AI/UI tests passed 14/14."),
+  qa("2026-06-24 AI setup UX retest", "WH-US-001", "PASS", "Setup AI route guidance", "Setup now shows the default AI route note, explaining that AI buttons use it when direct API fields are empty; static UI/mojibake tests passed."),
+  qa("2026-06-24 Source Setup final retest", "WH-US-057", "PASS", "Wizard DOM/API/full-suite evidence", "Source Setup Wizard remains accepted on DOM interaction, API whitelist, static UI, and full pytest evidence; screenshot timeout is tracked as a Browser tool limitation, not a product failure."),
+  qa("2026-06-24 targeted pytest", "WH-US-055", "PASS", "MCP surface/safety suites", "pytest tests/test_mcp_surface.py tests/test_mcp_safety.py tests/test_hh_agent_mcp.py plus safety group passed 42 tests."),
+  qa("2026-06-24 targeted pytest", "WH-US-056", "PASS", "Security/redaction/scheduler suites", "pytest tests/test_security_redaction.py tests/test_scheduler.py tests/test_agent_orchestrator.py within the 42-test targeted run passed; repeated Windows pytest-current cleanup warning is external to assertions."),
 ];
 
 const uiViews = parseUiViews(html);
@@ -112,8 +196,10 @@ const serviceSheet = workbook.worksheets.add("Service Methods");
 const cliSheet = workbook.worksheets.add("CLI Commands");
 const testSheet = workbook.worksheets.add("Test Evidence");
 const cssSheet = workbook.worksheets.add("CSS Signals");
+const referenceSheet = workbook.worksheets.add("Reference Baseline");
+const currentQaSheet = workbook.worksheets.add("Current QA Batch");
 
-writeSummary(summary, featureRows, serverRoutes, uiViews, uiControls, serviceMethods, cliCommands, tests, cssSignals);
+writeSummary(summary, featureRows, serverRoutes, uiViews, uiControls, serviceMethods, cliCommands, tests, cssSignals, referenceRows, currentQaRows);
 writeTable(ledger, "FeatureLedgerTable", featureRows, [
   "Feature ID", "Area", "Surface", "User Story", "Expected Behavior", "Code Evidence", "API or Command", "Test Evidence", "Risk", "Status", "Initial Test Result", "Error or Issue", "Fix Status", "Retest Result", "Notes", "Last Updated",
 ]);
@@ -138,6 +224,12 @@ writeTable(testSheet, "TestEvidenceTable", tests, [
 writeTable(cssSheet, "CssSignalsTable", cssSignals, [
   "Kind", "Selector or Token", "Line", "Evidence",
 ]);
+writeTable(referenceSheet, "ReferenceBaselineTable", referenceRows, [
+  "Reference", "URL", "Commit", "Baseline Behavior", "Tracked User Stories", "Notes",
+]);
+writeTable(currentQaSheet, "CurrentQaBatchTable", currentQaRows, [
+  "Batch", "Story", "Result", "Check", "Evidence",
+]);
 
 formatWorkbook(workbook);
 
@@ -151,11 +243,24 @@ const previewRanges = {
   "CLI Commands": "A1:C30",
   "Test Evidence": "A1:D30",
   "CSS Signals": "A1:D25",
+  "Reference Baseline": "A1:F20",
+  "Current QA Batch": "A1:E95",
 };
 
 for (const [sheetName, range] of Object.entries(previewRanges)) {
   const preview = await workbook.render({ sheetName, range, scale: 1, format: "png" });
-  await fs.writeFile(path.join(outputDir, `${sheetName.replaceAll(" ", "_").toLowerCase()}.png`), new Uint8Array(await preview.arrayBuffer()));
+  const previewPath = path.join(outputDir, `${sheetName.replaceAll(" ", "_").toLowerCase()}.png`);
+  try {
+    await fs.writeFile(previewPath, new Uint8Array(await preview.arrayBuffer()));
+  } catch (err) {
+    console.warn(JSON.stringify({
+      kind: "warning",
+      message: "Preview image write skipped; file may be open in another app.",
+      sheetName,
+      path: previewPath,
+      error: String(err?.message || err),
+    }));
+  }
 }
 
 const formulaErrors = await workbook.inspect({
@@ -188,6 +293,27 @@ function story(id, area, surface, userStory, expected, code, api, tests, risk) {
     "Retest Result": "",
     Notes: "",
     "Last Updated": today,
+  };
+}
+
+function reference(name, url, commit, baseline, stories, notes) {
+  return {
+    Reference: name,
+    URL: url,
+    Commit: commit,
+    "Baseline Behavior": baseline,
+    "Tracked User Stories": stories,
+    Notes: notes,
+  };
+}
+
+function qa(batch, story, result, check, evidence) {
+  return {
+    Batch: batch,
+    Story: story,
+    Result: result,
+    Check: check,
+    Evidence: evidence,
   };
 }
 
@@ -423,7 +549,7 @@ function pick(row, keys) {
   return Object.fromEntries(keys.map((key) => [key, row[key] ?? ""]));
 }
 
-function writeSummary(sheet, rows, routes, views, controls, methods, commands, tests, cssRows) {
+function writeSummary(sheet, rows, routes, views, controls, methods, commands, tests, cssRows, references, currentQa) {
   sheet.getRange("A1:H1").values = [["Work Hunter Feature QA Ledger", "", "", "", "", "", "", ""]];
   sheet.getRange("A2:H2").values = [[`Generated ${today}`, "", "", "", "", "", "", ""]];
   const metrics = [
@@ -435,8 +561,10 @@ function writeSummary(sheet, rows, routes, views, controls, methods, commands, t
     ["CLI parser entries", commands.length],
     ["Test functions", tests.length],
     ["CSS/responsive signals", cssRows.length],
+    ["Reference baselines", references.length],
+    ["Current QA checks", currentQa.length],
   ];
-  sheet.getRange("A4:B11").values = metrics;
+  sheet.getRange("A4:B13").values = metrics;
   const byStatus = countBy(rows, "Status");
   const statusRows = Object.entries(byStatus).map(([status, count]) => [status, count]);
   sheet.getRangeByIndexes(3, 3, 1, 2).values = [["Status", "Count"]];
@@ -540,7 +668,7 @@ function formatWorkbook(workbook) {
   summary.getRange("A15:H18").merge(true);
   summary.getRange("A1").format = { fill: "#0F766E", font: { bold: true, color: "#FFFFFF", size: 16 } };
   summary.getRange("A2").format = { fill: "#CCFBF1", font: { color: "#134E4A" } };
-  summary.getRange("A4:B11").format.borders = { preset: "outside", style: "thin", color: "#CBD5E1" };
+  summary.getRange("A4:B13").format.borders = { preset: "outside", style: "thin", color: "#CBD5E1" };
   summary.getRange("D4:E20").format.borders = { preset: "outside", style: "thin", color: "#CBD5E1" };
   summary.getRange("G4:H20").format.borders = { preset: "outside", style: "thin", color: "#CBD5E1" };
   summary.getRange("A14").format = { fill: "#111827", font: { bold: true, color: "#FFFFFF" } };
@@ -549,4 +677,22 @@ function formatWorkbook(workbook) {
   summary.getRange("B:B").format.columnWidthPx = 90;
   summary.getRange("D:D").format.columnWidthPx = 240;
   summary.getRange("G:G").format.columnWidthPx = 120;
+
+  const referenceSheet = workbook.worksheets.getItem("Reference Baseline");
+  referenceSheet.getRange("A:A").format.columnWidthPx = 180;
+  referenceSheet.getRange("B:B").format.columnWidthPx = 290;
+  referenceSheet.getRange("C:C").format.columnWidthPx = 290;
+  referenceSheet.getRange("D:D").format.columnWidthPx = 520;
+  referenceSheet.getRange("E:F").format.columnWidthPx = 360;
+  referenceSheet.getUsedRange().format.autofitRows();
+
+  const currentQaSheet = workbook.worksheets.getItem("Current QA Batch");
+  currentQaSheet.getRange("A:A").format.columnWidthPx = 170;
+  currentQaSheet.getRange("B:C").format.columnWidthPx = 120;
+  currentQaSheet.getRange("D:D").format.columnWidthPx = 300;
+  currentQaSheet.getRange("E:E").format.columnWidthPx = 520;
+  currentQaSheet.getRange("C2:C300").conditionalFormats.add("containsText", { text: "PASS", format: { fill: "#DCFCE7", font: { color: "#166534" } } });
+  currentQaSheet.getRange("C2:C300").conditionalFormats.add("containsText", { text: "BLOCKED", format: { fill: "#FEF3C7", font: { color: "#92400E" } } });
+  currentQaSheet.getRange("C2:C300").conditionalFormats.add("containsText", { text: "FAIL", format: { fill: "#FEE2E2", font: { color: "#991B1B" } } });
+  currentQaSheet.getUsedRange().format.autofitRows();
 }

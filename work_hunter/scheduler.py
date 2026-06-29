@@ -14,6 +14,9 @@ SAFE_TASKS = {
     "score",
     "hh-refresh-token",
     "hh-update-resumes",
+    "hh-web-touch-resume",
+    "hh-chats-scan",
+    "hh-chats-auto-reply",
     "hh-campaign-plan",
 }
 
@@ -128,6 +131,28 @@ class SafeTaskRunner:
                     }
                 else:
                     result = self.app.update_hh_resumes()
+            elif task_name == "hh-web-touch-resume":
+                if not _explicit_real(task):
+                    result = {
+                        "status": "planned",
+                        "message": "Scheduled hh-web-touch-resume requires confirm=true or real=true.",
+                        "requires_confirmation": True,
+                    }
+                else:
+                    result = self.app.touch_hh_resume_web(
+                        resume_hash=task.get("resume_hash") or task.get("resume-hash"),
+                        confirm=True,
+                    )
+            elif task_name == "hh-chats-scan":
+                result = self.app.scan_hh_chats_web(
+                    max_pages=int(task.get("max_pages") or task.get("max-pages") or 10)
+                )
+            elif task_name == "hh-chats-auto-reply":
+                result = self.app.auto_reply_hh_chats_web(
+                    max_pages=int(task.get("max_pages") or task.get("max-pages") or 10),
+                    template=str(task.get("template") or ""),
+                    confirm=_explicit_real(task),
+                )
             elif task_name == "hh-campaign-plan":
                 result = self.app.plan_hh_campaign(
                     limit=int(task.get("limit") or 100),
@@ -186,6 +211,35 @@ def load_task_plan(path: str | Path) -> list[dict[str, Any]]:
     if isinstance(data, dict) and isinstance(data.get("tasks"), list):
         return data["tasks"]
     raise ValueError("Runner plan must be a JSON list or an object with a tasks list.")
+
+
+def build_hh_daemon_profile() -> dict[str, Any]:
+    return {
+        "status": "ready",
+        "cycles": [
+            {
+                "task": "hh-web-touch-resume",
+                "interval_seconds": 4 * 60 * 60,
+                "mutates": True,
+                "confirm_required": True,
+                "description": "Touch the active HH resume through the authenticated web session.",
+            },
+            {
+                "task": "hh-campaign-plan",
+                "interval_seconds": 24 * 60 * 60,
+                "mutates": False,
+                "confirm_required": False,
+                "description": "Plan the next HH campaign batch without sending applications.",
+            },
+            {
+                "task": "hh-chats-auto-reply",
+                "interval_seconds": 15 * 60,
+                "mutates": True,
+                "confirm_required": True,
+                "description": "Plan or send HH chat replies through chatik.hh.ru.",
+            },
+        ],
+    }
 
 
 def _now() -> str:

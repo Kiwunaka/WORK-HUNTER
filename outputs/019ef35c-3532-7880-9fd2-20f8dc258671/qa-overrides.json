@@ -115,31 +115,31 @@
   },
   "WH-US-017": {
     "Status": "Passed automated",
-    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
-    "Retest Result": "PASS: full pytest retest passed after fix.",
-    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
-    "Last Updated": "2026-06-23"
+    "Initial Test Result": "PASS: historical full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: AI default-route retest and full pytest passed after fixing legacy direct/backend gap.",
+    "Notes": "2026-06-24 fix: real AI user actions now use config.ai.default_route when legacy direct API fields are empty. Targeted AI/UI tests passed 22/22; full pytest -q -> 481 passed in 129.14s. Pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-24"
   },
   "WH-US-018": {
     "Status": "Passed automated",
-    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
-    "Retest Result": "PASS: full pytest retest passed after fix.",
-    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
-    "Last Updated": "2026-06-23"
+    "Initial Test Result": "PASS: historical full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: AI default-route retest and full pytest passed after fixing legacy direct/backend gap.",
+    "Notes": "2026-06-24 fix: selected-job AI analysis now uses config.ai.default_route when legacy direct API fields are empty. Targeted AI/UI tests passed 22/22; full pytest -q -> 481 passed in 129.14s. Pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-24"
   },
   "WH-US-019": {
     "Status": "Passed automated",
-    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
-    "Retest Result": "PASS: full pytest retest passed after fix.",
-    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
-    "Last Updated": "2026-06-23"
+    "Initial Test Result": "PASS: historical full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: AI default-route retest and full pytest passed after fixing legacy direct/backend gap.",
+    "Notes": "2026-06-24 fix: parse/gap/smart-classify actions now use config.ai.default_route when legacy direct API fields are empty. Targeted AI/UI tests passed 22/22; full pytest -q -> 481 passed in 129.14s. Pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-24"
   },
   "WH-US-020": {
     "Status": "Passed automated",
-    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
-    "Retest Result": "PASS: full pytest retest passed after fix.",
-    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
-    "Last Updated": "2026-06-23"
+    "Initial Test Result": "PASS: historical full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: AI default-route retest and full pytest passed after fixing legacy direct/backend gap.",
+    "Notes": "2026-06-24 fix: chat now uses config.ai.default_route when legacy direct API fields are empty. Targeted AI/UI tests passed 22/22; full pytest -q -> 481 passed in 129.14s. Pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-24"
   },
   "WH-US-021": {
     "Status": "Passed rendered QA",
@@ -346,10 +346,10 @@
   },
   "WH-US-050": {
     "Status": "Passed rendered QA",
-    "Initial Test Result": "PASS: full pytest suite passed after fix (452 passed in 125.66s).",
-    "Retest Result": "PASS: full pytest retest passed after fix.",
-    "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. Rendered QA also verified the corresponding sidebar view activates without global UI errors or console warnings.",
-    "Last Updated": "2026-06-23"
+    "Initial Test Result": "PASS: historical full pytest suite passed after fix (452 passed in 125.66s).",
+    "Retest Result": "PASS: AI default-route retest and full pytest passed after fixing legacy direct/backend gap.",
+    "Notes": "2026-06-24 fix: market trends now uses config.ai.default_route when legacy direct API fields are empty. Targeted AI/UI tests passed 22/22; full pytest -q -> 481 passed in 129.14s. Pytest emitted an ignored Windows temp cleanup PermissionError after completion.",
+    "Last Updated": "2026-06-24"
   },
   "WH-US-051": {
     "Status": "Passed automated",
@@ -392,5 +392,12 @@
     "Retest Result": "PASS: full pytest retest passed after fix.",
     "Notes": "Automated contract passed after fix: python -m pytest -q -> 452 passed in 125.66s. Pre-fix baseline also passed 451 tests; pytest emitted an ignored Windows temp cleanup PermissionError after completion. The ignored pytest cleanup PermissionError is an environment temp-dir cleanup warning after successful test completion, not an app redaction/storage failure.",
     "Last Updated": "2026-06-23"
+  },
+  "WH-US-057": {
+    "Status": "Passed rendered QA",
+    "Initial Test Result": "PASS: service/API/static tests plus browser smoke verified the beginner Source Setup Wizard flow.",
+    "Retest Result": "PASS: full pytest retest passed after simplicity and AI-route fixes (481 passed in 129.14s); Browser DOM retest confirmed HH.ru default, hidden HAR/L5 controls, compact collapsed log, CTA 'Проверить вход в HH', safe preflight with отправки нет, and clean console.",
+    "Notes": "Targeted tests: node --check work_hunter/web/static/app.js; pytest tests/test_source_setup_wizard.py tests/test_static_ui_roadmap.py -q -> 37 passed; pytest tests/test_browser_session_lab.py tests/test_source_adapter_registry.py tests/test_source_setup_wizard.py tests/test_static_ui_roadmap.py -q -> 80 passed. Current-cycle automated retest: pytest -q -> 481 passed in 129.14s. Browser QA at http://127.0.0.1:8796 verified the simplified Source Setup modal and safe HH check. Browser screenshot capture still hit CDP Page.captureScreenshot timeout, so visual evidence is DOM/interaction/console rather than screenshot.",
+    "Last Updated": "2026-06-24"
   }
 }

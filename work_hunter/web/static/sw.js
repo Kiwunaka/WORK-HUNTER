@@ -1,4 +1,4 @@
-const CACHE_NAME = "work-hunter-v3";
+const CACHE_NAME = "work-hunter-v8";
 const STATIC_ASSETS = ["/", "/app.js", "/app.css", "/manifest.json"];
 
 self.addEventListener("install", (event) => {

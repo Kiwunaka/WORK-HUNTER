@@ -22,6 +22,7 @@ from .config import (
     active_hh_config,
     active_profile,
     config_path,
+    data_dir,
     database_path,
     default_config,
     load_config,
@@ -110,6 +111,7 @@ from .sources.registry import EXTERNAL_APPLY_EVIDENCE_REQUIREMENTS, source_statu
 from .sources.hh import HHApplyClient
 from .sources.common import clean_text, fetch_url
 from .storage import Storage
+from .hh_transport import HHWebSessionClient
 
 
 def _format_experience(about: dict[str, Any]) -> str:
@@ -764,6 +766,90 @@ def _source_certification_action(source: str, requirement: str) -> dict[str, Any
     }
 
 
+SOURCE_SETUP_SAFE_ACTIONS = {
+    "preflight",
+    "source_status",
+    "source_sync",
+    "source_test",
+    "browser_login_plan",
+    "har_import",
+    "redaction_scan",
+    "dry_run",
+    "certification_audit",
+    "certify",
+}
+
+
+def _source_setup_name(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_") or "hh"
+
+
+def _source_setup_action_name(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _source_setup_lane(source: str) -> str:
+    source_name = _source_setup_name(source)
+    if source_name == "hh":
+        return "hh"
+    if source_name in EXTERNAL_APPLY_CERTIFICATION_SOURCE_NAMES:
+        return "certifiable_external"
+    return "manual_or_search_only"
+
+
+def _source_setup_step(
+    step_id: str,
+    title: str,
+    body: str,
+    *,
+    status: str,
+    action: str = "",
+) -> dict[str, str]:
+    return {
+        "id": step_id,
+        "title": title,
+        "body": body,
+        "status": status,
+        "action": action,
+    }
+
+
+def _source_setup_next_action(
+    action: str,
+    label: str,
+    description: str,
+    *,
+    safe: bool = True,
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "label": label,
+        "description": description,
+        "safe": safe,
+    }
+
+
+def _source_setup_evidence_ready(evidence: dict[str, Any], key: str) -> bool:
+    value = evidence.get(key) or {}
+    return _certification_evidence_present(value)
+
+
+def _source_setup_hosts(payload: dict[str, Any]) -> set[str] | None:
+    raw_hosts = payload.get("allowed_hosts")
+    if raw_hosts is None:
+        raw_hosts = payload.get("hosts")
+    if raw_hosts is None:
+        raw_hosts = payload.get("host")
+    if isinstance(raw_hosts, str):
+        items = raw_hosts.split(",")
+    elif isinstance(raw_hosts, (list, tuple, set)):
+        items = list(raw_hosts)
+    else:
+        items = []
+    hosts = {str(item).strip().lower() for item in items if str(item).strip()}
+    return hosts or None
+
+
 def _latest_event_matching(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:
     for event in reversed(events):
         if event.get("event_type") == event_type:
@@ -985,6 +1071,26 @@ def _negotiation_reply_context(payload: dict[str, Any]) -> dict[str, str]:
 
 def _format_reply_template(template: str, context: dict[str, str]) -> str:
     return template.format_map(_SafeFormatDict(context)).strip()
+
+
+def _hh_chatik_reply_action(chat: dict[str, Any], *, template: str = "") -> dict[str, Any]:
+    context = {
+        "chat_id": str(chat.get("chat_id") or ""),
+        "vacancy_id": str(chat.get("vacancy_id") or ""),
+        "vacancy_name": str(chat.get("vacancy_name") or ""),
+        "employer_name": str(chat.get("employer_name") or ""),
+        "last_message": str(chat.get("reply_to_message") or ""),
+    }
+    if chat.get("is_discard"):
+        return {**context, "action": "leave", "message": ""}
+    options = [str(option).strip() for option in chat.get("reply_options") or [] if str(option).strip()]
+    if options:
+        message = options[0]
+    elif template.strip():
+        message = _format_reply_template(template, context)
+    else:
+        message = "Здравствуйте! Спасибо за сообщение. Готов обсудить детали."
+    return {**context, "action": "send", "message": message, "reply_options": options}
 
 
 def _hh_apply_error_outcome(result: dict[str, Any]) -> str:
@@ -1791,6 +1897,350 @@ class WorkHunter:
             **matrix,
             "sources": planned_sources,
             "matrix": matrix,
+        }
+
+    def source_setup_guide(self, source: str = "hh", *, level: int = 5) -> dict[str, Any]:
+        source_name = _source_setup_name(source)
+        lane = _source_setup_lane(source_name)
+        if lane == "hh":
+            return mask_secrets(self._source_setup_hh_guide(source_name))
+        if lane == "certifiable_external":
+            return mask_secrets(self._source_setup_external_guide(source_name, level=level))
+        return mask_secrets(self._source_setup_manual_guide(source_name))
+
+    def source_setup_action(
+        self,
+        action: str,
+        *,
+        source: str = "hh",
+        level: int = 5,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        action_name = _source_setup_action_name(action)
+        source_name = _source_setup_name(source)
+        if action_name not in SOURCE_SETUP_SAFE_ACTIONS:
+            return mask_secrets(
+                {
+                    "status": "blocked",
+                    "reason": "unsupported_source_setup_action",
+                    "source": source_name,
+                    "action": action_name,
+                    "submit": False,
+                    "allowed_actions": sorted(SOURCE_SETUP_SAFE_ACTIONS),
+                }
+            )
+
+        if action_name == "preflight":
+            result = self.hh_agent_preflight(live_auth=bool(payload.get("live_auth", False)))
+        elif action_name == "source_status":
+            report = self.source_capabilities()
+            result = {"status": "ok", "source": source_name, "capabilities": report.get(source_name) or {}}
+        elif action_name == "source_sync":
+            result = self.sync_sources(
+                sources=[source_name],
+                limit=None if payload.get("limit") in (None, "") else int(payload.get("limit")),
+            )
+        elif action_name == "source_test":
+            report = self.source_capabilities()
+            result = {"status": "ok", "source": source_name, "capabilities": report.get(source_name) or {}}
+        elif action_name == "browser_login_plan":
+            result = self.browser_lab_open_login(source_name, login_url=str(payload.get("login_url") or ""))
+        elif action_name == "har_import":
+            hosts = _source_setup_hosts(payload)
+            result = self.configure_source_external_apply_from_har(
+                source_name,
+                Path(str(payload.get("path") or payload.get("har_path") or "")),
+                allowed_hosts=hosts,
+                level=level,
+            )
+        elif action_name == "redaction_scan":
+            raw_payload = payload.get("payload")
+            result = self.record_source_redaction_scan(
+                source_name,
+                payload=raw_payload if isinstance(raw_payload, dict) else {},
+                text=str(payload.get("text") or ""),
+                level=level,
+            )
+        elif action_name == "dry_run":
+            raw_form = payload.get("form")
+            raw_persona = payload.get("persona")
+            raw_resume = payload.get("resume")
+            raw_vacancy = payload.get("vacancy")
+            raw_extra_answers = payload.get("extra_answers")
+            result = self.browser_lab_execute_dry_run_form_fill(
+                raw_form if isinstance(raw_form, dict) else {},
+                source=source_name,
+                persona=raw_persona if isinstance(raw_persona, dict) else {},
+                resume=raw_resume if isinstance(raw_resume, dict) else {},
+                vacancy=raw_vacancy if isinstance(raw_vacancy, dict) else {},
+                extra_answers=raw_extra_answers if isinstance(raw_extra_answers, dict) else {},
+                headless=bool(payload.get("headless", True)),
+                timeout_ms=int(payload.get("timeout_ms") or 15000),
+            )
+        elif action_name == "certification_audit":
+            result = self.source_certification_audit(source_name, level=level)
+        else:
+            result = self.promote_source_certification(source_name, level=level)
+
+        result_status = str(result.get("status") or "ok") if isinstance(result, dict) else "ok"
+        wrapper_status = "blocked" if result_status == "blocked" else "ok"
+        return mask_secrets(
+            {
+                "status": wrapper_status,
+                "action": action_name,
+                "source": source_name,
+                "result": result,
+                "guide": self.source_setup_guide(source_name, level=level),
+                "submit": False,
+            }
+        )
+
+    def _source_setup_hh_guide(self, source_name: str) -> dict[str, Any]:
+        preflight = self.hh_agent_preflight(live_auth=False)
+        auth = preflight.get("auth") or {}
+        actions = list(preflight.get("actions") or [])
+        has_auth = bool(auth.get("authorized"))
+        has_resumes = bool(self.storage.list_hh_resumes())
+        ready = has_auth and has_resumes and not actions
+        steps = [
+            _source_setup_step(
+                "auth",
+                "Вход в HH",
+                "Мастер проверит, есть ли локальный доступ к HH. Токены и cookies не печатаются.",
+                status="ready" if has_auth else "blocked",
+                action="preflight",
+            ),
+            _source_setup_step(
+                "resumes",
+                "Резюме HH",
+                "Для отклика нужно выбрать резюме из аккаунта HH.",
+                status="ready" if has_resumes else "blocked",
+                action="preflight",
+            ),
+            _source_setup_step(
+                "preflight",
+                "Безопасная проверка",
+                "Проверяются вход, резюме, лимиты и очередь согласований. Отправки нет.",
+                status="ready" if ready else "blocked",
+                action="preflight",
+            ),
+            _source_setup_step(
+                "confirm_flow",
+                "Подтверждение отклика",
+                "Реальная отправка останется только через существующий экран подтверждения.",
+                status="ready" if ready else "pending",
+            ),
+        ]
+        next_action = (
+            _source_setup_next_action(
+                "source_status",
+                "Открыть статус HH",
+                "HH готов. Можно перейти к вакансии и собрать план отклика перед подтверждением.",
+            )
+            if ready
+            else _source_setup_next_action(
+                "preflight",
+                "Проверить вход и резюме",
+                "Нажми кнопку: я проверю HH и скажу, чего не хватает. Отклик не отправляется.",
+            )
+        )
+        return {
+            "source": source_name,
+            "lane": "hh",
+            "goal_status": "ready" if ready else "blocked",
+            "steps": steps,
+            "next_action": next_action,
+            "available_actions": ["preflight", "source_status", "source_sync", "source_test", "browser_login_plan"],
+            "diagnostics": {
+                "preflight": preflight,
+                "readiness": self.source_capabilities().get(source_name) or {},
+            },
+            "can_certify": False,
+        }
+
+    def _source_setup_external_guide(self, source_name: str, *, level: int = 5) -> dict[str, Any]:
+        audit = self.source_certification_audit(source_name, level=level)
+        missing = set(audit.get("missing") or [])
+        evidence = dict(audit.get("evidence") or {})
+        readiness = self.source_capabilities().get(source_name) or {}
+        can_real_apply = bool(readiness.get("can_real_apply"))
+        audit_ready = bool(audit.get("ready"))
+        can_certify = audit_ready and not can_real_apply
+        if can_real_apply:
+            goal_status = "ready"
+        elif can_certify:
+            goal_status = "ready_to_certify"
+        else:
+            goal_status = "blocked"
+        steps = [
+            _source_setup_step(
+                "session",
+                "HAR-файл",
+                "Для не-HH площадки укажи HAR из своего браузера. Cookies останутся замаскированы.",
+                status="blocked" if "session" in missing else "ready",
+                action="har_import",
+            ),
+            _source_setup_step(
+                "target",
+                "Цель отклика",
+                "Мастер найдёт endpoint отклика в HAR и сохранит URL/payload без секретов.",
+                status="blocked" if "url" in missing else "ready",
+                action="har_import",
+            ),
+            _source_setup_step(
+                "redaction",
+                "Скан секретов",
+                "Проверяем, что payload, headers и текстовые образцы маскируют токены/cookies.",
+                status="ready" if _source_setup_evidence_ready(evidence, "redaction") else "blocked",
+                action="redaction_scan",
+            ),
+            _source_setup_step(
+                "dry_run",
+                "Dry-run формы",
+                "Заполнение проходит без отправки; результат попадёт в replay evidence.",
+                status="ready" if _source_setup_evidence_ready(evidence, "dry_run") else "blocked",
+                action="dry_run",
+            ),
+            _source_setup_step(
+                "replay",
+                "Replay evidence",
+                "Нужна запись безопасного dry-run, чтобы было видно, что отправки не было.",
+                status="ready" if _source_setup_evidence_ready(evidence, "replay") else "blocked",
+                action="certification_audit",
+            ),
+            _source_setup_step(
+                "tests",
+                "Тесты безопасности",
+                "Pytest-команда показывается как подсказка; UI не запускает произвольный shell.",
+                status="ready" if _source_setup_evidence_ready(evidence, "tests") else "blocked",
+                action="certification_audit",
+            ),
+            _source_setup_step(
+                "certify",
+                "Сертификация",
+                "Когда evidence полный, отдельная кнопка повысит источник до L5/L6.",
+                status="ready" if can_real_apply else "pending" if can_certify else "blocked",
+                action="certify" if can_certify else "",
+            ),
+        ]
+        available_actions = [
+            "source_status",
+            "source_sync",
+            "source_test",
+            "browser_login_plan",
+            "har_import",
+            "redaction_scan",
+            "dry_run",
+            "certification_audit",
+        ]
+        if can_certify:
+            available_actions.append("certify")
+        return {
+            "source": source_name,
+            "lane": "certifiable_external",
+            "goal_status": goal_status,
+            "steps": steps,
+            "next_action": self._source_setup_external_next_action(missing, can_certify, can_real_apply),
+            "available_actions": available_actions,
+            "diagnostics": {
+                "audit": audit,
+                "readiness": readiness,
+                "browser_lab": self.browser_lab_status(source_name),
+                "test_command": _source_certification_action(source_name, "tests")["command"],
+            },
+            "can_certify": can_certify,
+        }
+
+    def _source_setup_external_next_action(
+        self,
+        missing: set[str],
+        can_certify: bool,
+        can_real_apply: bool,
+    ) -> dict[str, Any]:
+        if can_real_apply:
+            return _source_setup_next_action(
+                "source_status",
+                "Источник готов",
+                "Можно использовать существующий экран подтверждения реального отклика.",
+            )
+        if "session" in missing or "url" in missing:
+            return _source_setup_next_action(
+                "har_import",
+                "Подключить HAR-файл",
+                "Открой технические настройки, укажи путь к HAR и домен площадки. Секреты будут замаскированы.",
+            )
+        if "redaction" in missing:
+            return _source_setup_next_action(
+                "redaction_scan",
+                "Проверить маскирование",
+                "Вставь безопасный payload/text sample; результат сохранится как redaction evidence.",
+            )
+        if "dry_run" in missing or "replay" in missing:
+            return _source_setup_next_action(
+                "dry_run",
+                "Запустить dry-run",
+                "Проверь форму без отправки. Успешный прогон даст dry-run и replay evidence.",
+            )
+        if "tests" in missing:
+            return _source_setup_next_action(
+                "certification_audit",
+                "Проверить audit",
+                "UI покажет pytest-команду для evidence; shell-команды отсюда не запускаются.",
+            )
+        if can_certify:
+            return _source_setup_next_action(
+                "certify",
+                "Сертифицировать источник",
+                "Evidence полный. Нажми отдельно, чтобы повысить источник до real-apply уровня.",
+            )
+        return _source_setup_next_action(
+            "certification_audit",
+            "Обновить audit",
+            "Пересоберу матрицу готовности и покажу следующий безопасный шаг.",
+        )
+
+    def _source_setup_manual_guide(self, source_name: str) -> dict[str, Any]:
+        readiness = self.source_capabilities().get(source_name) or {}
+        can_sync = bool(readiness.get("can_search", True))
+        steps = [
+            _source_setup_step(
+                "status",
+                "Статус источника",
+                "Проверяем адаптер и возможности поиска.",
+                status="ready" if readiness else "pending",
+                action="source_status",
+            ),
+            _source_setup_step(
+                "sync",
+                "Поиск вакансий",
+                "Можно синхронизировать вакансии и вести отклик вручную.",
+                status="ready" if can_sync else "blocked",
+                action="source_sync",
+            ),
+            _source_setup_step(
+                "handoff",
+                "Ручной handoff",
+                "Для этого источника мастер не обещает real auto-apply.",
+                status="ready",
+            ),
+        ]
+        next_action = _source_setup_next_action(
+            "source_sync" if can_sync else "source_status",
+            "Синхронизировать" if can_sync else "Проверить статус",
+            "Этот источник доступен для поиска или ручного отклика; real auto-apply не включается.",
+        )
+        return {
+            "source": source_name,
+            "lane": "manual_or_search_only",
+            "goal_status": "manual_handoff",
+            "steps": steps,
+            "next_action": next_action,
+            "available_actions": ["source_status", "source_sync", "source_test"],
+            "diagnostics": {
+                "readiness": readiness,
+                "note": "Manual handoff only: no real auto-apply promise for this source.",
+            },
+            "can_certify": False,
         }
 
     def record_source_certification_evidence(
@@ -3234,6 +3684,12 @@ class WorkHunter:
     def hh_config(self) -> dict[str, Any]:
         return active_hh_config(self.config)
 
+    def _hh_web_client(self) -> HHWebSessionClient:
+        hh_config = dict(self.hh_config())
+        if not str(hh_config.get("hh_cookie_file") or "").strip():
+            hh_config["hh_cookie_file"] = str(data_dir(self.root) / "hh_cookies.json")
+        return HHWebSessionClient(hh_config)
+
     def list_hh_account_profiles(self) -> dict[str, Any]:
         accounts = self.config.get("hh_account_profiles") or {}
         items: list[dict[str, Any]] = []
@@ -4109,6 +4565,98 @@ class WorkHunter:
             client.update_resume(resume.id)
             updated.append(resume.id)
         return {"status": "ok", "count": len(updated), "updated": updated}
+
+    def touch_hh_resume_web(self, *, resume_hash: str | None = None, confirm: bool = False) -> dict[str, Any]:
+        hh_config = self.hh_config()
+        resolved_hash = str(resume_hash or hh_config.get("resume_hash") or "").strip()
+        if not resolved_hash:
+            return {
+                "status": "blocked",
+                "reason": "resume_hash_required",
+                "message": "HH web resume touch requires a resume hash.",
+            }
+        if not confirm:
+            return {
+                "status": "planned",
+                "resume_hash": resolved_hash,
+                "requires_confirmation": True,
+                "message": "Explicit confirm=True is required before touching the HH resume.",
+            }
+        client = self._hh_web_client()
+        if not client.has_session():
+            return {"status": "blocked", "reason": "hh_web_session_missing", "message": "HH cookies/XSRF are required."}
+        return client.touch_resume(resolved_hash)
+
+    def scan_hh_chats_web(self, *, max_pages: int = 10) -> dict[str, Any]:
+        hh_config = self.hh_config()
+        client = self._hh_web_client()
+        if not client.has_session():
+            return {"status": "blocked", "count": 0, "reason": "hh_web_session_missing"}
+        chats = client.chats_awaiting_reply(
+            resume_id=str(hh_config.get("resume_id") or hh_config.get("resume") or ""),
+            applicant_user_id=str(hh_config.get("applicant_user_id") or hh_config.get("user_id") or ""),
+            max_pages=max_pages,
+        )
+        return {"status": "ok", "count": len(chats), "chats": chats}
+
+    def auto_reply_hh_chats_web(
+        self,
+        *,
+        max_pages: int = 10,
+        template: str = "",
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        hh_config = self.hh_config()
+        client = self._hh_web_client()
+        if not client.has_session():
+            return {"status": "blocked", "count": 0, "reason": "hh_web_session_missing"}
+        chats = client.chats_awaiting_reply(
+            resume_id=str(hh_config.get("resume_id") or hh_config.get("resume") or ""),
+            applicant_user_id=str(hh_config.get("applicant_user_id") or hh_config.get("user_id") or ""),
+            max_pages=max_pages,
+        )
+        replies = [_hh_chatik_reply_action(chat, template=template) for chat in chats]
+        if not confirm:
+            return {
+                "status": "planned",
+                "count": len(replies),
+                "replies": replies,
+                "requires_confirmation": True,
+                "message": "Explicit confirm=True is required before sending HH chat replies.",
+            }
+        sent: list[dict[str, Any]] = []
+        left: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for reply in replies:
+            chat_id = str(reply.get("chat_id") or "")
+            try:
+                if reply.get("action") == "leave":
+                    left.append({**reply, "result": client.leave_chat(chat_id)})
+                else:
+                    sent.append({**reply, "result": client.send_chat_message(chat_id, str(reply.get("message") or ""))})
+            except Exception as exc:
+                errors.append({**reply, "error": str(exc)})
+        return {
+            "status": "sent" if not errors else "partial",
+            "count": len(sent) + len(left),
+            "sent": sent,
+            "left": left,
+            "errors": errors,
+        }
+
+    def extract_hh_vacancy_tests_web(self, vacancy_id: str) -> dict[str, Any]:
+        client = self._hh_web_client()
+        if not client.has_session():
+            return {"status": "blocked", "vacancy_id": vacancy_id, "count": 0, "reason": "hh_web_session_missing"}
+        tests = client.get_vacancy_tests(vacancy_id)
+        selected = tests.get(str(vacancy_id)) if isinstance(tests, dict) else None
+        tasks = list((selected or {}).get("tasks") or []) if isinstance(selected, dict) else []
+        return {
+            "status": "ready" if tests else "empty",
+            "vacancy_id": str(vacancy_id),
+            "count": len(tasks),
+            "tests": tests,
+        }
 
     def create_hh_resume(
         self,

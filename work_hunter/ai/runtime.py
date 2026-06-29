@@ -48,9 +48,37 @@ def chat_completion(
     ai_config: dict[str, Any],
 ) -> str:
     backend = str(ai_config.get("backend") or "direct").lower()
+    route_config = _completion_route_from_config(ai_config, backend=backend)
+    if route_config is not None:
+        return _route_completion(route_config, messages)
     if backend == "opencode":
         return _opencode_completion(messages, ai_config)
+    if backend in {"codex", "codex_cli"}:
+        return _codex_cli_completion(messages, _codex_route_from_config(ai_config))
+    if backend in {"codex_server", "codex_sdk"}:
+        return _codex_sdk_completion(messages, _codex_server_route_from_config(ai_config))
     return _direct_completion(messages, ai_config)
+
+
+def _codex_route_from_config(ai_config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "adapter": "codex_cli",
+        "command": ai_config.get("codex_command") or "codex",
+        "model": ai_config.get("codex_model") or "",
+        "reasoning": ai_config.get("codex_reasoning") or "",
+        "timeout": ai_config.get("codex_timeout", ai_config.get("opencode_timeout", 300)),
+    }
+
+
+def _codex_server_route_from_config(ai_config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "adapter": "codex_sdk",
+        "enabled": True,
+        "command": ai_config.get("codex_command") or "codex",
+        "base_url": ai_config.get("codex_server_url") or "",
+        "model": ai_config.get("codex_model") or "",
+        "timeout": ai_config.get("codex_timeout", ai_config.get("opencode_timeout", 300)),
+    }
 
 
 def ai_status(ai_config: dict[str, Any]) -> dict[str, Any]:
@@ -179,7 +207,42 @@ def route_ready(route_config: dict[str, Any]) -> bool:
 
 def backend_requires_api_key(ai_config: dict[str, Any]) -> bool:
     backend = str(ai_config.get("backend") or "direct").lower()
-    return backend not in {"opencode", "codex_cli", "codex_sdk", "opencode_cli", "opencode_server"}
+    if backend == "direct" and _completion_route_from_config(ai_config, backend=backend) is not None:
+        return False
+    return backend not in {
+        "opencode",
+        "codex",
+        "codex_server",
+        "codex_cli",
+        "codex_sdk",
+        "opencode_cli",
+        "opencode_server",
+    }
+
+
+def _completion_route_from_config(ai_config: dict[str, Any], *, backend: str) -> dict[str, Any] | None:
+    if backend != "direct" or _direct_config_complete(ai_config):
+        return None
+    configured_routes = ai_config.get("routes")
+    if not isinstance(configured_routes, dict) or not configured_routes:
+        return None
+    route_name = str(ai_config.get("default_route") or "smart")
+    routes = _runtime_routes(ai_config)
+    route_config = routes.get(route_name)
+    if not isinstance(route_config, dict):
+        return None
+    adapter = str(route_config.get("adapter") or "").lower()
+    if adapter in EXTERNAL_AUTH_ADAPTERS or route_ready(route_config):
+        return dict(route_config)
+    return None
+
+
+def _direct_config_complete(ai_config: dict[str, Any]) -> bool:
+    return bool(
+        ai_config.get("api_key")
+        and ai_config.get("base_url")
+        and ai_config.get("model")
+    )
 
 
 def runtime_routes(ai_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -203,6 +266,16 @@ def _runtime_routes(ai_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "auth": "external_runtime",
             }
         }
+    if backend in {"codex", "codex_cli"}:
+        route = _codex_route_from_config(ai_config)
+        route["auth"] = "external_runtime"
+        route["purpose"] = "Codex CLI (вход по подписке)"
+        return {"smart": route}
+    if backend in {"codex_server", "codex_sdk"}:
+        route = _codex_server_route_from_config(ai_config)
+        route["auth"] = "external_runtime"
+        route["purpose"] = "Codex app-server (экспериментально)"
+        return {"smart": route}
     base_url = str(ai_config.get("base_url") or "")
     adapter = "openrouter" if "openrouter.ai" in base_url else "openai_compatible"
     return {
@@ -278,12 +351,146 @@ def _codex_cli_completion(messages: list[dict[str, str]], route_config: dict[str
 
 
 def _codex_sdk_completion(messages: list[dict[str, str]], route_config: dict[str, Any]) -> str:
-    if not route_config.get("enabled"):
-        raise ValueError("codex_sdk route is experimental and disabled")
-    base_url = str(route_config.get("base_url") or route_config.get("server_url") or "").strip()
-    if not base_url:
-        raise ValueError("codex_sdk route requires an explicit local app-server URL")
-    raise ValueError("codex_sdk route is experimental and not implemented for live completion")
+    """Drive a single turn through `codex app-server` over stdio (JSON-RPC / JSONL).
+
+    The app-server protocol is documented at developers.openai.com/codex/app-server.
+    Auth is reused from the local `codex login` session (ChatGPT subscription or API key).
+    """
+    command = [str(route_config.get("command") or "codex"), "app-server"]
+    prompt = _messages_to_prompt(messages)
+    model = str(route_config.get("model") or "").strip() or None
+    timeout = int(route_config.get("timeout", 300))
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 - explicit local Codex integration
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError(f"codex app-server command not found: {command[0]}") from exc
+
+    def send(message: dict[str, Any]) -> None:
+        if process.stdin is None:
+            raise ValueError("codex app-server stdin unavailable")
+        process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+        process.stdin.flush()
+
+    def incoming():
+        if process.stdout is None:
+            return
+        for raw in process.stdout:
+            line = _decode_process_value(raw).strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+    try:
+        return _codex_appserver_collect(prompt, send=send, incoming=incoming(), model=model)
+    finally:
+        try:
+            if process.stdin and not process.stdin.closed:
+                process.stdin.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:  # pragma: no cover - best effort cleanup
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+
+def _codex_appserver_collect(prompt: str, *, send, incoming, model: str | None = None) -> str:
+    """Pure JSON-RPC driver for one app-server turn. Returns the agent's text answer.
+
+    `send` is a callable that accepts a message dict; `incoming` is an iterable of
+    parsed message dicts. Kept transport-free so it can be unit-tested with a fake stream.
+    """
+    send({
+        "method": "initialize",
+        "id": 0,
+        "params": {"clientInfo": {"name": "work_hunter", "title": "Work Hunter", "version": "0.1.0"}},
+    })
+    send({"method": "initialized", "params": {}})
+    start_params: dict[str, Any] = {"approvalPolicy": "never", "sandbox": "readOnly"}
+    if model:
+        start_params["model"] = model
+    send({"method": "thread/start", "id": 1, "params": start_params})
+
+    deltas: list[str] = []
+    completed_text = ""
+    turn_started = False
+    for message in incoming:
+        if not isinstance(message, dict):
+            continue
+        if message.get("error"):
+            error = message["error"]
+            detail = error.get("message") if isinstance(error, dict) else error
+            raise ValueError(f"codex app-server error: {_safe_process_error(str(detail))}")
+        if not turn_started and message.get("id") == 1:
+            thread = (message.get("result") or {}).get("thread") or {}
+            thread_id = thread.get("id")
+            if thread_id:
+                turn_started = True
+                send({
+                    "method": "turn/start",
+                    "id": 2,
+                    "params": {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+                })
+                continue
+        method = str(message.get("method") or "")
+        params = message.get("params") or {}
+        if method == "item/agentMessage/delta":
+            delta = _codex_delta_text(params)
+            if delta:
+                deltas.append(delta)
+        elif method in {"item/completed", "item/updated"}:
+            text = _codex_item_text(params.get("item") or {})
+            if text:
+                completed_text = text
+        elif method in {"turn/completed", "turn/failed", "turn/aborted"}:
+            if method != "turn/completed":
+                raise ValueError(f"codex app-server {method.split('/')[-1]}")
+            break
+
+    result = ("".join(deltas).strip() or completed_text.strip())
+    if not result:
+        raise ValueError("codex app-server returned empty content")
+    return result
+
+
+def _codex_delta_text(params: dict[str, Any]) -> str:
+    delta = params.get("delta")
+    if isinstance(delta, str):
+        return delta
+    if isinstance(delta, dict):
+        return str(delta.get("text") or delta.get("content") or "")
+    return str(params.get("text") or "")
+
+
+def _codex_item_text(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    item_type = str(item.get("type") or "").lower()
+    if item_type and "agent" not in item_type and "message" not in item_type:
+        return ""
+    text = item.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    content = item.get("content")
+    if isinstance(content, list):
+        parts = [str(part.get("text") or "") for part in content if isinstance(part, dict)]
+        joined = "".join(parts).strip()
+        if joined:
+            return joined
+    return ""
 
 
 def _http_chat_completion(

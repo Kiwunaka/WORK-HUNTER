@@ -57,6 +57,16 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 self._send_json(app.storage.list_ai_runs(limit=_int_arg(query, "limit", 20)))
                 return
+            if path == "/api/source-setup/guide":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                self._send_json(
+                    app.source_setup_guide(
+                        _str_arg(query, "source") or "hh",
+                        level=_int_arg(query, "level", 5),
+                    )
+                )
+                return
             if path == "/api/onboarding/status":
                 app = WorkHunter(root)
                 self._send_json(app.candidate_completeness())
@@ -521,6 +531,16 @@ def make_handler(root: Path):
                     except Exception as exc:
                         app.storage.finish_ai_run(run_id, status="error", output={"error": str(exc)})
                         raise
+                    return
+                if path == "/api/source-setup/action":
+                    self._send_json(
+                        app.source_setup_action(
+                            str(body.get("action") or ""),
+                            source=str(body.get("source") or "hh"),
+                            level=int(body.get("level") or 5),
+                            **{key: value for key, value in body.items() if key not in {"action", "source", "level"}},
+                        )
+                    )
                     return
                 if path.startswith("/api/sources/") and path.endswith("/sync"):
                     source = path.removeprefix("/api/sources/").removesuffix("/sync").strip("/")
