@@ -90,3 +90,49 @@ def test_hh_auth_status_web_endpoint(tmp_path):
 
     assert payload["status"] == "missing_access_token"
     assert payload["authorized"] is False
+
+
+def test_doctor_and_hh_web_status_web_endpoints(tmp_path):
+    app = WorkHunter(root=tmp_path)
+    app.config["sources"]["hh"]["access_token"] = ""
+    app.save_config(app.config)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/doctor",
+            timeout=5,
+        ) as response:
+            doctor = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/hh/web/status",
+            timeout=5,
+        ) as response:
+            web_status = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert doctor["core"]["database"]["status"] == "ok"
+    assert doctor["hh_api"]["status"] == "missing_access_token"
+    assert web_status["status"] == "not_configured"
+
+
+def test_hh_web_cookie_import_reports_local_capabilities(tmp_path):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n.hh.ru\tTRUE\t/\tTRUE\t0\t_xsrf\txsrf-token\n",
+        encoding="utf-8",
+    )
+    app = WorkHunter(root=tmp_path)
+
+    imported = app.import_hh_web_cookies(cookie_file)
+    status = app.hh_web_status()
+
+    assert imported["status"] == "ok"
+    assert imported["has_xsrf"] is True
+    assert imported["can_load_resumes_page"] is True
+    assert status["status"] == "ok"
+    assert status["resumes_page_status"] == "configured_not_live_checked"

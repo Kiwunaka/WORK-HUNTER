@@ -14,6 +14,17 @@ from ..services import WorkHunter
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+UI_ROUTES = {
+    "/jobs",
+    "/calendar",
+    "/favorites",
+    "/chat",
+    "/agent",
+    "/settings",
+    "/sources",
+    "/stats",
+    "/trends",
+}
 
 
 def run_server(root: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
@@ -35,7 +46,7 @@ def make_handler(root: Path):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "/":
+            if path == "/" or path in UI_ROUTES:
                 self._send_static("index.html")
                 return
             if path == "/api/jobs":
@@ -97,6 +108,10 @@ def make_handler(root: Path):
             if path == "/api/hh/auth/status":
                 app = WorkHunter(root)
                 self._send_json(app.hh_auth_status())
+                return
+            if path == "/api/hh/web/status":
+                app = WorkHunter(root)
+                self._send_json(app.hh_web_status())
                 return
             if path == "/api/hh/negotiations":
                 app = WorkHunter(root)
@@ -226,9 +241,39 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 self._send_json(app.daily_report())
                 return
+            if path == "/api/strategies":
+                app = WorkHunter(root)
+                self._send_json(app.list_strategies())
+                return
+            if path == "/api/strategy/report":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                self._send_json(app.strategy_report(_str_arg(query, "name") or "active-profile"))
+                return
+            if path == "/api/applications/export":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                payload_text = app.export_applications(format=_str_arg(query, "format") or "jsonl")
+                self._send_text(payload_text, content_type="application/json; charset=utf-8")
+                return
+            if path == "/api/report/export":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                fmt = _str_arg(query, "format") or "json"
+                content_type = "text/markdown; charset=utf-8" if fmt == "md" else "application/json; charset=utf-8"
+                self._send_text(app.export_report(since=_str_arg(query, "since") or "", format=fmt), content_type=content_type)
+                return
             if path == "/api/sources":
                 app = WorkHunter(root)
                 self._send_json(app.storage.list_sources())
+                return
+            if path == "/api/source-capabilities":
+                app = WorkHunter(root)
+                self._send_json(app.source_capabilities())
+                return
+            if path == "/api/doctor":
+                app = WorkHunter(root)
+                self._send_json(app.doctor())
                 return
             if path == "/api/config":
                 app = WorkHunter(root)
@@ -294,8 +339,39 @@ def make_handler(root: Path):
                 if path == "/api/hh/negotiations/sync":
                     self._send_json(app.sync_hh_negotiations(status=str(body.get("status") or "active")))
                     return
+                if path == "/api/hh/reply/plan":
+                    self._send_json(
+                        app.plan_hh_reply(
+                            negotiation_id=str(body.get("negotiation_id") or ""),
+                            template=str(body.get("template") or ""),
+                            status=str(body.get("status") or "active"),
+                            delay_minutes=int(body.get("delay_minutes") or 0),
+                        )
+                    )
+                    return
+                if path == "/api/hh/reply/confirm":
+                    self._send_json(
+                        app.confirm_hh_reply(
+                            int(body.get("plan_id") or 0),
+                            confirm=bool(body.get("confirm")),
+                        )
+                    )
+                    return
                 if path == "/api/hh/skipped/clear":
                     self._send_json(app.clear_hh_skipped_vacancies())
+                    return
+                if path == "/api/strategy/run":
+                    self._send_json(
+                        app.run_strategy(
+                            str(body.get("name") or "active-profile"),
+                            dry_run=bool(body.get("dry_run", True)) or not bool(body.get("confirm")),
+                            confirm=bool(body.get("confirm")),
+                            resume_id=str(body.get("resume_id") or "") or None,
+                        )
+                    )
+                    return
+                if path == "/api/import/jobs":
+                    self._send_json(app.import_jobs_file(str(body.get("path") or "")))
                     return
                 if path == "/api/hh/call":
                     self._send_json(
@@ -303,6 +379,7 @@ def make_handler(root: Path):
                             str(body.get("method") or "GET"),
                             str(body.get("path") or "/"),
                             data=body.get("data"),
+                            confirm=bool(body.get("confirm")),
                         )
                     )
                     return

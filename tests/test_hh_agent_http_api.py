@@ -5,6 +5,7 @@ import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
 
+from work_hunter.hh_agent import HHVacancyResearchService, VacancyPolicy
 from work_hunter.models import HHAIDecision, HHPendingMessage
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
@@ -24,6 +25,59 @@ def _post_json(base: str, path: str, payload: dict):
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+class FakeResearchHHClient:
+    def has_token(self):
+        return True
+
+    def search_vacancies(self, params):
+        assert params["text"] == "python"
+        return [
+            {
+                "id": "vac-1",
+                "name": "Python Backend",
+                "alternate_url": "https://hh.ru/vacancy/vac-1",
+                "employer": {"name": "Acme"},
+            }
+        ]
+
+    def get_vacancy(self, vacancy_id):
+        return {
+            "id": vacancy_id,
+            "name": "Python Backend",
+            "description": "FastAPI and PostgreSQL",
+            "employer": {"id": "emp-1", "name": "Acme"},
+        }
+
+
+class FakeStructuredReply:
+    parsed = {
+        "score": 91,
+        "recommended_action": "apply",
+        "reasons": ["strong python match"],
+        "risk_flags": [],
+    }
+    model = "test-model"
+
+    def to_dict(self):
+        return {"parsed": self.parsed, "model": self.model}
+
+
+def fake_structured_chat(messages, ai_config, schema):
+    assert schema.name == "hh_vacancy_analysis"
+    assert "Python Backend" in messages[0]["content"]
+    return FakeStructuredReply()
+
+
+def fake_research_service(self, *, client, min_score=None):
+    return HHVacancyResearchService(
+        client=client,
+        storage=self.storage,
+        ai_config={"model": "test-model"},
+        policy=VacancyPolicy.from_mapping({"min_score": min_score or 80, "force_message": "Hi"}),
+        structured_chat=fake_structured_chat,
+    )
 
 
 def test_hh_agent_service_exposes_preflight_digest_operations_and_approvals(tmp_path):
@@ -182,3 +236,51 @@ def test_hh_agent_web_api_exposes_cockpit_and_approval_queue(tmp_path):
     assert blacklist_item["employer_id"] == "emp-1"
     assert blacklist[0]["reason"] == "spam"
     assert deleted_blacklist == {"status": "ok", "deleted": 1}
+
+
+def test_hh_agent_web_api_runs_research_and_dry_run_apply(monkeypatch, tmp_path):
+    monkeypatch.setattr(WorkHunter, "_hh_research_client", lambda self: FakeResearchHHClient())
+    monkeypatch.setattr(WorkHunter, "_build_hh_research_service", fake_research_service)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        run = _post_json(
+            base,
+            "/api/agent/run",
+            {
+                "operation": "research-and-apply",
+                "params": {"text": "python", "limit": 2, "resume_id": "res-1"},
+            },
+        )
+        blocked = _post_json(
+            base,
+            "/api/agent/run",
+            {
+                "operation": "research-and-apply",
+                "params": {"text": "python", "limit": 1, "resume_id": "res-1", "confirm_apply": True},
+            },
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    app = WorkHunter(root=tmp_path)
+    attempts = app.storage.list_hh_application_attempts("vac-1")
+    analyses = app.storage.list_hh_vacancy_analysis("vac-1")
+
+    assert run["operation"] == "research-and-apply"
+    assert run["operation_id"] > 0
+    assert run["result"]["status"] == "ok"
+    assert run["result"]["counts"]["analyzed"] == 1
+    assert run["result"]["counts"]["planned"] == 1
+    assert run["result"]["items"][0]["vacancy_id"] == "vac-1"
+    assert run["result"]["items"][0]["score"] == 91
+    assert run["result"]["items"][0]["attempt_status"] == "planned"
+    assert blocked["result"]["status"] == "blocked"
+    assert blocked["result"]["reason"] == "real_apply_blocked"
+    assert attempts[0].status == "planned"
+    assert attempts[0].letter == "Hi"
+    assert analyses[0].score == 91

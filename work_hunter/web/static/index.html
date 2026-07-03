@@ -45,12 +45,12 @@
   </aside>
 
   <main class="shell">
-    <header class="topbar">
+    <header class="topbar" id="route-topbar">
       <div>
         <h1>Очередь вакансий</h1>
         <p id="summary-line">Синхронизируй источники, затем отсортируй по score.</p>
       </div>
-      <div class="actions">
+      <div class="actions" id="route-actions">
         <button id="sync-button" class="primary">Синхронизировать</button>
         <button id="score-button">Пересчитать score</button>
       </div>
@@ -106,7 +106,7 @@
           <table>
             <thead>
               <tr>
-                <th style="width:30px;"><input type="checkbox" id="select-all-checkbox" onclick="toggleSelectAll()"></th>
+                <th style="width:30px;"><input type="checkbox" id="select-all-checkbox" onclick="event.stopPropagation();toggleSelectAll()"></th>
                 <th>Score</th>
                 <th>Вакансия</th>
                 <th>Источник</th>
@@ -178,7 +178,7 @@
             <div id="ai-panel-letter-panel" class="ai-panel-content">
               <div class="ai-sub-section">
                 <h4>Сопроводительное письмо</h4>
-                <textarea id="letter-box" class="letter" spellcheck="true" style="width:100%;min-height:190px;"></textarea>
+                <textarea id="ai-letter-box" data-letter-box class="letter" spellcheck="true" style="width:100%;min-height:190px;"></textarea>
                 <div style="display:flex;gap:8px;margin-top:8px;">
                   <button onclick="prepareLetter()">Шаблон</button>
                   <button onclick="prepareLetterAi()" class="primary">AI письмо</button>
@@ -293,6 +293,7 @@
         <button class="agent-tab active" data-agent-panel="dashboard"><i data-lucide="layout-dashboard"></i>Dashboard</button>
         <button class="agent-tab" data-agent-panel="inbox"><i data-lucide="inbox"></i>Inbox</button>
         <button class="agent-tab" data-agent-panel="approvals"><i data-lucide="check-check"></i>Approvals</button>
+        <button class="agent-tab" data-agent-panel="research"><i data-lucide="search-check"></i>Research</button>
         <button class="agent-tab" data-agent-panel="runs"><i data-lucide="activity"></i>Runs</button>
         <button class="agent-tab" data-agent-panel="api-lab"><i data-lucide="flask-conical"></i>API Lab</button>
         <button class="agent-tab" data-agent-panel="templates"><i data-lucide="file-text"></i>Templates</button>
@@ -369,6 +370,27 @@
             <button onclick="loadAgentApprovals()"><i data-lucide="refresh-cw"></i>Обновить</button>
           </div>
           <div id="agent-approvals-list" class="agent-list"></div>
+        </div>
+      </div>
+
+      <div id="agent-panel-research" class="agent-panel">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Deep research</h2>
+              <p class="meta">HH search analysis with local dry-run apply planning.</p>
+            </div>
+            <div class="actions">
+              <button id="agent-research-run-button"><i data-lucide="search-check"></i>Analyze</button>
+              <button id="agent-research-plan-button" class="primary"><i data-lucide="send"></i>Plan apply</button>
+            </div>
+          </div>
+          <div class="hh-lab-editor">
+            <label>Search text <input id="agent-research-text" placeholder="Python backend remote"></label>
+            <label>Limit <input id="agent-research-limit" type="number" min="1" max="100" value="10"></label>
+            <label>Resume ID <input id="agent-research-resume-id" placeholder="optional"></label>
+          </div>
+          <div id="agent-research-output" class="agent-list"></div>
         </div>
       </div>
 

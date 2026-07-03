@@ -5,6 +5,13 @@ from typing import Any
 import requests
 
 from .backends import ConfigBackend, DictConfigBackend
+from .errors import (
+    HHAuthError,
+    HHForbiddenError,
+    HHRateLimitError,
+    HHTransportError,
+    HHValidationError,
+)
 from .identity import HHIdentity
 from .user_agent import build_android_user_agent
 
@@ -32,13 +39,18 @@ class HHApiSession:
         response = self.request(method, path, **kwargs)
         payload = _response_json(response)
         if response.status_code >= 400:
-            raise RuntimeError(f"HH API error {response.status_code}: {_hh_error_code(payload)}")
+            raise _error_from_response(response.status_code, payload)
         return payload
 
     def request(self, method: str, path: str, **kwargs: Any):
+        return self._request(method, path, retry_on_auth=True, **kwargs)
+
+    def _request(self, method: str, path: str, *, retry_on_auth: bool, **kwargs: Any):
         if not self.identity.access_token:
-            raise RuntimeError("HH access token is required")
-        return requests.request(
+            raise HHAuthError("HH access token is required", code="auth_missing")
+        if self.identity.is_access_expired() and self.identity.refresh_token:
+            self.refresh_token()
+        response = requests.request(
             method.upper(),
             f"{self.base_url}{path}",
             headers={**self.headers(), **kwargs.pop("headers", {})},
@@ -46,6 +58,10 @@ class HHApiSession:
             allow_redirects=kwargs.pop("allow_redirects", False),
             **kwargs,
         )
+        if response.status_code == 401 and retry_on_auth and self.identity.refresh_token:
+            self.refresh_token()
+            return self._request(method, path, retry_on_auth=False, **kwargs)
+        return response
 
     def refresh_token(self) -> dict[str, Any]:
         response = requests.request(
@@ -61,10 +77,72 @@ class HHApiSession:
         )
         payload = _response_json(response)
         if response.status_code >= 400:
-            raise RuntimeError(f"HH API error {response.status_code}: {_hh_error_code(payload)}")
+            raise _error_from_response(response.status_code, payload)
         self.identity.update_from_token_response(payload)
         self.backend.save(self.identity.to_config_patch())
         return payload
+
+    def whoami(self) -> dict[str, Any]:
+        return self.request_json("GET", "/me")
+
+    def list_resumes(self) -> list[dict[str, Any]]:
+        data = self.request_json("GET", "/resumes/mine")
+        return list(data.get("items") or [])
+
+    def get_resume(self, resume_id: str) -> dict[str, Any]:
+        return self.request_json("GET", f"/resumes/{resume_id}")
+
+    def search_vacancies(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        data = self.request_json("GET", "/vacancies", params=params)
+        return list(data.get("items") or [])
+
+    def get_vacancy(self, vacancy_id: str) -> dict[str, Any]:
+        return self.request_json("GET", f"/vacancies/{vacancy_id}")
+
+    def suitable_resumes(self, vacancy_id: str) -> list[dict[str, Any]]:
+        data = self.request_json("GET", f"/vacancies/{vacancy_id}/suitable_resumes")
+        return list(data.get("items") or [])
+
+    def apply(self, vacancy_id: str, resume_id: str, message: str):
+        return self.request(
+            "POST",
+            "/negotiations",
+            data={
+                "resume_id": resume_id,
+                "vacancy_id": vacancy_id,
+                "message": message or "",
+            },
+        )
+
+    def list_negotiations(self, status: str = "active") -> list[dict[str, Any]]:
+        data = self.request_json("GET", "/negotiations", params={"status": status})
+        return list(data.get("items") or [])
+
+    def list_negotiation_messages(self, negotiation_id: str) -> list[dict[str, Any]]:
+        data = self.request_json("GET", f"/negotiations/{negotiation_id}/messages")
+        if isinstance(data.get("items"), list):
+            return list(data["items"])
+        if isinstance(data.get("messages"), list):
+            return list(data["messages"])
+        return []
+
+    def send_negotiation_message(
+        self,
+        negotiation_id: str,
+        message: str,
+        chat_id: str | None = None,
+    ) -> dict[str, Any]:
+        if chat_id:
+            return self.request_json(
+                "POST",
+                f"/common/chats/{chat_id}/messages",
+                json={"text": message},
+            )
+        return self.request_json(
+            "POST",
+            f"/negotiations/{negotiation_id}/messages",
+            data={"message": message},
+        )
 
     def headers(self) -> dict[str, str]:
         headers = {
@@ -89,3 +167,21 @@ def _hh_error_code(payload: dict[str, Any]) -> str:
     if errors and isinstance(errors[0], dict):
         return str(errors[0].get("value") or errors[0].get("type") or "unknown")
     return str(payload.get("error") or "unknown")
+
+
+def _error_from_response(status_code: int, payload: dict[str, Any]) -> HHTransportError:
+    code = _hh_error_code(payload)
+    message = f"HH API error {status_code}: {code}"
+    if status_code == 401:
+        return HHAuthError(message, status_code=status_code, code=code, payload=payload)
+    if status_code == 403:
+        return HHForbiddenError(message, status_code=status_code, code=code, payload=payload)
+    if status_code == 429:
+        return HHRateLimitError(message, status_code=status_code, code=code, payload=payload)
+    if status_code == 400:
+        return HHValidationError(message, status_code=status_code, code=code, payload=payload)
+    return HHTransportError(message, status_code=status_code, code=code, payload=payload)
+
+
+class HHApiTransport(HHApiSession):
+    pass

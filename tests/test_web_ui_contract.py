@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import json
+import re
+import threading
+import urllib.request
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+from work_hunter.web.server import make_handler
+
+
+STATIC_DIR = Path(__file__).resolve().parents[1] / "work_hunter" / "web" / "static"
+UI_ROUTES = [
+    "/",
+    "/jobs",
+    "/calendar",
+    "/favorites",
+    "/chat",
+    "/agent",
+    "/settings",
+    "/sources",
+    "/stats",
+    "/trends",
+]
+
+
+def _read_static(name: str) -> str:
+    return (STATIC_DIR / name).read_text(encoding="utf-8")
+
+
+def _get_text(base: str, path: str) -> tuple[int, str, str]:
+    with urllib.request.urlopen(f"{base}{path}", timeout=5) as response:
+        return response.status, response.headers.get("Content-Type", ""), response.read().decode("utf-8")
+
+
+def test_ui_deep_links_and_static_assets_are_served(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        for path in UI_ROUTES:
+            status, content_type, body = _get_text(base, path)
+            assert status == 200
+            assert "text/html" in content_type
+            assert "<title>Work Hunter</title>" in body
+            assert '<script src="/app.js"></script>' in body
+
+        js_status, js_type, js_body = _get_text(base, "/app.js")
+        assert js_status == 200
+        assert "javascript" in js_type
+        assert "const ROUTES" in js_body
+
+        css_status, css_type, css_body = _get_text(base, "/app.css")
+        assert css_status == 200
+        assert "text/css" in css_type
+        assert ".sidebar" in css_body
+
+        manifest_status, _, manifest_body = _get_text(base, "/manifest.json")
+        assert manifest_status == 200
+        assert json.loads(manifest_body)["name"] == "Work Hunter"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_ui_static_contract_has_routes_and_no_duplicate_ids():
+    index = _read_static("index.html")
+    app = _read_static("app.js")
+    ids = re.findall(r'\bid="([^"]+)"', index)
+
+    duplicates = sorted({item for item in ids if ids.count(item) > 1})
+    assert duplicates == []
+    assert 'id="letter-box"' not in index
+    assert 'id="letter-box"' not in app
+    assert 'id="ai-letter-box" data-letter-box' in index
+    assert 'id="detail-letter-box" data-letter-box' in app
+    for path in UI_ROUTES[1:]:
+        assert f'path: "{path}"' in app
+    assert "window.history.pushState" in app
+    assert "window.addEventListener(\"popstate\"" in app
+
+
+def test_ui_contract_keeps_trends_explicit_and_bulk_selection_stable():
+    index = _read_static("index.html")
+    app = _read_static("app.js")
+
+    assert 'id="load-trends-button"' in index
+    assert "loadMarketTrends()" in index
+    assert "addEventListener(\"click\", loadMarketTrends)" not in app
+    assert "event.stopPropagation();toggleJobSelect" in app
+    assert "selectedJobIds.has(Number(job.id))" in app
+    assert "syncBulkCheckboxes()" in app
+    assert "research-and-apply" in app
+    assert 'id="agent-research-output"' in index

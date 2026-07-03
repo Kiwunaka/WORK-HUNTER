@@ -57,9 +57,15 @@ class FakeHHOperationsClient:
             }
         ]
 
-    def request_json(self, method: str, path: str, data=None):
-        self.requests.append((method, path, data))
-        return {"method": method, "path": path, "data": data}
+    def request_json(self, method: str, path: str, data=None, params=None):
+        self.requests.append((method, path, data, params or {}))
+        return {
+            "method": method,
+            "path": path,
+            "data": data,
+            "params": params or {},
+            "access_token": "secret-token",
+        }
 
 
 def test_sync_hh_negotiations_persists_related_records(monkeypatch, tmp_path):
@@ -112,14 +118,24 @@ def test_update_hh_resumes_updates_only_publishable_resumes(monkeypatch, tmp_pat
     assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
 
 
-def test_hh_call_api_delegates_to_client(monkeypatch, tmp_path):
+def test_hh_call_api_blocks_mutations_without_confirm_and_masks_result(monkeypatch, tmp_path):
     monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.requests = []
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
 
-    result = app.hh_call_api("POST", "/test", data={"hello": "world"})
+    blocked = app.hh_call_api("POST", "/test", data={"hello": "world"})
+    result = app.hh_call_api("POST", "/test?access_token=secret", data={"hello": "world"}, confirm=True)
 
-    assert result == {"method": "POST", "path": "/test", "data": {"hello": "world"}}
+    assert blocked["status"] == "blocked"
+    assert blocked["code"] == "mutation_requires_confirm"
+    assert result["status"] == "ok"
+    assert result["path"] == "/test"
+    assert result["params"]["access_token"] == "***"
+    assert result["result"]["access_token"] == "***"
+    assert FakeHHOperationsClient.requests == [
+        ("POST", "/test", {"hello": "world"}, {"access_token": "secret"})
+    ]
 
 
 def test_hh_operations_cli_syncs_negotiations_and_clears_skipped(monkeypatch, tmp_path, capsys):

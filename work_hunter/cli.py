@@ -34,6 +34,9 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("init")
 
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--json", action="store_true")
+
     sync = sub.add_parser("sync")
     sync.add_argument("--source", action="append", choices=SYNC_SOURCE_CHOICES)
     sync.add_argument("--limit", type=int)
@@ -153,6 +156,7 @@ def main(argv: list[str] | None = None) -> None:
     hh_call_api.add_argument("method")
     hh_call_api.add_argument("path")
     hh_call_api.add_argument("--data")
+    hh_call_api.add_argument("--confirm", action="store_true")
 
     hh_preset = sub.add_parser("hh-preset")
     hh_preset_sub = hh_preset.add_subparsers(dest="preset_command", required=True)
@@ -198,6 +202,9 @@ def main(argv: list[str] | None = None) -> None:
     hh_campaign_confirm.add_argument("run_id", type=int)
     hh_campaign_confirm.add_argument("--confirm", action="store_true")
 
+    digest = sub.add_parser("digest")
+    digest.add_argument("--limit", type=int, default=10)
+
     report = sub.add_parser("report")
     report.add_argument("--limit", type=int, default=10)
 
@@ -206,8 +213,168 @@ def main(argv: list[str] | None = None) -> None:
 
     config = sub.add_parser("config")
     config.add_argument("--json", action="store_true")
+    config_sub = config.add_subparsers(dest="config_command")
+    config_show = config_sub.add_parser("show")
+    config_show.add_argument("--json", action="store_true")
 
     sub.add_parser("source-capabilities")
+
+    source = sub.add_parser("source")
+    source_sub = source.add_subparsers(dest="source_command", required=True)
+    source_list = source_sub.add_parser("list")
+    source_list.add_argument("--json", action="store_true")
+
+    profile = sub.add_parser("profile")
+    profile_sub = profile.add_subparsers(dest="profile_command", required=True)
+    profile_show = profile_sub.add_parser("show")
+    profile_show.add_argument("--json", action="store_true")
+    profile_update = profile_sub.add_parser("update")
+    profile_update.add_argument("--json")
+    profile_update.add_argument("--file", type=Path)
+
+    strategy = sub.add_parser("strategy")
+    strategy_sub = strategy.add_subparsers(dest="strategy_command", required=True)
+    strategy_sub.add_parser("list")
+    strategy_run = strategy_sub.add_parser("run")
+    strategy_run.add_argument("name")
+    strategy_run.add_argument("--dry-run", action="store_true")
+    strategy_run.add_argument("--confirm", action="store_true")
+    strategy_run.add_argument("--resume-id")
+    strategy_report = strategy_sub.add_parser("report")
+    strategy_report.add_argument("name")
+
+    export = sub.add_parser("export")
+    export_sub = export.add_subparsers(dest="export_command", required=True)
+    export_jobs = export_sub.add_parser("jobs")
+    export_jobs.add_argument("--format", choices=["json", "jsonl", "csv"], default="csv")
+    export_jobs.add_argument("--source")
+    export_jobs.add_argument("--status")
+    export_applications = export_sub.add_parser("applications")
+    export_applications.add_argument("--format", choices=["json", "jsonl", "csv"], default="jsonl")
+    export_report = export_sub.add_parser("report")
+    export_report.add_argument("--since", default="")
+    export_report.add_argument("--format", choices=["json", "md"], default="json")
+
+    import_cmd = sub.add_parser("import")
+    import_sub = import_cmd.add_subparsers(dest="import_command", required=True)
+    import_jobs = import_sub.add_parser("jobs")
+    import_jobs.add_argument("path", type=Path)
+
+    hh = sub.add_parser("hh")
+    hh_sub = hh.add_subparsers(dest="hh_command", required=True)
+    hh_sub.add_parser("whoami")
+    hh_auth = hh_sub.add_parser("auth")
+    hh_auth_sub = hh_auth.add_subparsers(dest="hh_auth_command", required=True)
+    hh_auth_sub.add_parser("status")
+    hh_auth_sub.add_parser("whoami")
+    hh_auth_sub.add_parser("refresh")
+    hh_auth_import = hh_auth_sub.add_parser("import-token")
+    hh_auth_import.add_argument("--access-token", required=True)
+    hh_auth_import.add_argument("--refresh-token", default="")
+    hh_auth_import.add_argument("--client-id", default="")
+    hh_auth_import.add_argument("--client-secret", default="")
+    hh_auth_import.add_argument("--access-expires-at", default="")
+    hh_auth_import.add_argument("--profile")
+    hh_auth_sub.add_parser("oauth-start")
+    hh_auth_sub.add_parser("oauth-callback")
+
+    hh_account_nested = hh_sub.add_parser("account")
+    hh_account_nested_sub = hh_account_nested.add_subparsers(dest="hh_account_command", required=True)
+    hh_account_nested_sub.add_parser("list")
+    hh_account_nested_use = hh_account_nested_sub.add_parser("use")
+    hh_account_nested_use.add_argument("name")
+
+    hh_resumes_nested = hh_sub.add_parser("resumes")
+    hh_resumes_nested_sub = hh_resumes_nested.add_subparsers(dest="hh_resumes_command", required=True)
+    hh_resumes_nested_sub.add_parser("sync")
+    hh_resumes_nested_sub.add_parser("list")
+
+    hh_search = hh_sub.add_parser("search")
+    hh_search.add_argument("--text")
+    hh_search.add_argument("--area", action="append")
+    hh_search.add_argument("--professional-role", action="append")
+    hh_search.add_argument("--industry", action="append")
+    hh_search.add_argument("--salary", type=int)
+    hh_search.add_argument("--schedule")
+    hh_search.add_argument("--experience")
+    hh_search.add_argument("--employment", action="append")
+    hh_search.add_argument("--date-from")
+    hh_search.add_argument("--date-to")
+    hh_search.add_argument("--search-field", action="append")
+    hh_search.add_argument("--employer-id", action="append")
+    hh_search.add_argument("--excluded-employer-id", action="append")
+    hh_search.add_argument("--only-with-salary", action="store_true")
+    hh_search.add_argument("--limit", type=int, default=20)
+    hh_search.add_argument("--page", type=int, default=0)
+    hh_search.add_argument("--order-by")
+    hh_search.add_argument("--period", type=int)
+    hh_search.add_argument("--currency")
+    hh_search.add_argument("--no-magic", action="store_true")
+    hh_search.add_argument("--premium", action="store_true")
+
+    hh_search_url = hh_sub.add_parser("search-url")
+    hh_search_url_sub = hh_search_url.add_subparsers(dest="hh_search_url_command", required=True)
+    hh_search_url_import = hh_search_url_sub.add_parser("import")
+    hh_search_url_import.add_argument("url")
+    hh_search_url_import.add_argument("--limit", type=int, default=20)
+
+    hh_campaign = hh_sub.add_parser("campaign")
+    hh_campaign_sub = hh_campaign.add_subparsers(dest="hh_campaign_command", required=True)
+    hh_campaign_plan_nested = hh_campaign_sub.add_parser("plan")
+    hh_campaign_plan_nested.add_argument("--limit", type=int, default=100)
+    hh_campaign_plan_nested.add_argument("--min-score", type=int, default=0)
+    hh_campaign_plan_nested.add_argument("--skip-tests", action="store_true")
+    hh_campaign_plan_nested.add_argument("--ai-filter-mode", choices=["off", "light", "heavy"], default="off")
+    hh_campaign_plan_nested.add_argument("--resume-id")
+    hh_campaign_confirm_nested = hh_campaign_sub.add_parser("confirm")
+    hh_campaign_confirm_nested.add_argument("--run-id", type=int, required=True)
+    hh_campaign_confirm_nested.add_argument("--confirm", action="store_true")
+
+    hh_apply = hh_sub.add_parser("apply")
+    hh_apply_sub = hh_apply.add_subparsers(dest="hh_apply_command", required=True)
+    hh_apply_plan_nested = hh_apply_sub.add_parser("plan")
+    hh_apply_plan_nested.add_argument("--job-id", type=int, required=True)
+    hh_apply_plan_nested.add_argument("--resume-id")
+    hh_apply_plan_nested.add_argument("--letter", default="")
+    hh_apply_plan_nested.add_argument("--letter-file", type=Path)
+    hh_apply_confirm_nested = hh_apply_sub.add_parser("confirm")
+    hh_apply_confirm_nested.add_argument("--plan-id", type=int, required=True)
+    hh_apply_confirm_nested.add_argument("--confirm", action="store_true")
+
+    hh_negotiations_nested = hh_sub.add_parser("negotiations")
+    hh_negotiations_nested_sub = hh_negotiations_nested.add_subparsers(dest="hh_negotiations_command", required=True)
+    hh_negotiations_sync_nested = hh_negotiations_nested_sub.add_parser("sync")
+    hh_negotiations_sync_nested.add_argument("--status", default="active")
+    hh_negotiations_nested_sub.add_parser("list")
+    hh_negotiations_nested_sub.add_parser("review")
+
+    hh_reply = hh_sub.add_parser("reply")
+    hh_reply_sub = hh_reply.add_subparsers(dest="hh_reply_command", required=True)
+    hh_reply_plan = hh_reply_sub.add_parser("plan")
+    hh_reply_plan.add_argument("--negotiation-id", required=True)
+    hh_reply_plan.add_argument("--template", default="")
+    hh_reply_plan.add_argument("--status", default="active")
+    hh_reply_plan.add_argument("--delay-minutes", type=int, default=0)
+    hh_reply_confirm = hh_reply_sub.add_parser("confirm")
+    hh_reply_confirm.add_argument("--plan-id", type=int, required=True)
+    hh_reply_confirm.add_argument("--confirm", action="store_true")
+
+    hh_web = hh_sub.add_parser("web")
+    hh_web_sub = hh_web.add_subparsers(dest="hh_web_command", required=True)
+    hh_web_sub.add_parser("status")
+    hh_web_import = hh_web_sub.add_parser("import-cookies")
+    hh_web_import.add_argument("path", type=Path)
+    hh_web_search = hh_web_sub.add_parser("search-url")
+    hh_web_search.add_argument("url")
+    hh_web_search.add_argument("--limit", type=int, default=20)
+
+    hh_api = hh_sub.add_parser("api")
+    hh_api_sub = hh_api.add_subparsers(dest="hh_api_command", required=True)
+    hh_api_call = hh_api_sub.add_parser("call")
+    hh_api_call.add_argument("method")
+    hh_api_call.add_argument("path")
+    hh_api_call.add_argument("--data")
+    hh_api_call.add_argument("--confirm", action="store_true")
 
     ui = sub.add_parser("ui")
     ui.add_argument("--host")
@@ -258,6 +425,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     app = WorkHunter(args.root)
 
+    if args.command == "doctor":
+        payload = app.doctor()
+        print_json(payload) if args.json else print(_format_doctor(payload))
+        return
     if args.command == "init":
         path = app.init()
         print(f"Config: {path}")
@@ -333,6 +504,135 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "hh-refresh-token":
         print_json(mask_secrets(app.refresh_hh_token()))
+        return
+    if args.command == "hh":
+        if args.hh_command == "whoami":
+            print_json(app.hh_whoami())
+        elif args.hh_command == "auth":
+            if args.hh_auth_command == "status":
+                print_json(app.hh_auth_status())
+            elif args.hh_auth_command == "whoami":
+                print_json(app.hh_whoami())
+            elif args.hh_auth_command == "refresh":
+                print_json(mask_secrets(app.refresh_hh_token()))
+            elif args.hh_auth_command == "import-token":
+                print_json(
+                    mask_secrets(
+                        app.import_hh_token(
+                            access_token=args.access_token,
+                            refresh_token=args.refresh_token,
+                            client_id=args.client_id,
+                            client_secret=args.client_secret,
+                            access_expires_at=args.access_expires_at,
+                            profile=args.profile,
+                        )
+                    )
+                )
+            elif args.hh_auth_command in {"oauth-start", "oauth-callback"}:
+                print_json(
+                    {
+                        "status": "blocked",
+                        "code": "oauth_flow_not_configured",
+                        "message": "Local HH OAuth flow is not configured yet. Use hh auth import-token for now.",
+                        "next_actions": ["work-hunter hh auth import-token --access-token ..."],
+                    }
+                )
+        elif args.hh_command == "account":
+            if args.hh_account_command == "list":
+                print_json(app.list_hh_account_profiles())
+            elif args.hh_account_command == "use":
+                print_json(app.use_hh_account_profile(args.name))
+        elif args.hh_command == "resumes":
+            if args.hh_resumes_command == "sync":
+                print_json(app.sync_hh_resumes())
+            elif args.hh_resumes_command == "list":
+                print_json([resume.to_dict() for resume in app.storage.list_hh_resumes()])
+        elif args.hh_command == "search":
+            print_json(
+                app.search_hh_vacancies(
+                    text=args.text,
+                    area=args.area,
+                    professional_role=args.professional_role,
+                    industry=args.industry,
+                    salary=args.salary,
+                    schedule=args.schedule,
+                    experience=args.experience,
+                    employment=args.employment,
+                    date_from=args.date_from,
+                    date_to=args.date_to,
+                    search_field=args.search_field,
+                    employer_id=args.employer_id,
+                    excluded_employer_id=args.excluded_employer_id,
+                    only_with_salary=args.only_with_salary,
+                    limit=args.limit,
+                    page=args.page,
+                    order_by=args.order_by,
+                    period=args.period,
+                    currency=args.currency,
+                    no_magic=args.no_magic,
+                    premium=args.premium,
+                )
+            )
+        elif args.hh_command == "search-url":
+            if args.hh_search_url_command == "import":
+                print_json(app.hh_web_search_url(args.url, limit=args.limit))
+        elif args.hh_command == "campaign":
+            if args.hh_campaign_command == "plan":
+                print_json(
+                    app.plan_hh_campaign(
+                        limit=args.limit,
+                        min_score=args.min_score,
+                        skip_tests=args.skip_tests,
+                        ai_filter_mode=args.ai_filter_mode,
+                        resume_id=args.resume_id,
+                    )
+                )
+            elif args.hh_campaign_command == "confirm":
+                print_json(app.confirm_hh_campaign(args.run_id, confirm=args.confirm))
+        elif args.hh_command == "apply":
+            if args.hh_apply_command == "plan":
+                letter = args.letter or None
+                if args.letter_file:
+                    letter = args.letter_file.read_text(encoding="utf-8")
+                print_json(app.prepare_apply_plan(args.job_id, resume_id=args.resume_id, letter=letter))
+            elif args.hh_apply_command == "confirm":
+                print_json(app.confirm_apply_plan(args.plan_id, confirm=args.confirm))
+        elif args.hh_command == "negotiations":
+            if args.hh_negotiations_command == "sync":
+                print_json(app.sync_hh_negotiations(status=args.status))
+            elif args.hh_negotiations_command == "list":
+                print_json([item.to_dict() for item in app.storage.list_hh_negotiations()])
+            elif args.hh_negotiations_command == "review":
+                print_json(
+                    {
+                        "status": "blocked",
+                        "code": "negotiation_review_not_configured",
+                        "message": "Run hh negotiations sync/list first; structured review is not configured yet.",
+                    }
+                )
+        elif args.hh_command == "reply":
+            if args.hh_reply_command == "plan":
+                print_json(
+                    app.plan_hh_reply(
+                        negotiation_id=args.negotiation_id,
+                        template=args.template,
+                        status=args.status,
+                        delay_minutes=args.delay_minutes,
+                    )
+                )
+            elif args.hh_reply_command == "confirm":
+                print_json(app.confirm_hh_reply(args.plan_id, confirm=args.confirm))
+        elif args.hh_command == "web":
+            if args.hh_web_command == "status":
+                print_json(app.hh_web_status())
+            elif args.hh_web_command == "import-cookies":
+                print_json(app.import_hh_web_cookies(args.path))
+            elif args.hh_web_command == "search-url":
+                print_json(app.hh_web_search_url(args.url, limit=args.limit))
+        elif args.hh_command == "api":
+            if args.hh_api_command == "call":
+                data = json.loads(args.data) if args.data else None
+                print_json(app.hh_call_api(args.method, args.path, data=data, confirm=args.confirm))
         return
     if args.command == "hh-account":
         if args.account_command == "list":
@@ -459,7 +759,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "hh-call-api":
         data = json.loads(args.data) if args.data else None
-        print_json(app.hh_call_api(args.method, args.path, data=data))
+        print_json(app.hh_call_api(args.method, args.path, data=data, confirm=args.confirm))
         return
     if args.command == "hh-preset":
         if args.preset_command == "list":
@@ -511,6 +811,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "hh-campaign-confirm":
         print_json(app.confirm_hh_campaign(args.run_id, confirm=args.confirm))
         return
+    if args.command == "digest":
+        print_json(app.daily_report(limit=args.limit))
+        return
     if args.command == "report":
         print_json(app.daily_report(limit=args.limit))
         return
@@ -523,6 +826,50 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "source-capabilities":
         print_json(app.source_capabilities())
+        return
+    if args.command == "source":
+        if args.source_command == "list":
+            print_json(app.source_capabilities())
+        return
+    if args.command == "profile":
+        if args.profile_command == "show":
+            payload = app.active_profile_info()
+            print_json(payload) if args.json else print(json.dumps(payload, ensure_ascii=False, indent=2))
+        elif args.profile_command == "update":
+            if args.file:
+                data = json.loads(args.file.read_text(encoding="utf-8"))
+            elif args.json:
+                data = json.loads(args.json)
+            else:
+                parser.error("profile update requires --json or --file")
+            print_json(app.update_profile(data))
+        return
+    if args.command == "strategy":
+        if args.strategy_command == "list":
+            print_json(app.list_strategies())
+        elif args.strategy_command == "run":
+            print_json(
+                app.run_strategy(
+                    args.name,
+                    dry_run=args.dry_run or not args.confirm,
+                    confirm=args.confirm,
+                    resume_id=args.resume_id,
+                )
+            )
+        elif args.strategy_command == "report":
+            print_json(app.strategy_report(args.name))
+        return
+    if args.command == "export":
+        if args.export_command == "jobs":
+            print(app.export_jobs(status=args.status, source=args.source, format=args.format), end="")
+        elif args.export_command == "applications":
+            print(app.export_applications(format=args.format), end="")
+        elif args.export_command == "report":
+            print(app.export_report(since=args.since, format=args.format), end="")
+        return
+    if args.command == "import":
+        if args.import_command == "jobs":
+            print_json(app.import_jobs_file(args.path))
         return
     if args.command == "ui":
         from .web.server import run_server
@@ -601,6 +948,41 @@ def main(argv: list[str] | None = None) -> None:
 
 def print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _format_doctor(payload: dict[str, Any]) -> str:
+    core = payload.get("core") or {}
+    hh_api = payload.get("hh_api") or {}
+    hh_web = payload.get("hh_web") or {}
+    profile = payload.get("profile") or {}
+    lines = [
+        "WORK-HUNTER DOCTOR",
+        "",
+        "Core:",
+        f"  Python: {(core.get('python') or {}).get('status', 'unknown')} {(core.get('python') or {}).get('version', '')}",
+        f"  DB: {(core.get('database') or {}).get('status', 'unknown')} {(core.get('database') or {}).get('path', '')}",
+        f"  Config: {(core.get('config') or {}).get('status', 'unknown')} {(core.get('config') or {}).get('path', '')}",
+        "",
+        "HH API:",
+        f"  Auth: {hh_api.get('status', 'unknown')}",
+        f"  Authorized: {hh_api.get('authorized', False)}",
+        "",
+        "HH Web:",
+        f"  Cookies: {hh_web.get('status', 'unknown')}",
+        f"  XSRF: {hh_web.get('has_xsrf', False)}",
+        "",
+        "Profile:",
+        f"  Active: {profile.get('active', '')}",
+        f"  Queries: {profile.get('queries', 0)}",
+        "",
+        "Actions:",
+    ]
+    actions = payload.get("next_actions") or []
+    if actions:
+        lines.extend(f"  - {action}" for action in actions)
+    else:
+        lines.append("  - none")
+    return "\n".join(lines)
 
 
 def _configure_output() -> None:

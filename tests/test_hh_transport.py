@@ -7,11 +7,13 @@ import pytest
 
 from work_hunter.hh_transport import (
     ChallengeKind,
+    HHAuthError,
     HHApiSession,
     HHBrowserSession,
     HHChallengeHandler,
     HHIdentity,
     HHOnlyCookieJar,
+    HHRateLimitError,
     HHWebActions,
     build_android_user_agent,
     extract_xsrf_token,
@@ -107,6 +109,74 @@ def test_api_session_refresh_updates_backend(monkeypatch):
     assert config["access_token"] == "new-access"
     assert config["refresh_token"] == "new-refresh"
     assert calls[0]["data"]["refresh_token"] == "old-refresh"
+
+
+def test_api_session_retries_once_after_unauthorized(monkeypatch):
+    class Response:
+        def __init__(self, status_code: int, payload: dict):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = {}
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        if method == "POST" and url.endswith("/token"):
+            return Response(
+                200,
+                {
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_at": "2031-01-01T00:00:00+00:00",
+                },
+            )
+        if len([call for call in calls if call["method"] == "GET"]) == 1:
+            return Response(401, {"errors": [{"type": "oauth", "value": "token_expired"}]})
+        return Response(200, {"id": "me-1"})
+
+    config = {
+        "access_token": "old-access",
+        "refresh_token": "old-refresh",
+        "client_id": "cid",
+        "client_secret": "secret",
+    }
+    monkeypatch.setattr("requests.request", fake_request)
+
+    payload = HHApiSession(config, backend=DictConfigBackend(config)).request_json("GET", "/me")
+
+    assert payload == {"id": "me-1"}
+    assert config["access_token"] == "new-access"
+    get_calls = [call for call in calls if call["method"] == "GET"]
+    assert get_calls[0]["headers"]["Authorization"] == "Bearer old-access"
+    assert get_calls[1]["headers"]["Authorization"] == "Bearer new-access"
+
+
+def test_api_session_raises_typed_errors(monkeypatch):
+    class Response:
+        status_code = 429
+        headers = {}
+
+        def json(self):
+            return {"errors": [{"type": "too_many_requests"}]}
+
+    monkeypatch.setattr("requests.request", lambda *args, **kwargs: Response())
+
+    with pytest.raises(HHRateLimitError) as exc:
+        HHApiSession({"access_token": "token"}).request_json("GET", "/me")
+
+    assert exc.value.status_code == 429
+    assert exc.value.code == "too_many_requests"
+
+
+def test_api_session_requires_access_token():
+    with pytest.raises(HHAuthError) as exc:
+        HHApiSession({}).request_json("GET", "/me")
+
+    assert exc.value.code == "auth_missing"
 
 
 def test_extract_xsrf_token_prefers_cookie_then_html():

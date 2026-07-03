@@ -11,6 +11,7 @@ const state = {
   agent: {
     preflight: null,
     digest: null,
+    research: null,
     operations: null,
     approvals: [],
     templates: [],
@@ -23,6 +24,25 @@ const state = {
 };
 
 const $ = (selector) => document.querySelector(selector);
+
+const ROUTES = {
+  inbox: { path: "/jobs", title: "Jobs", summary: "Sync sources, then sort by score.", actions: true },
+  calendar: { path: "/calendar", title: "Calendar", summary: "Interviews, follow-ups, and reminders.", actions: false },
+  favorites: { path: "/favorites", title: "Favorites", summary: "Saved vacancies and notes.", actions: false },
+  chat: { path: "/chat", title: "AI Assistant", summary: "Chat with optional selected-job context.", actions: false },
+  agent: { path: "/agent", title: "HH Agent", summary: "Local HH runs, approvals, research, and dry-run apply plans.", actions: false },
+  settings: { path: "/settings", title: "Settings", summary: "Profiles, HH auth, AI backend, resumes, and config.", actions: false },
+  sources: { path: "/sources", title: "Sources", summary: "Source health and last sync state.", actions: false },
+  stats: { path: "/stats", title: "Stats", summary: "Pipeline and score distribution.", actions: false },
+  trends: { path: "/trends", title: "Trends", summary: "Run market trend analysis explicitly from this page.", actions: false },
+};
+
+const PATH_TO_VIEW = Object.fromEntries(Object.entries(ROUTES).map(([view, route]) => [route.path, view]));
+PATH_TO_VIEW["/"] = "inbox";
+
+function routeViewFromPath(pathname) {
+  return PATH_TO_VIEW[pathname] || "inbox";
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -55,8 +75,9 @@ function renderJobs() {
     tr.addEventListener("click", () => selectJob(job.id));
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
+    const checked = selectedJobIds.has(Number(job.id)) ? "checked" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="toggleJobSelect(${job.id}, this.checked)"></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)" ${checked}></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
@@ -68,6 +89,7 @@ function renderJobs() {
     `;
     body.appendChild(tr);
   }
+  syncBulkCheckboxes();
 }
 
 async function selectJob(id) {
@@ -118,9 +140,10 @@ function renderDetail(job) {
     <div class="section-title">Описание</div>
     <p>${escapeHtml(job.description || "Описание не загружено.")}</p>
     <div class="section-title">Письмо</div>
-    <textarea id="letter-box" class="letter" spellcheck="true">${escapeHtml(letter)}</textarea>
+    <textarea id="detail-letter-box" data-letter-box class="letter" spellcheck="true">${escapeHtml(letter)}</textarea>
     <div id="action-output" class="meta"></div>
   `;
+  setLetterValue(letter);
 }
 
 async function syncJobs() {
@@ -165,7 +188,7 @@ async function markSelected(status) {
 async function prepareLetter() {
   if (!state.selectedId) return;
   const draft = await api(`/api/jobs/${state.selectedId}/letter`, { method: "POST", body: "{}" });
-  $("#letter-box").value = draft.body;
+  setLetterValue(draft.body);
 }
 
 async function prepareLetterAi() {
@@ -173,7 +196,7 @@ async function prepareLetterAi() {
   setBusy("[onclick='prepareLetterAi()']", true);
   try {
     const draft = await api(`/api/jobs/${state.selectedId}/letter-ai`, { method: "POST", body: "{}" });
-    $("#letter-box").value = draft.body;
+    setLetterValue(draft.body);
   } catch (err) {
     $("#action-output").textContent = `Ошибка AI: ${err.message}. Проверь API-ключ в настройках.`;
   } finally {
@@ -184,7 +207,7 @@ async function prepareLetterAi() {
 async function applyHh(dryRun = true) {
   if (!state.selectedId) return;
 
-  const letter = $("#letter-box")?.value || "";
+  const letter = getLetterValue();
   if (dryRun) {
     const result = await api(`/api/jobs/${state.selectedId}/apply-plan`, {
       method: "POST",
@@ -490,6 +513,51 @@ function escapeJsString(value) {
     .replaceAll("<", "\\u003c");
 }
 
+function letterBoxes() {
+  return Array.from(document.querySelectorAll("[data-letter-box]"));
+}
+
+function setLetterValue(value) {
+  for (const box of letterBoxes()) {
+    box.value = value || "";
+  }
+}
+
+function getLetterValue() {
+  const detailValue = $("#detail-letter-box")?.value;
+  if (detailValue !== undefined) return detailValue;
+  return $("#ai-letter-box")?.value || "";
+}
+
+function activateView(view, options = {}) {
+  const route = ROUTES[view] || ROUTES.inbox;
+  const routeView = ROUTES[view] ? view : "inbox";
+  const routePath = route.path;
+
+  document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
+  document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
+
+  document.querySelector(`.nav-button[data-view="${routeView}"]`)?.classList.add("active");
+  const viewEl = $(`#view-${routeView}`);
+  if (viewEl) viewEl.classList.add("active");
+
+  const title = $("#route-topbar h1");
+  if (title) title.textContent = route.title;
+  const summary = $("#summary-line");
+  if (summary) summary.textContent = route.summary;
+  const actions = $("#route-actions");
+  if (actions) actions.style.display = route.actions ? "flex" : "none";
+
+  if (options.push !== false && window.location.pathname !== routePath) {
+    window.history.pushState({ view: routeView }, "", routePath);
+  }
+
+  if (routeView === "favorites") loadFavorites().catch(console.error);
+  if (routeView === "stats") loadStats().catch(console.error);
+  if (routeView === "agent") loadAgentCockpit().catch(console.error);
+  refreshIcons();
+}
+
 function toggleTheme() {
   state.darkTheme = !state.darkTheme;
   document.documentElement.setAttribute("data-theme", state.darkTheme ? "dark" : "light");
@@ -785,6 +853,7 @@ async function loadAgentCockpit() {
     loadAgentEvents(),
     loadAgentTasks(),
   ]);
+  renderAgentResearch();
   $("#agent-status-line").textContent = "Готово";
   refreshIcons();
 }
@@ -1196,6 +1265,84 @@ async function runAgentOperation(operation, button = null) {
   }
 }
 
+function agentResearchPayload() {
+  const rawLimit = Number.parseInt($("#agent-research-limit")?.value || "10", 10);
+  return {
+    text: $("#agent-research-text")?.value.trim() || "",
+    limit: Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 100)) : 10,
+    resume_id: $("#agent-research-resume-id")?.value.trim() || "",
+    confirm_apply: false,
+  };
+}
+
+async function runAgentResearch(planApply = false) {
+  const runButton = $("#agent-research-run-button");
+  const planButton = $("#agent-research-plan-button");
+  if (runButton) runButton.disabled = true;
+  if (planButton) planButton.disabled = true;
+  state.agent.research = { result: { status: "running", items: [] } };
+  renderAgentResearch();
+  try {
+    const result = await api("/api/agent/run", {
+      method: "POST",
+      body: JSON.stringify({
+        operation: planApply ? "research-and-apply" : "research-vacancies",
+        params: agentResearchPayload(),
+      }),
+    });
+    state.agent.research = result;
+    renderAgentResearch();
+    await loadAgentOperations();
+  } catch (err) {
+    state.agent.research = { result: { status: "error", error: err.message, items: [] } };
+    renderAgentResearch();
+  } finally {
+    if (runButton) runButton.disabled = false;
+    if (planButton) planButton.disabled = false;
+    refreshIcons();
+  }
+}
+
+function renderAgentResearch() {
+  const box = $("#agent-research-output");
+  if (!box) return;
+  const payload = state.agent.research || {};
+  const result = payload.result || payload;
+  if (!result || !result.status) {
+    box.innerHTML = '<p class="meta">No research run yet.</p>';
+    return;
+  }
+  if (result.status === "running") {
+    box.innerHTML = '<p class="meta">Running research...</p>';
+    return;
+  }
+  if (result.status === "error") {
+    box.innerHTML = `<p class="error">${escapeHtml(result.error || "Research failed")}</p>`;
+    return;
+  }
+  const counts = result.counts || {};
+  const items = result.items || [];
+  const header = `
+    <div class="source-row">
+      <strong>${escapeHtml(String(result.status))}</strong>
+      <div class="meta">operation #${escapeHtml(String(payload.operation_id || "-"))} · analyzed ${escapeHtml(String(counts.analyzed || 0))} · planned ${escapeHtml(String(counts.planned || 0))} · blocked ${escapeHtml(String(counts.blocked || 0))} · errors ${escapeHtml(String(counts.errors || 0))}</div>
+    </div>
+  `;
+  const cards = items.map((item) => `
+    <div class="source-row agent-research-card">
+      <strong>${escapeHtml(item.name || item.title || item.vacancy_id || "-")}</strong>
+      <div class="meta">${escapeHtml(item.employer_name || item.company || "-")} · vacancy ${escapeHtml(item.vacancy_id || item.id || "-")} · score ${escapeHtml(String(item.score ?? "-"))} · ${escapeHtml(item.recommended_action || "-")} · ${escapeHtml(item.attempt_status || "not_planned")}</div>
+      <div class="chips">
+        ${(item.reasons || []).map((reason) => `<span class="chip">${escapeHtml(reason)}</span>`).join("") || '<span class="chip">no reasons</span>'}
+        ${(item.risk_flags || []).map((risk) => `<span class="chip red">${escapeHtml(risk)}</span>`).join("")}
+      </div>
+      ${item.attempt_reason ? `<div class="meta">plan: ${escapeHtml(item.attempt_reason)}</div>` : ""}
+    </div>
+  `).join("");
+  box.innerHTML = header + (cards || '<p class="meta">No items returned.</p>');
+  refreshIcons();
+}
+
 async function cancelAgentOperation(id) {
   await api(`/api/cancel/${id}`, { method: "POST", body: JSON.stringify({ reason: "cancelled_from_ui" }) });
   await loadAgentOperations();
@@ -1336,12 +1483,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   setupResumeBuilderDefaults();
   document.querySelectorAll(".nav-button").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
-      document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
-      button.classList.add("active");
-      $(`#view-${button.dataset.view}`).classList.add("active");
-    });
+    button.addEventListener("click", () => activateView(button.dataset.view));
   });
   $("#sync-button").addEventListener("click", syncJobs);
   $("#score-button").addEventListener("click", scoreJobs);
@@ -1376,6 +1518,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#agent-save-blacklist-button")?.addEventListener("click", saveAgentBlacklist);
   $("#agent-resume-preview-button")?.addEventListener("click", previewAgentResumeTemplate);
   $("#agent-batch-matrix-button")?.addEventListener("click", buildAgentBatchMatrix);
+  $("#agent-research-run-button")?.addEventListener("click", () => runAgentResearch(false));
+  $("#agent-research-plan-button")?.addEventListener("click", () => runAgentResearch(true));
   $("#hh-lab-run-button")?.addEventListener("click", runHhLabCall);
   $("#hh-lab-save-snippet-button")?.addEventListener("click", saveHhLabSnippet);
   document.querySelectorAll("[data-agent-operation]").forEach((button) => {
@@ -1389,10 +1533,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     tab.addEventListener("click", () => switchAgentPanel(tab.dataset.agentPanel));
   });
 
-  document.querySelector("[data-view='favorites']")?.addEventListener("click", loadFavorites);
-  document.querySelector("[data-view='stats']")?.addEventListener("click", loadStats);
-  document.querySelector("[data-view='trends']")?.addEventListener("click", loadMarketTrends);
-  document.querySelector("[data-view='agent']")?.addEventListener("click", () => loadAgentCockpit().catch(console.error));
+  window.addEventListener("popstate", () => activateView(routeViewFromPath(window.location.pathname), { push: false }));
 
   loadTheme();
   refreshIcons();
@@ -1400,6 +1541,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     navigator.serviceWorker.register("/sw.js");
   }
   await Promise.all([loadJobs(), loadConfig(), loadProfile(), loadSources()]);
+  activateView(routeViewFromPath(window.location.pathname), { push: false });
   loadResumes().catch(() => {});
   loadEvents().catch(() => {});
   loadSearches().catch(() => {});
@@ -1552,6 +1694,18 @@ function updateBulkToolbar() {
   $("#bulk-count").textContent = `Выбрано: ${selectedJobIds.size}`;
 }
 
+function syncBulkCheckboxes() {
+  const boxes = Array.from(document.querySelectorAll(".job-checkbox"));
+  for (const cb of boxes) {
+    cb.checked = selectedJobIds.has(Number(cb.dataset.jobId));
+  }
+  const selectAll = $("#select-all-checkbox");
+  if (selectAll) {
+    selectAll.checked = boxes.length > 0 && boxes.every((cb) => cb.checked);
+  }
+  updateBulkToolbar();
+}
+
 function clearBulkSelection() {
   selectedJobIds.clear();
   document.querySelectorAll(".job-checkbox").forEach(cb => cb.checked = false);
@@ -1602,8 +1756,9 @@ function renderFilteredJobs(jobs) {
     tr.addEventListener("click", () => selectJob(job.id));
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
+    const checked = selectedJobIds.has(Number(job.id)) ? "checked" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)"></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)" ${checked}></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
@@ -1615,6 +1770,7 @@ function renderFilteredJobs(jobs) {
     `;
     body.appendChild(tr);
   }
+  syncBulkCheckboxes();
 }
 
 function updateSummaryForFiltered(jobs) {

@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
 import csv
+import importlib.util
 import io
 import json
 import re
 import smtplib
+import sys
 import time
 import urllib.parse
 from datetime import datetime
@@ -37,6 +39,7 @@ from .models import (
 )
 from .hh_agent.approval import ApprovalQueue
 from .hh_agent.apply_from_file import ApplyFromFileRow, load_apply_from_file
+from .hh_agent.chat_service import HHChatAgentService
 from .hh_agent.events import (
     detect_hh_agent_items,
     export_hh_agent_agenda_markdown,
@@ -45,10 +48,13 @@ from .hh_agent.events import (
 from .hh_agent.forms import detect_manual_form_url, draft_form_review, normalize_form_mode
 from .hh_agent.notifications import agenda_notification_event
 from .hh_agent.persona import persona_from_profile
+from .hh_agent.policy import VacancyPolicy
+from .hh_agent.research import HHVacancyResearchService
 from .hh_agent.resume_templates import (
     build_hh_batch_preset_matrix as build_resume_batch_preset_matrix,
     draft_hh_resume_payload_from_template,
 )
+from .hh_transport import HHTransportError
 from .resume_payloads import load_hh_resume_payload, validate_hh_resume_payload
 from .scoring import score_job
 from .sources.getmatch import parse_getmatch_offer
@@ -76,27 +82,27 @@ def _format_experience(about: dict[str, Any]) -> str:
         project = exp.get("project", "")
         details = exp.get("details", [])
         tech = exp.get("tech", [])
-        experience_text += f"\nвЂў {role} вЂ” {project}\n"
+        experience_text += f"\n• {role} — {project}\n"
         for detail in details[:3]:
             experience_text += f"  - {detail}\n"
         if tech:
-            experience_text += f"  РўРµС…РЅРѕР»РѕРіРёРё: {', '.join(tech)}\n"
+            experience_text += f"  Технологии: {', '.join(tech)}\n"
     return experience_text
 
 
 def _build_vacancy_candidate_prompt(job: Job, about: dict[str, Any], experience_text: str) -> str:
     return (
-        f"Р’Р°РєР°РЅСЃРёСЏ:\n"
-        f"- РџРѕР·РёС†РёСЏ: {job.title}\n"
-        f"- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-        f"- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}\n"
-        f"- Р—Р°СЂРїР»Р°С‚Р°: {job.salary_text or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-        f"- РЈРґР°Р»С‘РЅРєР°: {'РґР°' if job.remote else 'РЅРµС‚/РЅРµ СѓРєР°Р·Р°РЅРѕ'}\n"
-        f"- Р›РѕРєР°С†РёСЏ: {job.location or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-        f"\nРџСЂРѕС„РёР»СЊ РєР°РЅРґРёРґР°С‚Р°:\n"
-        f"- Р РµР·СЋРјРµ: {about.get('summary', '')}\n"
-        f"- РќР°РІС‹РєРё: {', '.join(about.get('all_skills', []))}\n"
-        f"\nРћРїС‹С‚:\n{experience_text}"
+        f"Вакансия:\n"
+        f"- Позиция: {job.title}\n"
+        f"- Компания: {job.company or 'не указана'}\n"
+        f"- Описание: {job.description or 'нет описания'}\n"
+        f"- Зарплата: {job.salary_text or 'не указана'}\n"
+        f"- Удалёнка: {'да' if job.remote else 'нет/не указано'}\n"
+        f"- Локация: {job.location or 'не указана'}\n"
+        f"\nПрофиль кандидата:\n"
+        f"- Резюме: {about.get('summary', '')}\n"
+        f"- Навыки: {', '.join(about.get('all_skills', []))}\n"
+        f"\nОпыт:\n{experience_text}"
     )
 
 
@@ -160,6 +166,16 @@ def _unique_jobs(jobs: list[Job], seen: set[str], limit: int | None = None) -> l
         if limit is not None and len(unique) >= limit:
             break
     return unique
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
 
 
 def _job_dedupe_key(job: Job) -> str:
@@ -241,6 +257,7 @@ HH_APPLY_ERROR_OUTCOMES = {
 
 HH_API_LAB_ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 HH_API_LAB_BLOCKED_PATH_PARTS = ("/token", "/oauth")
+HH_API_READ_ONLY_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 SOURCE_CAPABILITIES: dict[str, dict[str, str]] = {
@@ -363,6 +380,30 @@ def _normalize_hh_api_lab_request(
     }
 
 
+def _normalize_hh_api_call_request(
+    *,
+    method: str,
+    path: str,
+    body: Any = None,
+) -> dict[str, Any]:
+    try:
+        return _normalize_hh_api_lab_request(method=method, path=path, body=body)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("HH API Lab", "HH API call")) from exc
+
+
+def _hh_error_payload(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, HHTransportError):
+        return {
+            "status": "error",
+            "code": exc.code,
+            "status_code": exc.status_code,
+            "error": str(exc),
+            "payload": mask_secrets(exc.payload),
+        }
+    return {"status": "error", "error": str(exc)}
+
+
 def _normalize_hh_api_lab_params(params: Any) -> dict[str, Any]:
     if params in (None, ""):
         return {}
@@ -381,6 +422,36 @@ def _normalize_hh_api_lab_body(body: Any) -> Any:
     if isinstance(body, (dict, list)):
         return body
     raise ValueError("HH API Lab body must be a JSON object or array")
+
+
+def _string_list(value: Any) -> list[str] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_bool(value: Any) -> bool | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y", "remote", "да"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "нет"}:
+        return False
+    return None
 
 
 def _hh_job_from_vacancy_payload(payload: dict[str, Any]) -> Job:
@@ -686,6 +757,132 @@ class WorkHunter:
             save_config(self.config_path, self.config)
         return self.config_path
 
+    def doctor(self) -> dict[str, Any]:
+        config_exists = self.config_path.exists()
+        db_path = database_path(self.root)
+        profile_info = self.active_profile_info()
+        profile_data = profile_info["data"] if isinstance(profile_info.get("data"), dict) else {}
+        hh_api = self.hh_auth_status()
+        hh_web = self.hh_web_status()
+        sources = self.source_capabilities()
+        source_rows = {
+            row["source"]: row
+            for row in self.storage.list_sources()
+        }
+        source_status = {
+            name: {
+                **capability,
+                "last_sync_at": source_rows.get(name, {}).get("last_sync_at", ""),
+                "last_error": source_rows.get(name, {}).get("last_error", ""),
+            }
+            for name, capability in sources.items()
+        }
+        missing_deps = [
+            name
+            for name, module in {
+                "mcp": "mcp",
+                "requests": "requests",
+                "starlette": "starlette",
+            }.items()
+            if importlib.util.find_spec(module) is None
+        ]
+        optional_deps = {
+            "playwright": importlib.util.find_spec("playwright") is not None,
+            "beautifulsoup4": importlib.util.find_spec("bs4") is not None,
+            "uvicorn": importlib.util.find_spec("uvicorn") is not None,
+        }
+        try:
+            self.storage.conn.execute("SELECT 1").fetchone()
+            db_status = "ok"
+            db_error = ""
+        except Exception as exc:
+            db_status = "error"
+            db_error = str(exc)
+
+        mcp_import_ok = importlib.util.find_spec("work_hunter.mcp_server") is not None
+        ui_config = self.config.get("ui") or {}
+        ui_host = str(ui_config.get("host") or "127.0.0.1")
+        enabled_sources = [
+            name
+            for name, source_config in (self.config.get("sources") or {}).items()
+            if isinstance(source_config, dict) and source_config.get("enabled", False)
+        ]
+        blocked: list[str] = []
+        warnings: list[str] = []
+        if missing_deps:
+            blocked.append("missing_core_dependencies")
+        if db_status != "ok":
+            blocked.append("database_unavailable")
+        if hh_api.get("status") != "ok":
+            warnings.append("hh_api_not_ready")
+        if hh_web.get("status") not in {"ok", "configured", "not_configured"}:
+            warnings.append("hh_web_not_ready")
+        if ui_host not in {"127.0.0.1", "localhost", "::1"}:
+            warnings.append("ui_host_not_local")
+
+        return {
+            "status": "ok" if not blocked else "blocked",
+            "core": {
+                "python": {
+                    "status": "ok" if sys.version_info >= (3, 11) else "blocked",
+                    "version": sys.version.split()[0],
+                },
+                "package": {"status": "ok", "editable": True},
+                "dependencies": {
+                    "status": "ok" if not missing_deps else "missing",
+                    "missing": missing_deps,
+                    "optional": optional_deps,
+                },
+                "config": {
+                    "status": "ok" if config_exists else "missing",
+                    "path": str(self.config_path),
+                },
+                "database": {
+                    "status": db_status,
+                    "path": str(db_path),
+                    "error": db_error,
+                },
+                "mcp": {"status": "ok" if mcp_import_ok else "error"},
+                "ui": {
+                    "status": "ok" if ui_host in {"127.0.0.1", "localhost", "::1"} else "warning",
+                    "host": ui_host,
+                    "port": int(ui_config.get("port") or 8787),
+                },
+            },
+            "profile": {
+                "status": "ok" if profile_data.get("queries") or profile_data.get("desired_roles") else "warning",
+                "active": profile_info.get("active"),
+                "queries": len(profile_data.get("queries") or []),
+                "must_have_skills": len(profile_data.get("must_have_skills") or []),
+            },
+            "hh_api": hh_api,
+            "hh_web": hh_web,
+            "sources": {
+                "enabled": enabled_sources,
+                "capabilities": source_status,
+            },
+            "recommended_mode": "api_first" if hh_api.get("status") == "ok" else "configure_hh_api",
+            "blocked": blocked,
+            "warnings": warnings,
+            "next_actions": self._doctor_next_actions(hh_api, hh_web, missing_deps),
+        }
+
+    def _doctor_next_actions(
+        self,
+        hh_api: dict[str, Any],
+        hh_web: dict[str, Any],
+        missing_deps: list[str],
+    ) -> list[str]:
+        actions: list[str] = []
+        if missing_deps:
+            actions.append('python -m pip install -e ".[dev,browser,ui]"')
+        if hh_api.get("status") != "ok":
+            actions.extend(str(item) for item in hh_api.get("actions") or [])
+        if hh_web.get("status") in {"not_configured", "missing_cookie_file"}:
+            actions.append("work-hunter hh web import-cookies ./cookies.txt")
+        actions.append('work-hunter hh search --text "python backend" --area 1 --limit 20')
+        return _dedupe_strings(actions)
+
     def save_config(self, config: dict[str, Any]) -> None:
         self.config = config
         save_config(self.config_path, config)
@@ -749,8 +946,27 @@ class WorkHunter:
         result: dict[str, dict[str, Any]] = {}
         for source_name, capabilities in SOURCE_CAPABILITIES.items():
             source_config = sources.get(source_name) or {}
+            apply_capability = str(capabilities.get("apply") or "")
+            auth_capability = str(capabilities.get("auth") or "none")
+            is_hh = source_name == "hh"
+            requires_auth = auth_capability not in {"none", ""}
+            requires_confirmation = apply_capability in {
+                "official_api",
+                "personal_auth_recon",
+                "external_contact",
+            }
+            risk_flags: list[str] = []
+            if requires_confirmation:
+                risk_flags.append("live_apply_or_contact")
+            if apply_capability == "personal_auth_recon":
+                risk_flags.append("unverified_personal_auth_adapter")
             result[source_name] = {
                 **capabilities,
+                "preferred_transport": "api" if is_hh else "public_fetch",
+                "fallback_transport": "web_cookie" if is_hh else "external_page",
+                "requires_auth": requires_auth,
+                "requires_confirmation": requires_confirmation,
+                "risk_flags": risk_flags,
                 "enabled": bool(source_config.get("enabled", False)),
             }
         return result
@@ -812,20 +1028,20 @@ class WorkHunter:
                 system_msg = {
                     "role": "system",
                     "content": (
-                        "РўС‹ вЂ” AI-Р°СЃСЃРёСЃС‚РµРЅС‚ Work Hunter, РїРѕРјРѕРіР°СЋС‰РёР№ СЃ РїРѕРёСЃРєРѕРј IT-СЂР°Р±РѕС‚С‹. "
-                        "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РѕР±СЃСѓР¶РґР°РµС‚ РєРѕРЅРєСЂРµС‚РЅСѓСЋ РІР°РєР°РЅСЃРёСЋ. "
-                        "РўРІРѕСЏ Р·Р°РґР°С‡Р°: Р°РЅР°Р»РёР·РёСЂРѕРІР°С‚СЊ РµС‘, РґР°РІР°С‚СЊ СЃРѕРІРµС‚С‹ РїРѕ fit-Сѓ, "
-                        "РїРѕРјРѕРіР°С‚СЊ РіРѕС‚РѕРІРёС‚СЊСЃСЏ Рє СЃРѕР±РµСЃРµРґРѕРІР°РЅРёСЋ, РїРёСЃР°С‚СЊ СЃРѕРїСЂРѕРІРѕРґРёС‚РµР»СЊРЅС‹Рµ.\n\n"
-                        f"=== Р’РђРљРђРќРЎРРЇ ===\n"
-                        f"РџРѕР·РёС†РёСЏ: {job.title}\n"
-                        f"РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-                        f"РћРїРёСЃР°РЅРёРµ: {(job.description or 'РЅРµС‚')[:1500]}\n"
-                        f"Р—Р°СЂРїР»Р°С‚Р°: {job.salary_text or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-                        f"Р›РѕРєР°С†РёСЏ: {job.location or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-                        f"РЈРґР°Р»С‘РЅРєР°: {'РґР°' if job.remote else 'РЅРµС‚/РЅРµ СѓРєР°Р·Р°РЅРѕ'}\n"
-                        f"РСЃС‚РѕС‡РЅРёРє: {job.source}{score_text}\n"
-                        "РћС‚РІРµС‡Р°Р№ РєСЂР°С‚РєРѕ (2-5 РїСЂРµРґР»РѕР¶РµРЅРёР№ РµСЃР»Рё РЅРµ РїСЂРѕСЃСЏС‚ СЂР°Р·РІС‘СЂРЅСѓС‚Рѕ), "
-                        "РїРѕ РґРµР»Сѓ, РЅР° СЂСѓСЃСЃРєРѕРј. РќРµ РІС‹РґСѓРјС‹РІР°Р№ РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ РїРѕР»СЊР·РѕРІР°С‚РµР»Рµ."
+                        "Ты — AI-ассистент Work Hunter, помогающий с поиском IT-работы. "
+                        "Пользователь обсуждает конкретную вакансию. "
+                        "Твоя задача: анализировать её, давать советы по fit-у, "
+                        "помогать готовиться к собеседованию, писать сопроводительные.\n\n"
+                        f"=== ВАКАНСИЯ ===\n"
+                        f"Позиция: {job.title}\n"
+                        f"Компания: {job.company or 'не указана'}\n"
+                        f"Описание: {(job.description or 'нет')[:1500]}\n"
+                        f"Зарплата: {job.salary_text or 'не указана'}\n"
+                        f"Локация: {job.location or 'не указана'}\n"
+                        f"Удалёнка: {'да' if job.remote else 'нет/не указано'}\n"
+                        f"Источник: {job.source}{score_text}\n"
+                        "Отвечай кратко (2-5 предложений если не просят развёрнуто), "
+                        "по делу, на русском. Не выдумывай информацию о пользователе."
                     ),
                 }
                 messages = [system_msg] + messages
@@ -833,12 +1049,12 @@ class WorkHunter:
             system_msg = {
                 "role": "system",
                 "content": (
-                    "РўС‹ вЂ” AI-Р°СЃСЃРёСЃС‚РµРЅС‚ Work Hunter, РїРµСЂСЃРѕРЅР°Р»СЊРЅС‹Р№ РїРѕРјРѕС‰РЅРёРє РїРѕ РїРѕРёСЃРєСѓ IT-СЂР°Р±РѕС‚С‹. "
-                    "РўРІРѕРё РІРѕР·РјРѕР¶РЅРѕСЃС‚Рё: Р°РЅР°Р»РёР·РёСЂРѕРІР°С‚СЊ РІР°РєР°РЅСЃРёРё, РґР°РІР°С‚СЊ СЃРѕРІРµС‚С‹ РїРѕ СЂРµР·СЋРјРµ, "
-                    "РїРѕРјРѕРіР°С‚СЊ РіРѕС‚РѕРІРёС‚СЊСЃСЏ Рє СЃРѕР±РµСЃРµРґРѕРІР°РЅРёСЏРј, РѕС†РµРЅРёРІР°С‚СЊ fit РїРѕР·РёС†РёРё. "
-                    "РћС‚РІРµС‡Р°Р№ РЅР° СЂСѓСЃСЃРєРѕРј, РєСЂР°С‚РєРѕ Рё РїРѕ РґРµР»Сѓ (2-5 РїСЂРµРґР»РѕР¶РµРЅРёР№ РµСЃР»Рё РЅРµ РїСЂРѕСЃСЏС‚ СЂР°Р·РІС‘СЂРЅСѓС‚Рѕ). "
-                    "Р•СЃР»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃРїСЂР°С€РёРІР°РµС‚ РїСЂРѕ РєРѕРЅРєСЂРµС‚РЅСѓСЋ РІР°РєР°РЅСЃРёСЋ вЂ” РїСЂРµРґР»РѕР¶Рё РµРјСѓ СЃРЅР°С‡Р°Р»Р° "
-                    "РІС‹Р±СЂР°С‚СЊ РµС‘ РІ СЃРїРёСЃРєРµ РґР»СЏ РєРѕРЅС‚РµРєСЃС‚Р°."
+                    "Ты — AI-ассистент Work Hunter, персональный помощник по поиску IT-работы. "
+                    "Твои возможности: анализировать вакансии, давать советы по резюме, "
+                    "помогать готовиться к собеседованиям, оценивать fit позиции. "
+                    "Отвечай на русском, кратко и по делу (2-5 предложений если не просят развёрнуто). "
+                    "Если пользователь спрашивает про конкретную вакансию — предложи ему сначала "
+                    "выбрать её в списке для контекста."
                 ),
             }
             messages = [system_msg] + messages
@@ -1116,7 +1332,7 @@ class WorkHunter:
 
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
-            return ApplyPlan(
+            return self._store_apply_plan(ApplyPlan(
                 job_id=job_id,
                 source=job.source,
                 mode="api",
@@ -1126,7 +1342,7 @@ class WorkHunter:
                 status="blocked",
                 external_url=job.url,
                 raw_result={"message": "HH access token is required for exact API apply."},
-            ).to_dict()
+            ).to_dict())
 
         vacancy = client.get_vacancy(job.source_id)
         selected_resume = resume_id or _first_id(client.suitable_resumes(job.source_id))
@@ -1148,7 +1364,7 @@ class WorkHunter:
         if not selected_resume:
             risk_flags.append("no_resume")
 
-        return ApplyPlan(
+        return self._store_apply_plan(ApplyPlan(
             job_id=job_id,
             source=job.source,
             mode="api",
@@ -1159,7 +1375,13 @@ class WorkHunter:
             status="ready" if selected_resume else "blocked",
             external_url=str(vacancy.get("alternate_url") or job.url),
             raw_result={"vacancy": vacancy},
-        ).to_dict()
+        ).to_dict())
+
+    def _store_apply_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        plan_id = self.storage.save_apply_plan(plan)
+        plan["id"] = plan_id
+        plan["plan_id"] = plan_id
+        return plan
 
     def _prepare_external_apply_plan(
         self,
@@ -1225,7 +1447,7 @@ class WorkHunter:
             apply_meta=dict(raw_result.get("apply") or {}),
         )
 
-        return ApplyPlan(
+        return self._store_apply_plan(ApplyPlan(
             job_id=job_id,
             source=job.source,
             mode=mode,
@@ -1235,7 +1457,7 @@ class WorkHunter:
             status="external",
             external_url=external_url,
             raw_result=raw_result,
-        ).to_dict()
+        ).to_dict())
 
     def _getmatch_apply_detail(self, job: Job) -> dict[str, Any]:
         try:
@@ -1334,6 +1556,40 @@ class WorkHunter:
             plan["status"] = _hh_apply_error_outcome(result)
         plan["raw_result"] = result
         return plan
+
+    def confirm_apply_plan(self, plan_id: int, *, confirm: bool = False) -> dict[str, Any]:
+        stored_plan = self.storage.get_apply_plan(plan_id)
+        if stored_plan is None:
+            return {
+                "status": "error",
+                "code": "apply_plan_not_found",
+                "message": f"Apply plan {plan_id} was not found.",
+            }
+        if not confirm:
+            return {
+                "status": "blocked",
+                "message": "Explicit confirmation is required before sending a real application.",
+                "plan": stored_plan,
+            }
+        if stored_plan.get("status") != "ready":
+            return {
+                "status": "blocked",
+                "message": "Only ready apply plans can be confirmed.",
+                "plan": stored_plan,
+            }
+        result = self.confirm_apply(
+            int(stored_plan["job_id"]),
+            resume_id=str(stored_plan.get("resume_id") or "") or None,
+            letter=str(stored_plan.get("letter") or ""),
+            confirm=True,
+        )
+        self.storage.update_apply_plan_status(
+            plan_id,
+            str(result.get("status") or "error"),
+            confirmed=True,
+        )
+        result["plan_id"] = plan_id
+        return result
 
     def detect_hh_question_requirements(self, payload: dict[str, Any]) -> dict[str, Any]:
         questions = _hh_question_items(payload)
@@ -1556,8 +1812,8 @@ class WorkHunter:
             )
         except Exception:
             answer = (
-                "РЎРїР°СЃРёР±Рѕ Р·Р° РІРѕРїСЂРѕСЃ. РњРѕР№ РѕРїС‹С‚ СЂРµР»РµРІР°РЅС‚РµРЅ СЌС‚РѕР№ РІР°РєР°РЅСЃРёРё: СЏ СЂР°Р±РѕС‚Р°Р» СЃ РїРѕС…РѕР¶РёРјРё "
-                "Р·Р°РґР°С‡Р°РјРё Рё РіРѕС‚РѕРІ РїРѕРґСЂРѕР±РЅРµРµ РѕР±СЃСѓРґРёС‚СЊ РєРѕРЅРєСЂРµС‚РЅС‹Рµ С‚СЂРµР±РѕРІР°РЅРёСЏ."
+                "Спасибо за вопрос. Мой опыт релевантен этой вакансии: я работал с похожими "
+                "задачами и готов подробнее обсудить конкретные требования."
             )
         return clean_text(answer)
 
@@ -1566,7 +1822,11 @@ class WorkHunter:
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         count = 0
-        for payload in client.list_resumes():
+        try:
+            payloads = client.list_resumes()
+        except Exception as exc:
+            return {**_hh_error_payload(exc), "count": 0}
+        for payload in payloads:
             resume = _hh_resume_from_payload(payload)
             if not resume.id:
                 continue
@@ -1578,7 +1838,10 @@ class WorkHunter:
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required."}
-        return client.whoami()
+        try:
+            return client.whoami()
+        except Exception as exc:
+            return _hh_error_payload(exc)
 
     def hh_auth_status(self) -> dict[str, Any]:
         hh_config = self.hh_config()
@@ -1602,7 +1865,10 @@ class WorkHunter:
 
         client = HHApplyClient(hh_config)
         try:
-            me = client.whoami()
+            me_payload = client.whoami()
+            me = me_payload.get("me") if me_payload.get("status") == "ok" else me_payload
+            if isinstance(me_payload, dict) and me_payload.get("status") == "error":
+                raise RuntimeError(str(me_payload.get("error") or "HH API auth check failed"))
         except Exception as exc:
             if has_refresh_token:
                 actions.append("Run hh-refresh-token, then retry hh-auth-status.")
@@ -1629,6 +1895,145 @@ class WorkHunter:
             "me": me,
             "actions": actions,
         }
+
+    def import_hh_token(
+        self,
+        *,
+        access_token: str,
+        refresh_token: str = "",
+        client_id: str = "",
+        client_secret: str = "",
+        access_expires_at: str = "",
+        profile: str | None = None,
+    ) -> dict[str, Any]:
+        name = profile or str(self.config.get("hh_account_profile") or "default")
+        result = self.save_hh_account_profile(
+            name,
+            access_token=access_token,
+            refresh_token=refresh_token or None,
+            access_expires_at=access_expires_at or None,
+            client_id=client_id or None,
+            client_secret=client_secret or None,
+        )
+        if self.config.get("hh_account_profile") != name:
+            self.use_hh_account_profile(name)
+        whoami: dict[str, Any]
+        try:
+            whoami = self.hh_whoami()
+        except Exception as exc:
+            whoami = {"status": "error", "error": str(exc)}
+        return {
+            "status": "ok",
+            "profile": name,
+            "has_access_token": bool(access_token),
+            "has_refresh_token": bool(refresh_token),
+            "whoami": whoami,
+            "secrets_redacted": True,
+            "account": result,
+        }
+
+    def hh_web_status(self) -> dict[str, Any]:
+        hh_config = self.hh_config()
+        cookie_file_raw = str(hh_config.get("hh_cookie_file") or "")
+        if not cookie_file_raw:
+            return {
+                "status": "not_configured",
+                "has_cookie_file": False,
+                "has_xsrf": False,
+                "can_load_resumes_page": False,
+                "resumes_page_status": "not_configured",
+                "can_search_url": False,
+                "can_tests": False,
+                "can_chatik": False,
+                "resume_hashes": [],
+                "actions": ["work-hunter hh web import-cookies ./cookies.txt"],
+            }
+        cookie_file = Path(cookie_file_raw)
+        if not cookie_file.is_absolute():
+            cookie_file = self.root / cookie_file
+        if not cookie_file.exists():
+            return {
+                "status": "missing_cookie_file",
+                "cookie_file": str(cookie_file),
+                "has_cookie_file": False,
+                "has_xsrf": False,
+                "can_load_resumes_page": False,
+                "resumes_page_status": "missing_cookie_file",
+                "can_search_url": False,
+                "can_tests": False,
+                "can_chatik": False,
+                "resume_hashes": [],
+                "actions": ["refresh cookies", "work-hunter hh web import-cookies ./cookies.txt"],
+            }
+        text = cookie_file.read_text(encoding="utf-8", errors="replace")
+        cookie_count = sum(
+            1
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        has_xsrf = "_xsrf" in text
+        resume_hashes = sorted(set(re.findall(r"resume_hash[\"'=:\s]+([A-Za-z0-9_-]+)", text)))
+        return {
+            "status": "ok" if has_xsrf else "configured",
+            "cookie_file": str(cookie_file),
+            "has_cookie_file": True,
+            "cookie_count": cookie_count,
+            "has_xsrf": has_xsrf,
+            "can_load_resumes_page": has_xsrf,
+            "resumes_page_status": "configured_not_live_checked" if has_xsrf else "missing_xsrf",
+            "can_search_url": True,
+            "can_tests": has_xsrf,
+            "can_chatik": has_xsrf,
+            "resume_hashes": resume_hashes,
+            "actions": [] if has_xsrf else ["refresh cookies", "run hh web status"],
+        }
+
+    def import_hh_web_cookies(self, path: str | Path) -> dict[str, Any]:
+        cookie_file = Path(path)
+        if not cookie_file.is_absolute():
+            cookie_file = self.root / cookie_file
+        if not cookie_file.exists():
+            return {
+                "status": "error",
+                "code": "cookie_file_missing",
+                "message": f"Cookie file not found: {cookie_file}",
+                "next_actions": ["export cookies.txt from the browser", "retry import-cookies"],
+            }
+        hh_sources = self.config.setdefault("sources", {}).setdefault("hh", {})
+        hh_sources["hh_cookie_file"] = str(cookie_file)
+        save_config(self.config_path, self.config)
+        status = self.hh_web_status()
+        return {
+            "status": "ok",
+            "cookie_file": str(cookie_file),
+            "cookie_count": status.get("cookie_count", 0),
+            "has_xsrf": bool(status.get("has_xsrf")),
+            "can_load_resumes_page": bool(status.get("can_load_resumes_page")),
+            "resumes_page_status": status.get("resumes_page_status", "not_checked"),
+            "resume_hashes": status.get("resume_hashes", []),
+            "next_actions": status.get("actions", []),
+        }
+
+    def hh_web_search_url(self, search_url: str, *, limit: int = 20) -> dict[str, Any]:
+        parsed = urllib.parse.urlparse(search_url)
+        params = urllib.parse.parse_qs(parsed.query)
+        if not parsed.netloc.endswith("hh.ru"):
+            return {
+                "status": "blocked",
+                "code": "unsupported_search_url",
+                "message": "Only hh.ru search URLs are supported.",
+            }
+        return self.search_hh_vacancies(
+            text=(params.get("text") or [""])[0] or None,
+            area=params.get("area") or None,
+            professional_role=params.get("professional_role") or None,
+            industry=params.get("industry") or None,
+            salary=int((params.get("salary") or [0])[0] or 0) or None,
+            schedule=(params.get("schedule") or [""])[0] or None,
+            experience=(params.get("experience") or [""])[0] or None,
+            employment=params.get("employment") or None,
+            limit=limit,
+        )
 
     def refresh_hh_token(self) -> dict[str, Any]:
         client = HHApplyClient(self.hh_config())
@@ -1987,6 +2392,89 @@ class WorkHunter:
             "errors": errors,
         }
 
+    def plan_hh_reply(
+        self,
+        *,
+        negotiation_id: str,
+        template: str = "",
+        status: str = "active",
+        delay_minutes: int = 0,
+    ) -> dict[str, Any]:
+        negotiation_id = negotiation_id.strip()
+        if not negotiation_id:
+            raise ValueError("Negotiation id is required")
+        client = HHApplyClient(self.hh_config())
+        if not client.has_token():
+            return {"status": "blocked", "message": "HH access token is required."}
+        negotiation: dict[str, Any] | None = None
+        for payload in client.list_negotiations(status=status):
+            self._save_hh_negotiation_payload(payload)
+            if str(payload.get("id") or "") == negotiation_id:
+                negotiation = payload
+                break
+        if negotiation is None:
+            return {
+                "status": "blocked",
+                "code": "negotiation_not_found",
+                "message": f"Negotiation {negotiation_id} was not found in status={status}.",
+            }
+        persona = persona_from_profile(active_profile(self.config), self.config.get("about", {}))
+        service = HHChatAgentService(storage=self.storage, client=client)
+        result = service.plan_reply(
+            negotiation,
+            persona=persona.to_dict() if hasattr(persona, "to_dict") else dict(persona),
+            template=template,
+            delay_minutes=delay_minutes,
+        )
+        if result.get("outbox_id"):
+            result["plan_id"] = result["outbox_id"]
+            result["requires_confirmation"] = True
+            result.setdefault("risk_flags", result.get("reply", {}).get("risk_flags", []))
+            result["next_actions"] = [
+                f"work-hunter hh reply confirm --plan-id {result['outbox_id']} --confirm"
+            ]
+        return result
+
+    def confirm_hh_reply(self, plan_id: int, *, confirm: bool = False) -> dict[str, Any]:
+        item = self.storage.get_hh_agent_outbox(plan_id)
+        if item is None or item.channel != "hh_reply":
+            return {"status": "blocked", "code": "reply_plan_not_found", "plan_id": plan_id}
+        if item.status == "sent":
+            return {"status": "sent", "plan_id": plan_id, "result": item.payload.get("send_result") or {}}
+        if item.status == "pending_approval":
+            return {
+                "status": "blocked",
+                "code": "approval_required",
+                "plan_id": plan_id,
+                "pending_message_id": item.payload.get("pending_message_id"),
+            }
+        if not confirm:
+            return {
+                "status": "blocked",
+                "code": "confirm_required",
+                "message": "Explicit --confirm is required before sending HH chat replies.",
+                "plan_id": plan_id,
+                "requires_confirmation": True,
+                "preview": (item.payload.get("reply") or {}).get("message", ""),
+            }
+        reply = item.payload.get("reply") or {}
+        client = HHApplyClient(self.hh_config())
+        if not client.has_token():
+            return {"status": "blocked", "message": "HH access token is required.", "plan_id": plan_id}
+        try:
+            result = client.send_negotiation_message(
+                str(reply.get("negotiation_id") or item.target),
+                str(reply.get("message") or ""),
+                chat_id=str(reply.get("chat_id") or "") or None,
+            )
+        except Exception as exc:
+            payload = {**item.payload, "error": str(exc)}
+            self.storage.update_hh_agent_outbox(item.id, status="error", payload=payload)
+            return {"status": "error", "plan_id": plan_id, "error": str(exc)}
+        payload = {**item.payload, "send_result": result}
+        self.storage.update_hh_agent_outbox(item.id, status="sent", payload=payload)
+        return {"status": "sent", "plan_id": plan_id, "result": mask_secrets(result)}
+
     def plan_hh_negotiation_cleanup(
         self,
         *,
@@ -2142,11 +2630,54 @@ class WorkHunter:
     def clear_hh_skipped_vacancies(self) -> dict[str, Any]:
         return {"status": "ok", "count": self.storage.clear_hh_skipped_vacancies()}
 
-    def hh_call_api(self, method: str, path: str, data: Any = None) -> dict[str, Any]:
+    def hh_call_api(
+        self,
+        method: str,
+        path: str,
+        data: Any = None,
+        *,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        request = _normalize_hh_api_call_request(method=method, path=path, body=data)
+        safe_input = {
+            "method": request["method"],
+            "path": request["path"],
+            "params": mask_secrets(request.get("params") or {}),
+            "body": mask_secrets(request.get("body") or {}),
+            "confirmed_by_user": bool(confirm),
+        }
+        if request["method"] not in HH_API_READ_ONLY_METHODS and not confirm:
+            return {
+                "status": "blocked",
+                "code": "mutation_requires_confirm",
+                "message": "HH API mutating calls require --confirm.",
+                "requires_confirmation": True,
+                "risk_flags": ["external_mutating_request"],
+                **safe_input,
+            }
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
-            return {"status": "blocked", "message": "HH access token is required."}
-        return client.request_json(method.upper(), path, data=data)
+            return {"status": "blocked", "message": "HH access token is required.", **safe_input}
+        run_id = self.storage.start_hh_agent_mcp_run("hh_api_call", safe_input)
+        try:
+            result = client.request_json(
+                str(request["method"]),
+                str(request["path"]),
+                data=request.get("body"),
+                params=dict(request.get("params") or {}),
+            )
+        except Exception as exc:
+            output = {**_hh_error_payload(exc), "operation_id": run_id, **safe_input}
+            self.storage.finish_hh_agent_mcp_run(run_id, status="error", output=output, error=str(exc))
+            return output
+        output = {
+            "status": "ok",
+            "operation_id": run_id,
+            **safe_input,
+            "result": mask_secrets(result),
+        }
+        self.storage.finish_hh_agent_mcp_run(run_id, status="ok", output=output)
+        return output
 
     def hh_operator_summary(self) -> dict[str, Any]:
         resumes = self.storage.list_hh_resumes()
@@ -2448,6 +2979,145 @@ class WorkHunter:
         )
         return self.hh_agent_operation_status(operation_id)
 
+    def run_hh_research_operation(
+        self,
+        *,
+        text: str = "",
+        limit: int = 20,
+        resume_id: str = "",
+        run_id: int | None = None,
+        plan_apply: bool = False,
+        confirm_apply: bool = False,
+        min_score: int | None = None,
+    ) -> dict[str, Any]:
+        if confirm_apply:
+            return {
+                "status": "blocked",
+                "reason": "real_apply_blocked",
+                "message": "Research operations only produce dry-run apply plans.",
+                "counts": {"planned": 0, "blocked": 1, "applied": 0},
+                "items": [],
+            }
+        limit = max(1, min(int(limit or 20), 100))
+        client = self._hh_research_client()
+        if hasattr(client, "has_token") and not client.has_token():
+            return {
+                "status": "blocked",
+                "reason": "hh_access_token_required",
+                "message": "HH access token is required for live HH research.",
+                "counts": {"planned": 0, "blocked": 0, "applied": 0},
+                "items": [],
+            }
+        service = self._build_hh_research_service(client=client, min_score=min_score)
+        search_params = self._hh_research_search_params(text=text, limit=limit)
+        results = service.search_vacancies(search_params)
+        items: list[dict[str, Any]] = []
+        counts: dict[str, int] = {
+            "analyzed": 0,
+            "planned": 0,
+            "blocked": 0,
+            "applied": 0,
+            "errors": 0,
+        }
+        for search_result in results[:limit]:
+            item = search_result.to_dict()
+            try:
+                vacancy = service.get_vacancy_details(search_result.vacancy_id)
+                analysis = service.analyze_vacancy(vacancy, resume_id=resume_id, run_id=run_id)
+                counts["analyzed"] += 1
+                item.update(
+                    {
+                        "score": analysis.score,
+                        "recommended_action": analysis.recommended_action,
+                        "reasons": analysis.reasons,
+                        "risk_flags": analysis.risk_flags,
+                    }
+                )
+                if plan_apply:
+                    attempt = service.plan_apply_vacancy(
+                        vacancy,
+                        resume_id=resume_id,
+                        run_id=run_id,
+                        analysis=analysis,
+                    )
+                    item.update(
+                        {
+                            "attempt_status": attempt.status,
+                            "attempt_reason": attempt.reason,
+                        }
+                    )
+                    counts[attempt.status] = counts.get(attempt.status, 0) + 1
+                else:
+                    item["attempt_status"] = "not_planned"
+            except Exception as exc:
+                counts["errors"] += 1
+                item.update(
+                    {
+                        "status": "error",
+                        "error": str(exc),
+                        "score": 0,
+                        "recommended_action": "ask",
+                        "reasons": [],
+                        "risk_flags": ["research_error"],
+                        "attempt_status": "error",
+                    }
+                )
+            items.append(item)
+        status = "ok" if counts["errors"] == 0 else "partial"
+        return {
+            "status": status,
+            "text": text,
+            "limit": limit,
+            "resume_id": resume_id,
+            "counts": counts,
+            "items": items,
+        }
+
+    def _hh_research_client(self) -> Any:
+        return HHApplyClient(self.hh_config())
+
+    def _build_hh_research_service(
+        self,
+        *,
+        client: Any,
+        min_score: int | None = None,
+    ) -> HHVacancyResearchService:
+        profile = active_profile(self.config)
+        about = self.config.get("about", {})
+        return HHVacancyResearchService(
+            client=client,
+            storage=self.storage,
+            ai_config=self.config.get("ai", {}),
+            policy=self._hh_research_policy(min_score=min_score),
+            persona=persona_from_profile(profile, about).to_dict(),
+        )
+
+    def _hh_research_policy(self, *, min_score: int | None = None) -> VacancyPolicy:
+        profile = active_profile(self.config)
+        research_config = self.config.get("research") or {}
+        policy_config = dict((self.config.get("hh_agent") or {}).get("policy") or {})
+        policy_config.setdefault("must_have", profile.get("must_have_skills") or [])
+        policy_config.setdefault("nice_to_have", profile.get("nice_to_have_skills") or [])
+        policy_config.setdefault("excluded_keywords", profile.get("stop_words") or [])
+        policy_config["min_score"] = int(
+            min_score
+            if min_score is not None
+            else policy_config.get("min_score", research_config.get("min_score", 0))
+            or 0
+        )
+        return VacancyPolicy.from_mapping(policy_config)
+
+    def _hh_research_search_params(self, *, text: str, limit: int) -> dict[str, Any]:
+        hh_config = self.hh_config()
+        params: dict[str, Any] = {
+            "text": text,
+            "per_page": limit,
+            "page": 0,
+        }
+        if hh_config.get("area"):
+            params["area"] = hh_config.get("area")
+        return params
+
     def run_hh_agent_operation(self, operation: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = dict(params or {})
         operation = operation.strip().replace("_", "-")
@@ -2460,6 +3130,8 @@ class WorkHunter:
             "scan-events",
             "refresh-token",
             "clear-skipped",
+            "research-vacancies",
+            "research-and-apply",
         }
         if operation not in allowed:
             raise ValueError(f"Unsupported HH agent operation: {operation}")
@@ -2499,6 +3171,26 @@ class WorkHunter:
                     for key, value in refresh_result.items()
                     if key not in {"access_token", "refresh_token"}
                 }
+            elif operation == "research-vacancies":
+                result = self.run_hh_research_operation(
+                    text=str(params.get("text") or ""),
+                    limit=int(params.get("limit") or 20),
+                    resume_id=str(params.get("resume_id") or ""),
+                    run_id=run_id,
+                    plan_apply=False,
+                    confirm_apply=bool(params.get("confirm_apply", False)),
+                    min_score=_optional_int(params.get("min_score")),
+                )
+            elif operation == "research-and-apply":
+                result = self.run_hh_research_operation(
+                    text=str(params.get("text") or ""),
+                    limit=int(params.get("limit") or 20),
+                    resume_id=str(params.get("resume_id") or ""),
+                    run_id=run_id,
+                    plan_apply=True,
+                    confirm_apply=bool(params.get("confirm_apply", False)),
+                    min_score=_optional_int(params.get("min_score")),
+                )
             else:
                 result = self.clear_hh_skipped_vacancies()
         except Exception as exc:
@@ -2782,6 +3474,285 @@ class WorkHunter:
         self.config["hh_campaign_presets"] = presets
         save_config(self.config_path, self.config)
         return {"status": "ok"}
+
+    def list_strategies(self) -> dict[str, Any]:
+        presets = self.storage.list_search_presets()
+        active_name = str(self.config.get("profile") or "default")
+        generated = self._strategy_spec(active_name)
+        names = {item["name"] for item in presets}
+        if generated and generated["name"] not in names:
+            presets.append(
+                {
+                    "name": generated["name"],
+                    "source": generated.get("source", "hh"),
+                    "params": generated,
+                    "dry_run_checked_at": "",
+                    "last_live_run_at": "",
+                    "last_result": {},
+                    "enabled": True,
+                    "generated": True,
+                }
+            )
+        return {"status": "ok", "strategies": presets}
+
+    def run_strategy(
+        self,
+        name: str,
+        *,
+        dry_run: bool = True,
+        confirm: bool = False,
+        resume_id: str | None = None,
+    ) -> dict[str, Any]:
+        spec = self._strategy_spec(name)
+        if not spec:
+            return {"status": "blocked", "code": "strategy_not_found", "name": name}
+        queries = list(spec.get("queries") or [])
+        if not queries:
+            return {"status": "blocked", "code": "strategy_has_no_queries", "name": name}
+        daily_limit = int(spec.get("daily_limit") or spec.get("limit") or 40)
+        min_score = int(spec.get("min_score") or 0)
+        if dry_run and not confirm:
+            result = {
+                "status": "planned",
+                "name": name,
+                "dry_run": True,
+                "queries": queries,
+                "daily_limit": daily_limit,
+                "min_score": min_score,
+                "requires_confirmation": True,
+                "next_actions": [f"work-hunter strategy run {name} --confirm"],
+            }
+            self.storage.upsert_search_preset(name=name, source=str(spec.get("source") or "hh"), params=spec)
+            self.storage.update_search_preset_result(name, dry_run=True, result=result)
+            return result
+        if not confirm:
+            return {
+                "status": "blocked",
+                "code": "confirm_required",
+                "message": "Use --confirm to run strategy searches and write imported jobs.",
+                "name": name,
+            }
+
+        remaining = max(1, daily_limit)
+        query_results: list[dict[str, Any]] = []
+        imported_total = 0
+        for query in queries:
+            if remaining <= 0:
+                break
+            if not isinstance(query, dict):
+                query = {"text": str(query)}
+            result = self.search_hh_vacancies(
+                text=str(query.get("text") or ""),
+                area=_string_list(query.get("area") or query.get("areas")),
+                professional_role=_string_list(query.get("professional_role")),
+                industry=_string_list(query.get("industry")),
+                salary=_optional_int(query.get("salary")),
+                schedule=str(query.get("schedule") or "") or None,
+                experience=str(query.get("experience") or "") or None,
+                employment=_string_list(query.get("employment")),
+                limit=remaining,
+            )
+            query_results.append(result)
+            count = int(result.get("count") or 0)
+            imported_total += count
+            remaining -= count
+            if result.get("status") not in {"ok", "blocked"} and count == 0:
+                break
+        if imported_total == 0 and query_results and any(item.get("status") != "ok" for item in query_results):
+            result = {
+                "status": "blocked",
+                "name": name,
+                "dry_run": False,
+                "imported": 0,
+                "queries": query_results,
+                "message": "Strategy search did not import jobs; fix auth/search errors before campaign planning.",
+            }
+            self.storage.upsert_search_preset(name=name, source=str(spec.get("source") or "hh"), params=spec)
+            self.storage.update_search_preset_result(name, dry_run=False, result=result)
+            return result
+        scored = self.score_jobs()
+        campaign = self.plan_hh_campaign(
+            limit=min(daily_limit, max(imported_total, 1)),
+            min_score=min_score,
+            resume_id=resume_id or str(spec.get("resume_id") or "") or None,
+        )
+        result = {
+            "status": "ok",
+            "name": name,
+            "dry_run": False,
+            "imported": imported_total,
+            "scored": scored,
+            "campaign": campaign,
+            "queries": query_results,
+            "next_actions": [
+                f"work-hunter hh campaign confirm --run-id {campaign.get('id')} --confirm"
+                if campaign.get("id")
+                else "work-hunter hh campaign plan --limit 20"
+            ],
+        }
+        self.storage.upsert_search_preset(name=name, source=str(spec.get("source") or "hh"), params=spec)
+        self.storage.update_search_preset_result(name, dry_run=False, result=result)
+        return result
+
+    def strategy_report(self, name: str) -> dict[str, Any]:
+        preset = self.storage.get_search_preset(name)
+        spec = self._strategy_spec(name)
+        if preset is None and spec:
+            preset = {
+                "name": name,
+                "source": spec.get("source", "hh"),
+                "params": spec,
+                "dry_run_checked_at": "",
+                "last_live_run_at": "",
+                "last_result": {},
+                "enabled": True,
+            }
+        if preset is None:
+            return {"status": "blocked", "code": "strategy_not_found", "name": name}
+        min_score = int((preset.get("params") or {}).get("min_score") or 0)
+        jobs = self.storage.list_jobs(limit=20, source=str(preset.get("source") or "hh"), min_score=min_score)
+        return {
+            "status": "ok",
+            "strategy": preset,
+            "top_jobs": [job.to_dict() for job in jobs],
+            "counts": {
+                "top_jobs": len(jobs),
+                "applications": len(self.storage.list_applications()),
+            },
+        }
+
+    def _strategy_spec(self, name: str) -> dict[str, Any] | None:
+        strategies = self.config.get("search_strategies") or {}
+        if isinstance(strategies, dict) and isinstance(strategies.get(name), dict):
+            spec = dict(strategies[name])
+            spec.setdefault("name", name)
+            spec.setdefault("source", "hh")
+            return spec
+        preset = self.storage.get_search_preset(name)
+        if preset:
+            params = dict(preset.get("params") or {})
+            params.setdefault("name", name)
+            params.setdefault("source", preset.get("source") or "hh")
+            return params
+        active_name = str(self.config.get("profile") or "default")
+        if name in {active_name, "active", "active-profile", "default"}:
+            profile = active_profile(self.config)
+            hh_config = self.hh_config()
+            area = str(hh_config.get("area") or 113)
+            queries = [{"text": str(query), "area": [area]} for query in profile.get("queries") or []]
+            return {
+                "name": active_name,
+                "source": "hh",
+                "queries": queries,
+                "exclude": "|".join(str(item) for item in profile.get("stop_words") or []),
+                "min_score": 50,
+                "daily_limit": 40,
+                "dry_run_required": True,
+            }
+        return None
+
+    def search_hh_vacancies(
+        self,
+        *,
+        text: str | None = None,
+        area: list[str] | None = None,
+        professional_role: list[str] | None = None,
+        industry: list[str] | None = None,
+        salary: int | None = None,
+        schedule: str | None = None,
+        experience: str | None = None,
+        employment: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        search_field: list[str] | None = None,
+        employer_id: list[str] | None = None,
+        excluded_employer_id: list[str] | None = None,
+        only_with_salary: bool = False,
+        limit: int = 20,
+        page: int = 0,
+        order_by: str | None = None,
+        period: int | None = None,
+        currency: str | None = None,
+        no_magic: bool = False,
+        premium: bool = False,
+    ) -> dict[str, Any]:
+        client = HHApplyClient(self.hh_config())
+        if not client.has_token():
+            return {
+                "status": "blocked",
+                "count": 0,
+                "message": "HH access token is required.",
+                "next_actions": ["work-hunter hh auth import-token"],
+            }
+        total_limit = max(1, int(limit))
+        per_page = min(100, total_limit)
+        imported_jobs: list[Job] = []
+        seen: set[str] = set()
+        current_page = max(0, int(page))
+        base_params = _compact_hh_search_params(
+            {
+                "text": text,
+                "area": area,
+                "professional_role": professional_role,
+                "industry": industry,
+                "salary": salary,
+                "schedule": schedule,
+                "experience": experience,
+                "employment": employment,
+                "date_from": date_from,
+                "date_to": date_to,
+                "search_field": search_field,
+                "employer_id": employer_id,
+                "excluded_employer_id": excluded_employer_id,
+                "only_with_salary": True if only_with_salary else None,
+                "order_by": order_by,
+                "period": period,
+                "currency": currency,
+                "no_magic": True if no_magic else None,
+                "premium": True if premium else None,
+                "per_page": per_page,
+            }
+        )
+        while len(imported_jobs) < total_limit:
+            search_params = {**base_params, "page": current_page}
+            try:
+                payloads = client.search_vacancies(search_params)
+            except Exception as exc:
+                return {
+                    **_hh_error_payload(exc),
+                    "source": "hh",
+                    "transport": "api",
+                    "count": len(imported_jobs),
+                    "job_ids": [job.id for job in imported_jobs if job.id is not None],
+                    "search_params": {**base_params, "page": current_page},
+                }
+            if not payloads:
+                break
+            for payload in payloads:
+                job = _hh_job_from_vacancy_payload(payload)
+                if not job.source_id or job.source_id in seen:
+                    continue
+                seen.add(job.source_id)
+                job.id = self.storage.upsert_job(job)
+                imported_jobs.append(job)
+                if len(imported_jobs) >= total_limit:
+                    break
+            if len(payloads) < per_page:
+                break
+            current_page += 1
+        return {
+            "status": "ok",
+            "source": "hh",
+            "transport": "api",
+            "count": len(imported_jobs),
+            "job_ids": [job.id for job in imported_jobs if job.id is not None],
+            "search_params": {**base_params, "page": page},
+            "next_actions": [
+                "work-hunter score",
+                "work-hunter list --source hh --limit 20 --min-score 50",
+                "work-hunter hh campaign plan --limit 20",
+            ],
+        }
 
     def plan_hh_search_campaign(
         self,
@@ -3154,9 +4125,9 @@ class WorkHunter:
         ai_config = self.config.get("ai", {})
         experience_text = _format_experience(about)
         system_prompt = (
-            "С‚С‹ РєР°СЂСЊРµСЂРЅС‹Р№ РєРѕРЅСЃСѓР»СЊС‚Р°РЅС‚. РџСЂРѕР°РЅР°Р»РёР·РёСЂСѓР№ РІР°РєР°РЅСЃРёСЋ Рё РїСЂРѕС„РёР»СЊ РєР°РЅРґРёРґР°С‚Р°. "
-            "Р”Р°Р№ 3-4 РєРѕРЅРєСЂРµС‚РЅС‹С… СЃРѕРІРµС‚Р° С‡С‚Рѕ РїРѕРґСЃРІРµС‚РёС‚СЊ РІ СЂРµР·СЋРјРµ: РєР°РєРёРµ РїСЂРѕРµРєС‚С‹, "
-            "РєР°РєРёРµ РЅР°РІС‹РєРё, РєР°Рє РѕРїРёСЃР°С‚СЊ РѕРїС‹С‚ С‡С‚РѕР±С‹ Р»СѓС‡С€Рµ РїРѕРґС…РѕРґРёС‚СЊ."
+            "ты карьерный консультант. Проанализируй вакансию и профиль кандидата. "
+            "Дай 3-4 конкретных совета что подсветить в резюме: какие проекты, "
+            "какие навыки, как описать опыт чтобы лучше подходить."
         )
         user_prompt = _build_vacancy_candidate_prompt(job, about, experience_text)
         try:
@@ -3178,17 +4149,17 @@ class WorkHunter:
         ai_config = self.config.get("ai", {})
         experience_text = _format_experience(about)
         system_prompt = (
-            "С‚С‹ СЌРєСЃРїРµСЂС‚ РїРѕ ATS-РѕРїС‚РёРјРёР·Р°С†РёРё СЂРµР·СЋРјРµ. РЎРіРµРЅРµСЂРёСЂСѓР№ СЂРµР·СЋРјРµ РІ markdown С„РѕСЂРјР°С‚Рµ "
-            "РїРѕРґ РєРѕРЅРєСЂРµС‚РЅСѓСЋ РІР°РєР°РЅСЃРёСЋ. РСЃРїРѕР»СЊР·СѓР№ С‚РѕР»СЊРєРѕ СЂРµР°Р»СЊРЅС‹Р№ РѕРїС‹С‚ РєР°РЅРґРёРґР°С‚Р°. "
-            "РќР°С‡РЅРё СЃ СЃР°РјС‹С… СЂРµР»РµРІР°РЅС‚РЅС‹С… РїСЂРѕРµРєС‚РѕРІ. Р’РїР»РµС‚Рё РєР»СЋС‡РµРІС‹Рµ СЃР»РѕРІР° РёР· РІР°РєР°РЅСЃРёРё РµСЃС‚РµСЃС‚РІРµРЅРЅРѕ."
+            "ты эксперт по ATS-оптимизации резюме. Сгенерируй резюме в markdown формате "
+            "под конкретную вакансию. Используй только реальный опыт кандидата. "
+            "Начни с самых релевантных проектов. Вплети ключевые слова из вакансии естественно."
         )
         user_prompt = f"""{_build_vacancy_candidate_prompt(job, about, experience_text)}
 
-РЎРіРµРЅРµСЂРёСЂСѓР№ СЂРµР·СЋРјРµ РІ С„РѕСЂРјР°С‚Рµ:
-# РРјСЏ
-## РќР°РІС‹РєРё
-## РћРїС‹С‚
-(РёСЃРїРѕР»СЊР·СѓР№ markdown)"""
+Сгенерируй резюме в формате:
+# Имя
+## Навыки
+## Опыт
+(используй markdown)"""
         try:
             return chat_completion(
                 [
@@ -3203,19 +4174,19 @@ class WorkHunter:
     def ats_audit(self, resume_text: str, job_id: int | None = None) -> str:
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "С‚С‹ ATS-Р°СѓРґРёС‚РѕСЂ. РџСЂРѕР°РЅР°Р»РёР·РёСЂСѓР№ СЂРµР·СЋРјРµ РЅР° СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃ ATS: "
-            "С„РѕСЂРјР°С‚РёСЂРѕРІР°РЅРёРµ (РєРѕР»РѕРЅРєРё/С‚Р°Р±Р»РёС†С‹ РЅРµ С‡РёС‚Р°СЋС‚СЃСЏ), РєР»СЋС‡РµРІС‹Рµ СЃР»РѕРІР°, "
-            "РєРѕРЅС‚Р°РєС‚РЅС‹Рµ РґР°РЅРЅС‹Рµ, С‡РёС‚Р°РµРјРѕСЃС‚СЊ. Р”Р°Р№ РѕС†РµРЅРєСѓ Рё РєРѕРЅРєСЂРµС‚РЅС‹Рµ РёСЃРїСЂР°РІР»РµРЅРёСЏ."
+            "ты ATS-аудитор. Проанализируй резюме на совместимость с ATS: "
+            "форматирование (колонки/таблицы не читаются), ключевые слова, "
+            "контактные данные, читаемость. Дай оценку и конкретные исправления."
         )
-        user_prompt = f"Р РµР·СЋРјРµ РґР»СЏ Р°РЅР°Р»РёР·Р°:\n\n{resume_text}"
+        user_prompt = f"Резюме для анализа:\n\n{resume_text}"
         if job_id is not None:
             job = self.storage.get_job(job_id)
             if job:
                 user_prompt += (
-                    f"\n\nР’Р°РєР°РЅСЃРёСЏ РґР»СЏ РєРѕРЅС‚РµРєСЃС‚Р°:\n"
-                    f"- РџРѕР·РёС†РёСЏ: {job.title}\n"
-                    f"- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-                    f"- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}\n"
+                    f"\n\nВакансия для контекста:\n"
+                    f"- Позиция: {job.title}\n"
+                    f"- Компания: {job.company or 'не указана'}\n"
+                    f"- Описание: {job.description or 'нет описания'}\n"
                 )
         try:
             return chat_completion(
@@ -3234,18 +4205,18 @@ class WorkHunter:
             raise ValueError(f"Job {job_id} not found")
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "СЃРѕР¶РјРё РѕРїРёСЃР°РЅРёРµ РІР°РєР°РЅСЃРёРё РґРѕ 2-3 РїСЂРµРґР»РѕР¶РµРЅРёР№. "
-            "РћСЃС‚Р°РІСЊ: СЂРѕР»СЊ, РєР»СЋС‡РµРІРѕР№ СЃС‚РµРє, РІРёР»РєР° Р·Рї, РіР»Р°РІРЅР°СЏ РѕСЃРѕР±РµРЅРЅРѕСЃС‚СЊ/РїР»СЋС€РєР°. "
-            "РЇР·С‹Рє: СЂСѓСЃСЃРєРёР№."
+            "сожми описание вакансии до 2-3 предложений. "
+            "Оставь: роль, ключевой стек, вилка зп, главная особенность/плюшка. "
+            "Язык: русский."
         )
         user_prompt = (
-            f"Р’Р°РєР°РЅСЃРёСЏ:\n"
-            f"- РџРѕР·РёС†РёСЏ: {job.title}\n"
-            f"- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- Р—Р°СЂРїР»Р°С‚Р°: {job.salary_text or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- Р›РѕРєР°С†РёСЏ: {job.location or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- РЈРґР°Р»С‘РЅРєР°: {'РґР°' if job.remote else 'РЅРµС‚/РЅРµ СѓРєР°Р·Р°РЅРѕ'}\n"
-            f"- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}\n"
+            f"Вакансия:\n"
+            f"- Позиция: {job.title}\n"
+            f"- Компания: {job.company or 'не указана'}\n"
+            f"- Зарплата: {job.salary_text or 'не указана'}\n"
+            f"- Локация: {job.location or 'не указана'}\n"
+            f"- Удалёнка: {'да' if job.remote else 'нет/не указано'}\n"
+            f"- Описание: {job.description or 'нет описания'}\n"
         )
         try:
             return chat_completion(
@@ -3267,27 +4238,27 @@ class WorkHunter:
         ai_config = self.config.get("ai", {})
         experience_text = _format_experience(about)
         system_prompt = (
-            "С‚С‹ СЌРєСЃРїРµСЂС‚ РїРѕ РєР°СЂСЊРµСЂРЅРѕРјСѓ С„РёС‚Сѓ. РћС†РµРЅРё РЅР°СЃРєРѕР»СЊРєРѕ РєР°РЅРґРёРґР°С‚ РїРѕРґС…РѕРґРёС‚ РЅР° РІР°РєР°РЅСЃРёСЋ. "
-            "Р’РµСЂРЅРё РѕС‚РІРµС‚ СЃС‚СЂРѕРіРѕ РІ С„РѕСЂРјР°С‚Рµ JSON: "
-            '{"score": <С‡РёСЃР»Рѕ 0-100>, "reasoning": "<РєСЂР°С‚РєРѕРµ РѕР±РѕСЃРЅРѕРІР°РЅРёРµ РЅР° СЂСѓСЃСЃРєРѕРј>"}'
+            "ты эксперт по карьерному фиту. Оцени насколько кандидат подходит на вакансию. "
+            "Верни ответ строго в формате JSON: "
+            '{"score": <число 0-100>, "reasoning": "<краткое обоснование на русском>"}'
         )
-        user_prompt = f"""Р’Р°РєР°РЅСЃРёСЏ:
-- РџРѕР·РёС†РёСЏ: {job.title}
-- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}
-- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}
-- Р—Р°СЂРїР»Р°С‚Р°: {job.salary_text or 'РЅРµ СѓРєР°Р·Р°РЅР°'}
-- РЈРґР°Р»С‘РЅРєР°: {'РґР°' if job.remote else 'РЅРµС‚/РЅРµ СѓРєР°Р·Р°РЅРѕ'}
-- Р›РѕРєР°С†РёСЏ: {job.location or 'РЅРµ СѓРєР°Р·Р°РЅР°'}
+        user_prompt = f"""Вакансия:
+- Позиция: {job.title}
+- Компания: {job.company or 'не указана'}
+- Описание: {job.description or 'нет описания'}
+- Зарплата: {job.salary_text or 'не указана'}
+- Удалёнка: {'да' if job.remote else 'нет/не указано'}
+- Локация: {job.location or 'не указана'}
 
-РџСЂРѕС„РёР»СЊ:
-- Р¦РµР»РµРІР°СЏ СЂРѕР»СЊ: {profile.get('title', '')}
-- РќР°РІС‹РєРё: {', '.join(profile.get('must_have_skills', []) + profile.get('nice_to_have_skills', []))}
+Профиль:
+- Целевая роль: {profile.get('title', '')}
+- Навыки: {', '.join(profile.get('must_have_skills', []) + profile.get('nice_to_have_skills', []))}
 
-Рћ РєР°РЅРґРёРґР°С‚Рµ:
-- Р РµР·СЋРјРµ: {about.get('summary', '')}
-- Р’СЃРµ РЅР°РІС‹РєРё: {', '.join(about.get('all_skills', []))}
+О кандидате:
+- Резюме: {about.get('summary', '')}
+- Все навыки: {', '.join(about.get('all_skills', []))}
 
-РћРїС‹С‚:
+Опыт:
 {experience_text}"""
         try:
             raw = chat_completion(
@@ -3308,17 +4279,17 @@ class WorkHunter:
             raise ValueError(f"Job {job_id} not found")
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "СЃРіРµРЅРµСЂРёСЂСѓР№ 4-5 РІРѕРїСЂРѕСЃРѕРІ РєРѕС‚РѕСЂС‹Рµ СЃС‚РѕРёС‚ Р·Р°РґР°С‚СЊ СЂР°Р±РѕС‚РѕРґР°С‚РµР»СЋ РЅР° СЃРѕР±РµСЃРµРґРѕРІР°РЅРёРё "
-            "РїРѕ СЌС‚РѕР№ РІР°РєР°РЅСЃРёРё: РїСЂРѕ РєРѕРјР°РЅРґСѓ, СЃС‚РµРє, РїСЂРѕС†РµСЃСЃС‹, РѕР¶РёРґР°РЅРёСЏ, СЂРѕСЃС‚. РЇР·С‹Рє: СЂСѓСЃСЃРєРёР№."
+            "сгенерируй 4-5 вопросов которые стоит задать работодателю на собеседовании "
+            "по этой вакансии: про команду, стек, процессы, ожидания, рост. Язык: русский."
         )
         user_prompt = (
-            f"Р’Р°РєР°РЅСЃРёСЏ:\n"
-            f"- РџРѕР·РёС†РёСЏ: {job.title}\n"
-            f"- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}\n"
-            f"- Р—Р°СЂРїР»Р°С‚Р°: {job.salary_text or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- Р›РѕРєР°С†РёСЏ: {job.location or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- РЈРґР°Р»С‘РЅРєР°: {'РґР°' if job.remote else 'РЅРµС‚/РЅРµ СѓРєР°Р·Р°РЅРѕ'}\n"
+            f"Вакансия:\n"
+            f"- Позиция: {job.title}\n"
+            f"- Компания: {job.company or 'не указана'}\n"
+            f"- Описание: {job.description or 'нет описания'}\n"
+            f"- Зарплата: {job.salary_text or 'не указана'}\n"
+            f"- Локация: {job.location or 'не указана'}\n"
+            f"- Удалёнка: {'да' if job.remote else 'нет/не указано'}\n"
         )
         try:
             return chat_completion(
@@ -3339,16 +4310,16 @@ class WorkHunter:
         ai_config = self.config.get("ai", {})
         experience_text = _format_experience(about)
         system_prompt = (
-            "С‚С‹ РєР°СЂСЊРµСЂРЅС‹Р№ РєРѕСѓС‡. Р’С‹Р±РµСЂРё РёР· РѕРїС‹С‚Р° РєР°РЅРґРёРґР°С‚Р° СЃР°РјС‹Р№ СЂРµР»РµРІР°РЅС‚РЅС‹Р№ РїСЂРѕРµРєС‚ "
-            "РґР»СЏ СЌС‚РѕР№ РІР°РєР°РЅСЃРёРё Рё РЅР°РїРёС€Рё STAR-РїРёС‚С‡ (Situation, Task, Action, Result) "
-            "РЅР° 4-5 РїСЂРµРґР»РѕР¶РµРЅРёР№. РўРѕР»СЊРєРѕ СЂРµР°Р»СЊРЅС‹Р№ РѕРїС‹С‚ РёР· РїСЂРµРґРѕСЃС‚Р°РІР»РµРЅРЅРѕРіРѕ."
+            "ты карьерный коуч. Выбери из опыта кандидата самый релевантный проект "
+            "для этой вакансии и напиши STAR-питч (Situation, Task, Action, Result) "
+            "на 4-5 предложений. Только реальный опыт из предоставленного."
         )
-        user_prompt = f"""Р’Р°РєР°РЅСЃРёСЏ:
-- РџРѕР·РёС†РёСЏ: {job.title}
-- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}
-- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}
+        user_prompt = f"""Вакансия:
+- Позиция: {job.title}
+- Компания: {job.company or 'не указана'}
+- Описание: {job.description or 'нет описания'}
 
-РћРїС‹С‚ РєР°РЅРґРёРґР°С‚Р°:
+Опыт кандидата:
 {experience_text}"""
         try:
             return chat_completion(
@@ -3380,14 +4351,14 @@ class WorkHunter:
         jobs: list[Job] = []
         try:
             system_prompt = (
-                "С‚С‹ РїР°СЂСЃРµСЂ РїРѕРёСЃРєРѕРІС‹С… Р·Р°РїСЂРѕСЃРѕРІ. РР·РІР»РµРєРё РёР· С‚РµРєСЃС‚Р°: РєР»СЋС‡РµРІС‹Рµ СЃР»РѕРІР° РґР»СЏ РїРѕРёСЃРєР°, "
-                "Р¶РµР»Р°РµРјСѓСЋ СЂРѕР»СЊ, РЅР°РІС‹РєРё. Р’РµСЂРЅРё JSON: "
+                "ты парсер поисковых запросов. Извлеки из текста: ключевые слова для поиска, "
+                "желаемую роль, навыки. Верни JSON: "
                 '{"queries": [...], "desired_skills": [...], "remote_only": bool}'
             )
             raw = chat_completion(
                 [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Р—Р°РїСЂРѕСЃ: {query}"},
+                    {"role": "user", "content": f"Запрос: {query}"},
                 ],
                 ai_config,
             )
@@ -3423,7 +4394,126 @@ class WorkHunter:
                     job.url,
                 ])
             return buf.getvalue()
+        if format == "jsonl":
+            return "\n".join(json.dumps(job.to_dict(), ensure_ascii=False) for job in jobs) + ("\n" if jobs else "")
         return json.dumps([job.to_dict() for job in jobs], ensure_ascii=False)
+
+    def export_applications(self, *, format: str = "jsonl") -> str:
+        rows: list[dict[str, Any]] = []
+        for app in self.storage.list_applications():
+            job = self.storage.get_job(app.job_id)
+            item = app.to_dict()
+            if job:
+                item["job"] = {
+                    "id": job.id,
+                    "source": job.source,
+                    "source_id": job.source_id,
+                    "title": job.title,
+                    "company": job.company,
+                    "url": job.url,
+                    "score": job.score.total_score if job.score else 0,
+                }
+            rows.append(mask_secrets(item))
+        if format == "csv":
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(["id", "job_id", "status", "applied_at", "title", "company", "source", "url", "notes"])
+            for item in rows:
+                job = item.get("job") or {}
+                writer.writerow([
+                    item.get("id"),
+                    item.get("job_id"),
+                    item.get("status"),
+                    item.get("applied_at"),
+                    job.get("title", ""),
+                    job.get("company", ""),
+                    job.get("source", ""),
+                    job.get("url", ""),
+                    item.get("notes", ""),
+                ])
+            return buf.getvalue()
+        if format == "json":
+            return json.dumps(rows, ensure_ascii=False)
+        return "\n".join(json.dumps(item, ensure_ascii=False) for item in rows) + ("\n" if rows else "")
+
+    def export_report(self, *, since: str = "", format: str = "json") -> str:
+        report = {
+            "status": "ok",
+            "since": since,
+            "daily": self.daily_report(limit=20),
+            "stats": self.storage.get_stats(),
+            "doctor": self.doctor(),
+        }
+        if format == "md":
+            lines = [
+                "# Work Hunter Report",
+                "",
+                f"Since: {since or 'all time'}",
+                f"Total jobs: {report['stats'].get('total_jobs', 0)}",
+                f"Applications: {report['stats'].get('total_applications', 0)}",
+                "",
+                "## Top Jobs",
+            ]
+            for job in report["daily"].get("top", [])[:10]:
+                score = (job.get("score") or {}).get("total_score") or 0
+                lines.append(f"- [{score}] {job.get('title')} @ {job.get('company')} - {job.get('url')}")
+            return "\n".join(lines) + "\n"
+        return json.dumps(mask_secrets(report), ensure_ascii=False)
+
+    def import_jobs_file(self, path: str | Path) -> dict[str, Any]:
+        file_path = Path(path)
+        if not file_path.is_absolute():
+            file_path = self.root / file_path
+        if not file_path.exists():
+            return {"status": "blocked", "code": "file_not_found", "path": str(file_path)}
+        suffix = file_path.suffix.lower()
+        rows: list[dict[str, Any]] = []
+        if suffix == ".csv":
+            with file_path.open("r", encoding="utf-8-sig", newline="") as fh:
+                rows = [dict(row) for row in csv.DictReader(fh)]
+        elif suffix == ".jsonl":
+            rows = [
+                json.loads(line)
+                for line in file_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        elif suffix == ".json":
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+            rows = payload if isinstance(payload, list) else list(payload.get("jobs") or [])
+        else:
+            return {"status": "blocked", "code": "unsupported_format", "path": str(file_path)}
+        imported = 0
+        errors: list[dict[str, Any]] = []
+        for index, row in enumerate(rows, start=1):
+            try:
+                source = str(row.get("source") or "import")
+                source_id = str(row.get("source_id") or row.get("id") or row.get("url") or f"row-{index}")
+                title = str(row.get("title") or row.get("name") or "")
+                url = str(row.get("url") or row.get("alternate_url") or "")
+                if not title or not url:
+                    raise ValueError("title and url are required")
+                job = Job(
+                    source=source,
+                    source_id=source_id,
+                    url=url,
+                    title=title,
+                    company=str(row.get("company") or row.get("employer") or ""),
+                    salary_text=str(row.get("salary") or row.get("salary_text") or ""),
+                    location=str(row.get("location") or ""),
+                    remote=_parse_bool(row.get("remote")),
+                    description=str(row.get("description") or row.get("snippet") or ""),
+                    published_at=str(row.get("published_at") or ""),
+                )
+                self.storage.upsert_job(job)
+                imported += 1
+            except Exception as exc:
+                errors.append({"row": index, "error": str(exc)})
+        return {
+            "status": "ok" if not errors else "partial",
+            "path": str(file_path),
+            "count": imported,
+            "errors": errors,
+        }
 
     def parse_job_structure(self, job_id: int) -> dict[str, Any]:
         job = self.storage.get_job(job_id)
@@ -3431,11 +4521,11 @@ class WorkHunter:
             raise ValueError(f"Job {job_id} not found")
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "РўС‹ РїР°СЂСЃРµСЂ РІР°РєР°РЅСЃРёР№. РР·РІР»РµРєРё РёР· С‚РµРєСЃС‚Р° РІР°РєР°РЅСЃРёРё СЃС‚СЂСѓРєС‚СѓСЂРёСЂРѕРІР°РЅРЅСѓСЋ РёРЅС„РѕСЂРјР°С†РёСЋ. "
-            "Р’РµСЂРЅРё РўРћР›Р¬РљРћ РІР°Р»РёРґРЅС‹Р№ JSON Р±РµР· markdown-РѕР±С‘СЂС‚РєРё. "
-            "РџРѕР»СЏ: tech_stack (СЃРїРёСЃРѕРє С‚РµС…РЅРѕР»РѕРіРёР№), experience_years (СЃС‚СЂРѕРєР°, РЅР°РїСЂРёРјРµСЂ '1-3'), "
-            "must_have (СЃРїРёСЃРѕРє РѕР±СЏР·Р°С‚РµР»СЊРЅС‹С… С‚СЂРµР±РѕРІР°РЅРёР№), nice_to_have (СЃРїРёСЃРѕРє Р¶РµР»Р°С‚РµР»СЊРЅС‹С…), "
-            "benefits (СЃРїРёСЃРѕРє Р±РµРЅРµС„РёС‚РѕРІ), seniority_level (junior/middle/senior/lead), "
+            "Ты парсер вакансий. Извлеки из текста вакансии структурированную информацию. "
+            "Верни ТОЛЬКО валидный JSON без markdown-обёртки. "
+            "Поля: tech_stack (список технологий), experience_years (строка, например '1-3'), "
+            "must_have (список обязательных требований), nice_to_have (список желательных), "
+            "benefits (список бенефитов), seniority_level (junior/middle/senior/lead), "
             "company_type (product/outsource/startup/enterprise), real_remote (true/false)."
         )
         user_prompt = (job.description or "")[:2000]
@@ -3458,14 +4548,14 @@ class WorkHunter:
         job_texts: list[str] = []
         for job in jobs:
             desc = (job.description or "")[:200]
-            job_texts.append(f"- {job.title} ({job.company or 'вЂ”'}): {desc}")
+            job_texts.append(f"- {job.title} ({job.company or '—'}): {desc}")
         system_prompt = (
-            "РўС‹ Р°РЅР°Р»РёС‚РёРє IT-СЂС‹РЅРєР° С‚СЂСѓРґР°. РџСЂРѕР°РЅР°Р»РёР·РёСЂСѓР№ СЃРїРёСЃРѕРє РІР°РєР°РЅСЃРёР№ Рё РѕС‚РІРµС‚СЊ РЅР° РІРѕРїСЂРѕСЃС‹: "
-            "1) РљР°РєРёРµ С‚РµС…РЅРѕР»РѕРіРёРё СЃРµР№С‡Р°СЃ СЃР°РјС‹Рµ РІРѕСЃС‚СЂРµР±РѕРІР°РЅРЅС‹Рµ (С‚РѕРї-10)? "
-            "2) РљР°РєРёРµ СЂРѕР»Рё/СЃРїРµС†РёР°Р»РёР·Р°С†РёРё С‡Р°С‰Рµ РІСЃРµРіРѕ РёС‰СѓС‚? "
-            "3) РљР°РєРёРµ Р·Р°СЂРїР»Р°С‚РЅС‹Рµ РІРёР»РєРё РїСЂРµРѕР±Р»Р°РґР°СЋС‚? "
-            "4) РљР°РєРёРµ С‚СЂРµРЅРґС‹ Р·Р°РјРµС‚РЅС‹? "
-            "РћС‚РІРµС‡Р°Р№ СЃС‚СЂСѓРєС‚СѓСЂРёСЂРѕРІР°РЅРЅРѕ, РЅР° СЂСѓСЃСЃРєРѕРј."
+            "Ты аналитик IT-рынка труда. Проанализируй список вакансий и ответь на вопросы: "
+            "1) Какие технологии сейчас самые востребованные (топ-10)? "
+            "2) Какие роли/специализации чаще всего ищут? "
+            "3) Какие зарплатные вилки преобладают? "
+            "4) Какие тренды заметны? "
+            "Отвечай структурированно, на русском."
         )
         user_prompt = "\n".join(job_texts)
         try:
@@ -3477,7 +4567,7 @@ class WorkHunter:
                 ai_config,
             )
         except Exception as exc:
-            return f"РћС€РёР±РєР°: {exc}"
+            return f"Ошибка: {exc}"
 
     def gap_analysis(self, resume_id: int, job_id: int) -> str:
         resume = self.storage.get_resume(resume_id)
@@ -3488,19 +4578,19 @@ class WorkHunter:
             raise ValueError(f"Job {job_id} not found")
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "РўС‹ РєР°СЂСЊРµСЂРЅС‹Р№ РєРѕРЅСЃСѓР»СЊС‚Р°РЅС‚. РЎСЂР°РІРЅРё СЂРµР·СЋРјРµ РєР°РЅРґРёРґР°С‚Р° СЃ С‚СЂРµР±РѕРІР°РЅРёСЏРјРё РІР°РєР°РЅСЃРёРё. "
-            "РќР°Р№РґРё: 1) РљР°РєРёРµ РЅР°РІС‹РєРё РёР· РІР°РєР°РЅСЃРёРё РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚ РІ СЂРµР·СЋРјРµ (skills gap) "
-            "2) РљР°РєРёРµ РЅР°РІС‹РєРё РµСЃС‚СЊ РЅРѕ РЅРµ РїРѕРґСЃРІРµС‡РµРЅС‹/СЃРїСЂСЏС‚Р°РЅС‹ "
-            "3) РљР°Рє РїРµСЂРµС„РѕСЂРјСѓР»РёСЂРѕРІР°С‚СЊ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёР№ РѕРїС‹С‚ С‡С‚РѕР±С‹ Р»СѓС‡С€Рµ РјР°С‚С‡РёС‚СЊ РІР°РєР°РЅСЃРёСЋ "
-            "4) Р§С‚Рѕ РєРѕРЅРєСЂРµС‚РЅРѕ РґРѕР±Р°РІРёС‚СЊ РІ СЂРµР·СЋРјРµ. "
-            "РћС‚РІРµС‡Р°Р№ РїРѕ РґРµР»Сѓ, 5-8 РїСѓРЅРєС‚РѕРІ. РќР° СЂСѓСЃСЃРєРѕРј."
+            "Ты карьерный консультант. Сравни резюме кандидата с требованиями вакансии. "
+            "Найди: 1) Какие навыки из вакансии отсутствуют в резюме (skills gap) "
+            "2) Какие навыки есть но не подсвечены/спрятаны "
+            "3) Как переформулировать существующий опыт чтобы лучше матчить вакансию "
+            "4) Что конкретно добавить в резюме. "
+            "Отвечай по делу, 5-8 пунктов. На русском."
         )
         user_prompt = (
-            f"Р’Р°РєР°РЅСЃРёСЏ:\n"
-            f"- РџРѕР·РёС†РёСЏ: {job.title}\n"
-            f"- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}\n"
-            f"\nР РµР·СЋРјРµ:\n{resume.body}"
+            f"Вакансия:\n"
+            f"- Позиция: {job.title}\n"
+            f"- Компания: {job.company or 'не указана'}\n"
+            f"- Описание: {job.description or 'нет описания'}\n"
+            f"\nРезюме:\n{resume.body}"
         )
         try:
             return chat_completion(
@@ -3511,16 +4601,16 @@ class WorkHunter:
                 ai_config,
             )
         except Exception as exc:
-            return f"РћС€РёР±РєР°: {exc}"
+            return f"Ошибка: {exc}"
 
     def ats_score_resume(self, resume_text: str) -> dict[str, Any]:
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "РўС‹ СЌРєСЃРїРµСЂС‚ РїРѕ ATS (Applicant Tracking Systems). РћС†РµРЅРё СЂРµР·СЋРјРµ РЅР° СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃ ATS. "
-            "РљСЂРёС‚РµСЂРёРё: 1) РћС‚СЃСѓС‚СЃС‚РІРёРµ С‚Р°Р±Р»РёС†/РєРѕР»РѕРЅРѕРє/РёР·РѕР±СЂР°Р¶РµРЅРёР№ "
-            "2) РќР°Р»РёС‡РёРµ РєР»СЋС‡РµРІС‹С… СЃР»РѕРІ 3) РЎС‚Р°РЅРґР°СЂС‚РЅС‹Рµ Р·Р°РіРѕР»РѕРІРєРё СЂР°Р·РґРµР»РѕРІ ('РћРїС‹С‚', 'РќР°РІС‹РєРё', 'РћР±СЂР°Р·РѕРІР°РЅРёРµ') "
-            "4) Р§РёС‚Р°РµРјРѕСЃС‚СЊ РїР°СЂСЃРµСЂР°РјРё 5) РљРѕРЅС‚Р°РєС‚РЅР°СЏ РёРЅС„РѕСЂРјР°С†РёСЏ. "
-            "Р’РµСЂРЅРё РўРћР›Р¬РљРћ JSON: {\"score\": С‡РёСЃР»Рѕ 0-100, \"issues\": [СЃРїРёСЃРѕРє РїСЂРѕР±Р»РµРј], \"suggestions\": [СЃРїРёСЃРѕРє СЃРѕРІРµС‚РѕРІ]}."
+            "Ты эксперт по ATS (Applicant Tracking Systems). Оцени резюме на совместимость с ATS. "
+            "Критерии: 1) Отсутствие таблиц/колонок/изображений "
+            "2) Наличие ключевых слов 3) Стандартные заголовки разделов ('Опыт', 'Навыки', 'Образование') "
+            "4) Читаемость парсерами 5) Контактная информация. "
+            "Верни ТОЛЬКО JSON: {\"score\": число 0-100, \"issues\": [список проблем], \"suggestions\": [список советов]}."
         )
         try:
             raw = chat_completion(
@@ -3541,19 +4631,19 @@ class WorkHunter:
             raise ValueError(f"Job {job_id} not found")
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "РўС‹ РєР»Р°СЃСЃРёС„РёРєР°С‚РѕСЂ IT-РІР°РєР°РЅСЃРёР№. РџСЂРѕР°РЅР°Р»РёР·РёСЂСѓР№ РѕРїРёСЃР°РЅРёРµ Рё РІРµСЂРЅРё РўРћР›Р¬РљРћ JSON: "
+            "Ты классификатор IT-вакансий. Проанализируй описание и верни ТОЛЬКО JSON: "
             "{\"seniority_level\": \"junior/middle/senior/lead\", "
             "\"real_remote\": true/false, \"has_salary\": true/false, "
-            "\"red_flags\": [СЃРїРёСЃРѕРє РІРѕР·РјРѕР¶РЅС‹С… РєСЂР°СЃРЅС‹С… С„Р»Р°РіРѕРІ РІ РІР°РєР°РЅСЃРёРё: С‚РѕРєСЃРёС‡РЅС‹Рµ С„РѕСЂРјСѓР»РёСЂРѕРІРєРё, Р·Р°РІС‹С€РµРЅРЅС‹Рµ С‚СЂРµР±РѕРІР°РЅРёСЏ, 'РјС‹ СЃРµРјСЊСЏ' Рё С‚.Рґ.], "
+            "\"red_flags\": [список возможных красных флагов в вакансии: токсичные формулировки, завышенные требования, 'мы семья' и т.д.], "
             "\"company_type\": \"product/outsource/startup/enterprise/unknown\", "
-            "\"tags\": [РєР»СЋС‡РµРІС‹Рµ С‚РµРіРё]}."
+            "\"tags\": [ключевые теги]}."
         )
         user_prompt = (
-            f"Р’Р°РєР°РЅСЃРёСЏ:\n"
-            f"- РџРѕР·РёС†РёСЏ: {job.title}\n"
-            f"- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- РћРїРёСЃР°РЅРёРµ: {job.description or 'РЅРµС‚ РѕРїРёСЃР°РЅРёСЏ'}\n"
-            f"- Р—Р°СЂРїР»Р°С‚Р°: {job.salary_text or 'РЅРµ СѓРєР°Р·Р°РЅР°'}"
+            f"Вакансия:\n"
+            f"- Позиция: {job.title}\n"
+            f"- Компания: {job.company or 'не указана'}\n"
+            f"- Описание: {job.description or 'нет описания'}\n"
+            f"- Зарплата: {job.salary_text or 'не указана'}"
         )
         try:
             raw = chat_completion(
@@ -3575,27 +4665,27 @@ class WorkHunter:
         ai_config = self.config.get("ai", {})
         stage_prompts = {
             "hr": (
-                "РџРѕРґРіРѕС‚РѕРІСЊ Рє HR-СЃРєСЂРёРЅРёРЅРіСѓ: РєР°РєРёРµ РІРѕРїСЂРѕСЃС‹ Р·Р°РґР°РґСѓС‚ РїСЂРѕ РјРѕС‚РёРІР°С†РёСЋ, Р·Рї РѕР¶РёРґР°РЅРёСЏ, РїСЂРёС‡РёРЅС‹ СѓС…РѕРґР°. "
-                "РљР°РєРёРµ РІРѕРїСЂРѕСЃС‹ Р·Р°РґР°С‚СЊ РїСЂРѕ РєРѕРјРїР°РЅРёСЋ, РєРѕРјР°РЅРґСѓ, РїСЂРѕС†РµСЃСЃС‹."
+                "Подготовь к HR-скринингу: какие вопросы зададут про мотивацию, зп ожидания, причины ухода. "
+                "Какие вопросы задать про компанию, команду, процессы."
             ),
             "tech": (
-                "РџРѕРґРіРѕС‚РѕРІСЊ Рє С‚РµС…РЅРёС‡РµСЃРєРѕРјСѓ СЃРѕР±РµСЃСѓ: РєР°РєРёРµ С‚РµС…РЅРѕР»РѕРіРёРё СЃРїСЂРѕСЃСЏС‚, С‚РёРїРёС‡РЅС‹Рµ Р·Р°РґР°С‡Рё, С‡С‚Рѕ РїРѕРІС‚РѕСЂРёС‚СЊ. "
-                "РЎРѕСЃС‚Р°РІСЊ СЃРїРёСЃРѕРє С‚РµРј РїРѕ РѕРїРёСЃР°РЅРёСЋ РІР°РєР°РЅСЃРёРё."
+                "Подготовь к техническому собесу: какие технологии спросят, типичные задачи, что повторить. "
+                "Составь список тем по описанию вакансии."
             ),
             "final": (
-                "РџРѕРґРіРѕС‚РѕРІСЊ Рє С„РёРЅР°Р»СЊРЅРѕРјСѓ СЃРѕР±РµСЃСѓ: РІРѕРїСЂРѕСЃС‹ РїСЂРѕ РєСѓР»СЊС‚СѓСЂСѓ, СЂРѕСЃС‚, РѕР¶РёРґР°РЅРёСЏ. "
-                "РљР°Рє РїРѕРєР°Р·Р°С‚СЊ fit СЃ РєРѕРјР°РЅРґРѕР№."
+                "Подготовь к финальному собесу: вопросы про культуру, рост, ожидания. "
+                "Как показать fit с командой."
             ),
             "offer": (
-                "РџРѕРґРіРѕС‚РѕРІСЊ Рє РѕР±СЃСѓР¶РґРµРЅРёСЋ РѕС„С„РµСЂР°: РєР°Рє РѕР±СЃСѓР¶РґР°С‚СЊ Р·Рї, РєР°РєРёРµ Р±РµРЅРµС„РёС‚С‹ РїСЂРѕСЃРёС‚СЊ, РєР°Рє С‚РѕСЂРіРѕРІР°С‚СЊСЃСЏ."
+                "Подготовь к обсуждению оффера: как обсуждать зп, какие бенефиты просить, как торговаться."
             ),
         }
         system_prompt = stage_prompts.get(stage, stage_prompts["hr"])
         user_prompt = (
-            f"Р’Р°РєР°РЅСЃРёСЏ:\n"
-            f"- РџРѕР·РёС†РёСЏ: {job.title}\n"
-            f"- РљРѕРјРїР°РЅРёСЏ: {job.company or 'РЅРµ СѓРєР°Р·Р°РЅР°'}\n"
-            f"- РћРїРёСЃР°РЅРёРµ: {(job.description or '')[:1000]}"
+            f"Вакансия:\n"
+            f"- Позиция: {job.title}\n"
+            f"- Компания: {job.company or 'не указана'}\n"
+            f"- Описание: {(job.description or '')[:1000]}"
         )
         try:
             return chat_completion(
@@ -3606,21 +4696,21 @@ class WorkHunter:
                 ai_config,
             )
         except Exception as exc:
-            return f"РћС€РёР±РєР°: {exc}"
+            return f"Ошибка: {exc}"
 
     def behavior_suggest(self) -> str:
         stats = self.storage.get_behavior_stats()
         if not stats.get("total_actions"):
-            return "РџРѕРєР° РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… РґР»СЏ Р°РЅР°Р»РёР·Р° РїРѕРІРµРґРµРЅРёСЏ."
+            return "Пока недостаточно данных для анализа поведения."
         ai_config = self.config.get("ai", {})
         system_prompt = (
-            "РўС‹ Р°РЅР°Р»РёС‚РёРє РїРѕРІРµРґРµРЅРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ. РќР° РѕСЃРЅРѕРІРµ РёСЃС‚РѕСЂРёРё РµРіРѕ РґРµР№СЃС‚РІРёР№ СЃ РІР°РєР°РЅСЃРёСЏРјРё "
-            "(СЃРѕС…СЂР°РЅРµРЅРёСЏ, СЃРєСЂС‹С‚РёСЏ, РѕС‚РєР»РёРєРё) РїСЂРµРґР»РѕР¶Рё 2-3 РїСЂР°РІРёР»Р° РґР»СЏ Р°РІС‚Рѕ-С„РёР»СЊС‚СЂР°С†РёРё. "
-            "РќР°РїСЂРёРјРµСЂ: 'С‚С‹ С‡Р°СЃС‚Рѕ СЃРєСЂС‹РІР°РµС€СЊ РІР°РєР°РЅСЃРёРё РіРґРµ РІ РЅР°Р·РІР°РЅРёРё РµСЃС‚СЊ X вЂ” РґРѕР±Р°РІРёС‚СЊ X РІ СЃС‚РѕРї-СЃР»РѕРІР°' "
-            "РёР»Рё 'С‚С‹ СЃРѕС…СЂР°РЅСЏРµС€СЊ РІСЃРµ РІР°РєР°РЅСЃРёРё РєРѕРјРїР°РЅРёРё Y вЂ” СЃРѕР·РґР°С‚СЊ Р°Р»РµСЂС‚ РЅР° Y'. "
-            "РљРѕРЅРєСЂРµС‚РЅРѕ, РїРѕ РґРµР»Сѓ, РЅР° СЂСѓСЃСЃРєРѕРј."
+            "Ты аналитик поведения пользователя. На основе истории его действий с вакансиями "
+            "(сохранения, скрытия, отклики) предложи 2-3 правила для авто-фильтрации. "
+            "Например: 'ты часто скрываешь вакансии где в названии есть X — добавить X в стоп-слова' "
+            "или 'ты сохраняешь все вакансии компании Y — создать алерт на Y'. "
+            "Конкретно, по делу, на русском."
         )
-        user_prompt = f"РСЃС‚РѕСЂРёСЏ РґРµР№СЃС‚РІРёР№ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ:\n{json.dumps(stats, ensure_ascii=False, indent=2)}"
+        user_prompt = f"История действий пользователя:\n{json.dumps(stats, ensure_ascii=False, indent=2)}"
         try:
             return chat_completion(
                 [
@@ -3630,7 +4720,7 @@ class WorkHunter:
                 ai_config,
             )
         except Exception as exc:
-            return f"РћС€РёР±РєР°: {exc}"
+            return f"Ошибка: {exc}"
 
     def classify_jobs_batch(self, job_ids: list[int]) -> dict[str, Any]:
         total = len(job_ids)
@@ -3643,10 +4733,10 @@ class WorkHunter:
                 continue
             title_lower = (job.title or "").lower()
             desc_lower = (job.description or "").lower()
-            junior_kw = ["junior", "РґР¶СѓРЅРёРѕСЂ", "РЅР°С‡РёРЅР°СЋС‰РёР№", "СЃС‚Р°Р¶РµСЂ", "intern", "trainee",
+            junior_kw = ["junior", "джуниор", "начинающий", "стажер", "intern", "trainee",
                          "РјР»Р°РґС€РёР№"]
-            senior_kw = ["senior", "СЃРµРЅСЊРѕСЂ", "РІРµРґСѓС‰РёР№", "lead", "С‚РёРјР»РёРґ", "tech lead",
-                         "team lead", "СЂСѓРєРѕРІРѕРґРёС‚РµР»СЊ", "architect"]
+            senior_kw = ["senior", "сеньор", "ведущий", "lead", "тимлид", "tech lead",
+                         "team lead", "руководитель", "architect"]
             is_junior = any(kw in title_lower for kw in junior_kw)
             is_senior = any(kw in title_lower for kw in senior_kw)
             if is_junior:
@@ -3655,7 +4745,7 @@ class WorkHunter:
                 by_level["senior"] += 1
             else:
                 by_level["middle"] += 1
-            remote_kw = ["СѓРґР°Р»РµРЅ", "remote", "СѓРґР°Р»С‘РЅ"]
+            remote_kw = ["удален", "remote", "удалён"]
             if any(kw in title_lower or kw in desc_lower for kw in remote_kw):
                 remote_count += 1
             if job.salary_from is not None or job.salary_to is not None:

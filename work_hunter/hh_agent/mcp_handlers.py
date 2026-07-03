@@ -116,7 +116,7 @@ class HHMCPToolHandlers:
     def handle(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         run_id = self.service.storage.start_hh_agent_mcp_run(name, args)
         try:
-            result = self._handle(name, args)
+            result = self._handle(name, args, run_id=run_id)
             self.service.storage.finish_hh_agent_mcp_run(run_id, status="ok", output=result)
             result.setdefault("mcp_run_id", run_id)
             return result
@@ -124,7 +124,7 @@ class HHMCPToolHandlers:
             self.service.storage.finish_hh_agent_mcp_run(run_id, status="error", error=str(exc))
             raise
 
-    def _handle(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def _handle(self, name: str, args: dict[str, Any], *, run_id: int) -> dict[str, Any]:
         if name == "hh_whoami":
             return self.service.hh_whoami()
         if name == "hh_list_resumes":
@@ -144,12 +144,14 @@ class HHMCPToolHandlers:
                 "message": "LLM-backed MCP analysis is wired in the next implementation slice.",
             }
         if name == "hh_research_vacancies":
-            return {
-                "status": "planned",
-                "text": str(args.get("text") or ""),
-                "limit": int(args.get("limit") or 20),
-                "resume_id": str(args.get("resume_id") or ""),
-            }
+            return self.service.run_hh_research_operation(
+                text=str(args.get("text") or ""),
+                limit=int(args.get("limit") or 20),
+                resume_id=str(args.get("resume_id") or ""),
+                run_id=run_id,
+                plan_apply=False,
+                confirm_apply=False,
+            )
         if name == "hh_apply_vacancy":
             if args.get("confirm_apply"):
                 return {
@@ -164,17 +166,14 @@ class HHMCPToolHandlers:
                 "dry_run": True,
             }
         if name == "hh_research_and_apply":
-            if args.get("confirm_apply"):
-                return {
-                    "status": "blocked",
-                    "message": "MCP real apply is blocked until approval/confirm flow is enabled.",
-                }
-            return {
-                "status": "planned",
-                "text": str(args.get("text") or ""),
-                "limit": int(args.get("limit") or 20),
-                "counts": {"planned": 0, "blocked": 0, "applied": 0},
-            }
+            return self.service.run_hh_research_operation(
+                text=str(args.get("text") or ""),
+                limit=int(args.get("limit") or 20),
+                resume_id=str(args.get("resume_id") or ""),
+                run_id=run_id,
+                plan_apply=True,
+                confirm_apply=bool(args.get("confirm_apply")),
+            )
         raise KeyError(name)
 
 

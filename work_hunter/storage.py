@@ -82,6 +82,18 @@ def _hh_apply_from_file_state_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _search_preset_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "source": row["source"],
+        "params": json.loads(row["params_json"]),
+        "dry_run_checked_at": row["dry_run_checked_at"],
+        "last_live_run_at": row["last_live_run_at"],
+        "last_result": json.loads(row["last_result_json"]),
+        "enabled": bool(row["enabled"]),
+    }
+
+
 def _hh_agent_event_from_row(row: sqlite3.Row) -> HHAgentEvent:
     return HHAgentEvent(
         id=int(row["id"]),
@@ -130,7 +142,42 @@ def _hh_agent_webhook_from_row(row: sqlite3.Row) -> HHAgentWebhookDelivery:
         last_error=row["last_error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-    )
+)
+
+
+MASK = "***"
+SENSITIVE_EXACT = {
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "api_key",
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "password",
+    "token",
+    "secret",
+}
+SENSITIVE_PARTS = ("token", "secret", "password", "cookie", "authorization", "api_key")
+
+
+def redact_for_storage(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in SENSITIVE_EXACT or any(part in lowered for part in SENSITIVE_PARTS):
+                result[key] = MASK
+            else:
+                result[key] = redact_for_storage(item)
+        return result
+    if isinstance(value, list):
+        return [redact_for_storage(item) for item in value]
+    return value
+
+
+def _json_dumps_redacted(value: Any) -> str:
+    return json.dumps(redact_for_storage(value or {}), ensure_ascii=False)
 
 
 class Storage:
@@ -233,6 +280,23 @@ class Storage:
                 notes TEXT NOT NULL DEFAULT '',
                 applied_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS apply_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                resume_id TEXT NOT NULL DEFAULT '',
+                resume_hash TEXT NOT NULL DEFAULT '',
+                letter TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'planned',
+                risk_flags_json TEXT NOT NULL DEFAULT '[]',
+                requires_confirmation INTEGER NOT NULL DEFAULT 1,
+                transport TEXT NOT NULL DEFAULT '',
+                raw_plan_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                confirmed_at TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
             );
 
@@ -611,6 +675,65 @@ class Storage:
             """
         )
         self.conn.commit()
+        self._apply_migrations()
+        self._ensure_backbone_columns()
+
+    def _apply_migrations(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        migrations_dir = Path(__file__).with_name("migrations")
+        if not migrations_dir.exists():
+            self.conn.commit()
+            return
+        applied = {
+            row["version"]
+            for row in self.conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        for path in sorted(migrations_dir.glob("*.sql")):
+            version = path.name
+            if version in applied:
+                continue
+            self.conn.executescript(path.read_text(encoding="utf-8"))
+            self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, utc_now()),
+            )
+        self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        columns = {
+            row["name"]
+            for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _ensure_backbone_columns(self) -> None:
+        self._ensure_column("jobs", "canonical_key", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("jobs", "apply_url", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("jobs", "company_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("jobs", "snippet", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("jobs", "raw_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column("job_scores", "seniority_score", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("job_scores", "company_score", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("job_scores", "ats_score", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("job_scores", "created_at", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("applications", "source", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("applications", "source_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("applications", "resume_id", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("applications", "resume_hash", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("applications", "plan_id", "INTEGER")
+        self._ensure_column("applications", "transport", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("applications", "sent_at", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("applications", "result_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column("applications", "error", "TEXT NOT NULL DEFAULT ''")
+        self.conn.commit()
 
     def upsert_job(self, job: Job) -> int:
         self.conn.execute(
@@ -894,18 +1017,139 @@ class Storage:
         ).fetchone()
         return row["body"] if row else ""
 
-    def save_application(self, job_id: int, status: str = "applied", notes: str = "") -> None:
+    def save_application(
+        self,
+        job_id: int,
+        status: str = "applied",
+        notes: str = "",
+        *,
+        source: str = "",
+        source_id: str = "",
+        resume_id: str = "",
+        resume_hash: str = "",
+        plan_id: int | None = None,
+        transport: str = "",
+        sent_at: str = "",
+        result: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
         now = utc_now()
+        if not (source and source_id):
+            job = self.get_job(job_id)
+            if job:
+                source = source or job.source
+                source_id = source_id or job.source_id
+        sent_at = sent_at or (now if status in {"applied", "sent"} else "")
         self.conn.execute(
             """
-            INSERT INTO applications (job_id, status, notes, applied_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO applications (
+                job_id, status, notes, applied_at, updated_at,
+                source, source_id, resume_id, resume_hash, plan_id,
+                transport, sent_at, result_json, error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status,
                 notes = excluded.notes,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                source = excluded.source,
+                source_id = excluded.source_id,
+                resume_id = excluded.resume_id,
+                resume_hash = excluded.resume_hash,
+                plan_id = excluded.plan_id,
+                transport = excluded.transport,
+                sent_at = excluded.sent_at,
+                result_json = excluded.result_json,
+                error = excluded.error
             """,
-            (job_id, status, notes, now, now),
+            (
+                job_id,
+                status,
+                notes,
+                now,
+                now,
+                source,
+                source_id,
+                resume_id,
+                resume_hash,
+                plan_id,
+                transport,
+                sent_at,
+                _json_dumps_redacted(result or {}),
+                error,
+            ),
+        )
+        self.conn.commit()
+
+    def save_apply_plan(self, plan: dict[str, Any]) -> int:
+        now = utc_now()
+        risk_flags = plan.get("risk_flags") or []
+        raw_plan = dict(plan)
+        raw_plan.pop("id", None)
+        raw_plan.pop("plan_id", None)
+        cur = self.conn.execute(
+            """
+            INSERT INTO apply_plans (
+                job_id, source, resume_id, resume_hash, letter, status,
+                risk_flags_json, requires_confirmation, transport,
+                raw_plan_json, created_at, confirmed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(plan.get("job_id") or 0),
+                str(plan.get("source") or ""),
+                str(plan.get("resume_id") or ""),
+                str(plan.get("resume_hash") or ""),
+                str(plan.get("letter") or ""),
+                str(plan.get("status") or "planned"),
+                json.dumps(risk_flags, ensure_ascii=False),
+                int(bool(plan.get("requires_confirmation", True))),
+                str(plan.get("mode") or plan.get("transport") or ""),
+                _json_dumps_redacted(raw_plan),
+                now,
+                "",
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_apply_plan(self, plan_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM apply_plans WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        raw = json.loads(row["raw_plan_json"])
+        raw.update(
+            {
+                "id": int(row["id"]),
+                "plan_id": int(row["id"]),
+                "job_id": int(row["job_id"]),
+                "source": row["source"],
+                "resume_id": row["resume_id"],
+                "resume_hash": row["resume_hash"],
+                "letter": row["letter"],
+                "status": row["status"],
+                "risk_flags": json.loads(row["risk_flags_json"]),
+                "requires_confirmation": bool(row["requires_confirmation"]),
+                "transport": row["transport"],
+                "created_at": row["created_at"],
+                "confirmed_at": row["confirmed_at"],
+            }
+        )
+        return raw
+
+    def update_apply_plan_status(self, plan_id: int, status: str, *, confirmed: bool = False) -> None:
+        confirmed_at = utc_now() if confirmed else ""
+        self.conn.execute(
+            """
+            UPDATE apply_plans
+            SET status = ?,
+                confirmed_at = CASE WHEN ? != '' THEN ? ELSE confirmed_at END
+            WHERE id = ?
+            """,
+            (status, confirmed_at, confirmed_at, plan_id),
         )
         self.conn.commit()
 
@@ -1463,7 +1707,7 @@ class Storage:
             INSERT INTO hh_agent_mcp_runs (tool_name, input_json, status, started_at)
             VALUES (?, ?, ?, ?)
             """,
-            (tool_name, json.dumps(input_data or {}, ensure_ascii=False), "running", utc_now()),
+            (tool_name, _json_dumps_redacted(input_data or {}), "running", utc_now()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -1482,7 +1726,7 @@ class Storage:
             SET status = ?, output_json = ?, error = ?, finished_at = ?
             WHERE id = ?
             """,
-            (status, json.dumps(output or {}, ensure_ascii=False), error, utc_now(), run_id),
+            (status, _json_dumps_redacted(output or {}), error, utc_now(), run_id),
         )
         self.conn.commit()
 
@@ -1640,7 +1884,7 @@ class Storage:
             (
                 channel,
                 target,
-                json.dumps(payload or {}, ensure_ascii=False),
+                _json_dumps_redacted(payload or {}),
                 status,
                 now,
                 now,
@@ -1660,7 +1904,7 @@ class Storage:
             "SELECT payload_json FROM hh_agent_outbox WHERE id = ?",
             (item_id,),
         ).fetchone()
-        payload_json = current["payload_json"] if current and payload is None else json.dumps(payload or {}, ensure_ascii=False)
+        payload_json = current["payload_json"] if current and payload is None else _json_dumps_redacted(payload or {})
         self.conn.execute(
             """
             UPDATE hh_agent_outbox
@@ -1697,6 +1941,13 @@ class Storage:
         ).fetchall()
         return [_hh_agent_outbox_from_row(row) for row in rows]
 
+    def get_hh_agent_outbox(self, item_id: int) -> HHAgentOutboxItem | None:
+        row = self.conn.execute(
+            "SELECT * FROM hh_agent_outbox WHERE id = ?",
+            (item_id,),
+        ).fetchone()
+        return _hh_agent_outbox_from_row(row) if row else None
+
     def create_hh_agent_webhook(
         self,
         *,
@@ -1713,7 +1964,7 @@ class Storage:
             """,
             (
                 event_type,
-                json.dumps(payload or {}, ensure_ascii=False),
+                _json_dumps_redacted(payload or {}),
                 status,
                 0,
                 "",
@@ -1737,7 +1988,7 @@ class Storage:
             "SELECT payload_json FROM hh_agent_webhooks WHERE id = ?",
             (delivery_id,),
         ).fetchone()
-        payload_json = current["payload_json"] if current and payload is None else json.dumps(payload or {}, ensure_ascii=False)
+        payload_json = current["payload_json"] if current and payload is None else _json_dumps_redacted(payload or {})
         self.conn.execute(
             """
             UPDATE hh_agent_webhooks
@@ -1913,7 +2164,7 @@ class Storage:
                 decision.policy_hash,
                 decision.confidence,
                 json.dumps(decision.reasons, ensure_ascii=False),
-                json.dumps(decision.raw_result, ensure_ascii=False),
+                _json_dumps_redacted(decision.raw_result),
                 decision.created_at,
             ),
         )
@@ -1972,7 +2223,7 @@ class Storage:
             "SELECT payload_json FROM hh_pending_messages WHERE id = ?",
             (message_id,),
         ).fetchone()
-        payload_json = current["payload_json"] if current and payload is None else json.dumps(payload or {}, ensure_ascii=False)
+        payload_json = current["payload_json"] if current and payload is None else _json_dumps_redacted(payload or {})
         self.conn.execute(
             """
             UPDATE hh_pending_messages
@@ -2024,7 +2275,7 @@ class Storage:
                 operation_id,
                 level,
                 message,
-                json.dumps(payload or {}, ensure_ascii=False),
+                _json_dumps_redacted(payload or {}),
                 utc_now(),
             ),
         )
@@ -2157,8 +2408,8 @@ class Storage:
                 name,
                 method,
                 path,
-                json.dumps(params or {}, ensure_ascii=False),
-                json.dumps(body or {}, ensure_ascii=False),
+                _json_dumps_redacted(params or {}),
+                _json_dumps_redacted(body or {}),
                 now,
                 now,
             ),
@@ -2209,7 +2460,7 @@ class Storage:
                 vacancy_id,
                 resume_id,
                 status,
-                json.dumps(result or {}, ensure_ascii=False),
+                _json_dumps_redacted(result or {}),
                 now,
                 now,
             ),
@@ -2265,8 +2516,8 @@ class Storage:
                 vacancy_id,
                 resume_id,
                 status,
-                json.dumps(payload or {}, ensure_ascii=False),
-                json.dumps(result or {}, ensure_ascii=False),
+                _json_dumps_redacted(payload or {}),
+                _json_dumps_redacted(result or {}),
                 now,
                 now,
             ),
@@ -2629,6 +2880,82 @@ class Storage:
         self.conn.execute(
             "UPDATE saved_searches SET last_checked_at = ? WHERE id = ?",
             (utc_now(), search_id),
+        )
+        self.conn.commit()
+
+    def upsert_search_preset(
+        self,
+        *,
+        name: str,
+        source: str = "hh",
+        params: dict[str, Any] | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        current = self.conn.execute(
+            "SELECT * FROM search_presets WHERE name = ?",
+            (name,),
+        ).fetchone()
+        dry_run_checked_at = current["dry_run_checked_at"] if current else ""
+        last_live_run_at = current["last_live_run_at"] if current else ""
+        last_result_json = current["last_result_json"] if current else "{}"
+        self.conn.execute(
+            """
+            INSERT INTO search_presets (
+                name, source, params_json, dry_run_checked_at,
+                last_live_run_at, last_result_json, enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                source = excluded.source,
+                params_json = excluded.params_json,
+                enabled = excluded.enabled
+            """,
+            (
+                name,
+                source,
+                _json_dumps_redacted(params or {}),
+                dry_run_checked_at,
+                last_live_run_at,
+                last_result_json,
+                int(enabled),
+            ),
+        )
+        self.conn.commit()
+        return self.get_search_preset(name) or {
+            "name": name,
+            "source": source,
+            "params": params or {},
+            "enabled": enabled,
+            "created_at": now,
+        }
+
+    def get_search_preset(self, name: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM search_presets WHERE name = ?",
+            (name,),
+        ).fetchone()
+        return _search_preset_from_row(row) if row else None
+
+    def list_search_presets(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM search_presets ORDER BY name").fetchall()
+        return [_search_preset_from_row(row) for row in rows]
+
+    def update_search_preset_result(
+        self,
+        name: str,
+        *,
+        dry_run: bool,
+        result: dict[str, Any],
+    ) -> None:
+        timestamp_column = "dry_run_checked_at" if dry_run else "last_live_run_at"
+        self.conn.execute(
+            f"""
+            UPDATE search_presets
+            SET {timestamp_column} = ?,
+                last_result_json = ?
+            WHERE name = ?
+            """,
+            (utc_now(), _json_dumps_redacted(result), name),
         )
         self.conn.commit()
 
