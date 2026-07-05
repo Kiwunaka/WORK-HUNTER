@@ -95,3 +95,4 @@ def test_ui_contract_keeps_trends_explicit_and_bulk_selection_stable():
     assert "syncBulkCheckboxes()" in app
     assert "research-and-apply" in app
     assert 'id="agent-research-output"' in index
+    assert "/api/agent/preflight?live_auth=true" in app

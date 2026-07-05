@@ -5,8 +5,6 @@ import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-import pytest
-
 from work_hunter.models import Job
 from work_hunter.services import WorkHunter
 from work_hunter.cli import main as cli_main

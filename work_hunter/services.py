@@ -27,8 +27,6 @@ from .config import (
 from .letters import chat_completion, draft_cover_letter, draft_cover_letter_ai
 from .models import (
     ApplyPlan,
-    HHAgentEvent,
-    HHAgentTask,
     HHCampaignItem,
     HHContact,
     HHEmployer,
@@ -63,7 +61,6 @@ from .sources import (
     PUBLIC_BOARD_SPECS,
     GeekJobSource,
     GetmatchSource,
-    HHApplicantToolAdapter,
     HHSource,
     HabrSource,
     PublicJobBoardSource,
@@ -2846,8 +2843,10 @@ class WorkHunter:
             auth = self.hh_auth_status()
         else:
             auth = {
-                "status": "token_configured" if has_access_token else "missing_access_token",
-                "authorized": has_access_token,
+                "status": "token_configured_unverified" if has_access_token else "missing_access_token",
+                "authorized": False,
+                "configured": has_access_token,
+                "verified": False,
                 "refresh_ready": has_refresh_token,
                 "client_credentials_configured": bool(
                     str(hh_config.get("client_id") or "")
@@ -2856,8 +2855,9 @@ class WorkHunter:
                 "access_expires_at": str(hh_config.get("access_expires_at") or ""),
                 "actions": actions,
             }
+        auth_ready = bool(auth.get("authorized")) if live_auth else has_access_token
         return {
-            "status": "ok" if has_access_token else "blocked",
+            "status": "ok" if auth_ready else "blocked",
             "auth": auth,
             "profile": {
                 "active": str(self.config.get("profile") or "default"),
@@ -3676,8 +3676,17 @@ class WorkHunter:
         no_magic: bool = False,
         premium: bool = False,
     ) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        hh_config = self.hh_config()
+        client = HHApplyClient(hh_config)
         if not client.has_token():
+            if hh_config.get("web_fallback", True):
+                return self._search_hh_vacancies_web_fallback(
+                    text=text,
+                    area=area,
+                    salary=salary,
+                    limit=limit,
+                    reason="missing_access_token",
+                )
             return {
                 "status": "blocked",
                 "count": 0,
@@ -3718,6 +3727,15 @@ class WorkHunter:
             try:
                 payloads = client.search_vacancies(search_params)
             except Exception as exc:
+                if hh_config.get("web_fallback", True):
+                    return self._search_hh_vacancies_web_fallback(
+                        text=text,
+                        area=area,
+                        salary=salary,
+                        limit=limit,
+                        reason="api_error",
+                        api_error=str(exc),
+                    )
                 return {
                     **_hh_error_payload(exc),
                     "source": "hh",
@@ -3751,6 +3769,59 @@ class WorkHunter:
                 "work-hunter score",
                 "work-hunter list --source hh --limit 20 --min-score 50",
                 "work-hunter hh campaign plan --limit 20",
+            ],
+        }
+
+    def _search_hh_vacancies_web_fallback(
+        self,
+        *,
+        text: str | None,
+        area: list[str] | None,
+        salary: int | None,
+        limit: int,
+        reason: str,
+        api_error: str = "",
+    ) -> dict[str, Any]:
+        hh_config = dict(self.hh_config())
+        if area:
+            hh_config["area"] = area[0]
+        hh_config["per_page"] = min(100, max(1, int(limit)))
+        profile = {
+            "queries": [text or ""] if text else (self.active_profile_info().get("data") or {}).get("queries", [""]),
+            "salary_min": salary or 0,
+        }
+        imported_jobs: list[Job] = []
+        try:
+            for job in HHSource(hh_config).collect(profile, limit=max(1, int(limit))):
+                job.id = self.storage.upsert_job(job)
+                imported_jobs.append(job)
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "source": "hh",
+                "transport": "web",
+                "fallback_reason": reason,
+                "count": 0,
+                "message": "HH web fallback failed.",
+                "error": str(exc),
+                "api_error": api_error,
+                "next_actions": [
+                    "work-hunter hh auth import-token",
+                    "work-hunter hh web import-cookies ./cookies.txt",
+                ],
+            }
+        return {
+            "status": "ok",
+            "source": "hh",
+            "transport": "web",
+            "fallback_reason": reason,
+            "count": len(imported_jobs),
+            "job_ids": [job.id for job in imported_jobs if job.id is not None],
+            "api_error": api_error,
+            "next_actions": [
+                "work-hunter score",
+                "work-hunter list --source hh --limit 20 --min-score 50",
+                "work-hunter hh auth import-token",
             ],
         }
 

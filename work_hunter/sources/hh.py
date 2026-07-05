@@ -9,7 +9,7 @@ import subprocess
 import urllib.parse
 from typing import Any
 
-from ..hh_transport import HHApiSession
+from ..hh_transport import HHApiSession, HHTransportError
 from ..models import Job
 from .common import USER_AGENT, absolute_url, clean_text, fetch_url
 
@@ -24,10 +24,10 @@ class HHSource:
         self.config = config
 
     def collect(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
-        if self._access_token():
+        if self._api_ready():
             try:
                 return self._collect_api(profile, limit)
-            except RuntimeError:
+            except (HHTransportError, RuntimeError, json.JSONDecodeError):
                 if not self.config.get("web_fallback", True):
                     raise
         return self._collect_web(profile, limit)
@@ -35,7 +35,18 @@ class HHSource:
     def _access_token(self) -> str:
         return str(os.environ.get("HH_ACCESS_TOKEN") or self.config.get("access_token") or "")
 
+    def _api_ready(self) -> bool:
+        return bool(self._access_token() or str(self.config.get("refresh_token") or ""))
+
+    def _api_config(self) -> dict[str, Any]:
+        config = dict(self.config)
+        env_access_token = str(os.environ.get("HH_ACCESS_TOKEN") or "")
+        if env_access_token:
+            config["access_token"] = env_access_token
+        return config
+
     def _collect_api(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
+        session = HHApiSession(self._api_config())
         queries = profile.get("queries") or profile.get("desired_roles") or [""]
         per_page = min(int(self.config.get("per_page", 25)), 100)
         pages = max(1, int(self.config.get("pages", 1)))
@@ -53,23 +64,7 @@ class HHSource:
                 }
                 if profile.get("salary_min"):
                     params["salary"] = int(profile["salary_min"])
-                url = f"{HH_API_URL}?{urllib.parse.urlencode(params)}"
-                user_agent = str(self.config.get("hh_user_agent") or USER_AGENT)
-                token = self._access_token()
-                headers = {
-                    "Accept": "application/json",
-                    "HH-User-Agent": user_agent,
-                    "User-Agent": user_agent,
-                }
-                if token:
-                    headers["Authorization"] = f"Bearer {token}"
-                payload = json.loads(
-                    fetch_url(
-                        url,
-                        headers=headers,
-                    )
-                )
-                for item in payload.get("items", []):
+                for item in session.search_vacancies(params):
                     job = _job_from_item(item)
                     if job.source_id not in seen:
                         jobs.append(job)
@@ -311,7 +306,7 @@ class HHApplyClient:
         self.session = HHApiSession(config, base_url=self.base_url)
 
     def has_token(self) -> bool:
-        return self.session.identity.has_access_token()
+        return self.session.identity.has_access_token() or bool(self.session.identity.refresh_token)
 
     def whoami(self) -> dict[str, Any]:
         return self.session.whoami()

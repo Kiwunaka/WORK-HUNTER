@@ -3,12 +3,14 @@ from __future__ import annotations
 from http.cookiejar import Cookie, CookieJar
 
 
-HH_DOMAINS = ("hh.ru", ".hh.ru", "api.hh.ru", ".api.hh.ru")
+HH_TLDS = ("ru", "kz", "uz", "by", "net", "com")
 
 
 def is_hh_domain(domain: str) -> bool:
-    normalized = domain.strip().lower().lstrip(".")
-    return normalized == "hh.ru" or normalized.endswith(".hh.ru")
+    normalized = domain.strip().lower().rstrip(".").lstrip(".")
+    if normalized.startswith("israel."):
+        return False
+    return any(normalized == f"hh.{tld}" or normalized.endswith(f".hh.{tld}") for tld in HH_TLDS)
 
 
 class HHOnlyCookieJar(CookieJar):

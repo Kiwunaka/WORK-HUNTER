@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import requests
@@ -29,6 +31,10 @@ class HHApiSession:
         self.identity = HHIdentity.from_config(config)
         self.base_url = str(config.get("api_base_url") or base_url).rstrip("/")
         self.timeout = int(config.get("timeout", 30))
+        self.min_interval = float(config.get("min_interval", 0) or 0)
+        self._last_request_at = 0.0
+        self._lock = threading.Lock()
+        self.http = requests.Session()
         self.user_agent = str(
             config.get("hh_user_agent")
             or config.get("android_user_agent")
@@ -47,21 +53,34 @@ class HHApiSession:
 
     def _request(self, method: str, path: str, *, retry_on_auth: bool, **kwargs: Any):
         if not self.identity.access_token:
-            raise HHAuthError("HH access token is required", code="auth_missing")
+            if self.identity.refresh_token:
+                self.refresh_token()
+            else:
+                raise HHAuthError("HH access token is required", code="auth_missing")
         if self.identity.is_access_expired() and self.identity.refresh_token:
             self.refresh_token()
-        response = requests.request(
-            method.upper(),
-            f"{self.base_url}{path}",
-            headers={**self.headers(), **kwargs.pop("headers", {})},
-            timeout=kwargs.pop("timeout", self.timeout),
-            allow_redirects=kwargs.pop("allow_redirects", False),
-            **kwargs,
-        )
-        if response.status_code == 401 and retry_on_auth and self.identity.refresh_token:
+        response = self._send(method, path, **kwargs)
+        if response.status_code in {401, 403} and retry_on_auth and self.identity.refresh_token:
             self.refresh_token()
             return self._request(method, path, retry_on_auth=False, **kwargs)
         return response
+
+    def _send(self, method: str, path: str, **kwargs: Any):
+        with self._lock:
+            if self.min_interval > 0 and self._last_request_at:
+                elapsed = time.monotonic() - self._last_request_at
+                if elapsed < self.min_interval:
+                    time.sleep(self.min_interval - elapsed)
+            response = self.http.request(
+                method.upper(),
+                f"{self.base_url}{path}",
+                headers={**self.headers(), **kwargs.pop("headers", {})},
+                timeout=kwargs.pop("timeout", self.timeout),
+                allow_redirects=kwargs.pop("allow_redirects", False),
+                **kwargs,
+            )
+            self._last_request_at = time.monotonic()
+            return response
 
     def refresh_token(self) -> dict[str, Any]:
         response = requests.request(
@@ -149,6 +168,7 @@ class HHApiSession:
             "Accept": "application/json",
             "User-Agent": self.user_agent,
             "HH-User-Agent": self.user_agent,
+            "X-HH-App-Active": "true",
         }
         headers.update(self.identity.authorization_header())
         return headers

@@ -28,8 +28,6 @@ from .models import (
     HHVacancyAnalysis,
     Job,
     JobScore,
-    JobSummary,
-    LearningEvent,
     LetterDraft,
     Resume,
     SavedSearch,

@@ -34,11 +34,11 @@ def test_hh_apply_client_posts_exact_negotiation_form(monkeypatch):
         def json(self):
             return {}
 
-    def fake_request(method, url, **kwargs):
+    def fake_request(_session, method, url, **kwargs):
         calls.append({"method": method, "url": url, **kwargs})
         return Response()
 
-    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
     client = HHApplyClient({"access_token": "token", "hh_user_agent": "test-agent"})
 
     result = client.apply("123", "resume-1", "Hi")
@@ -63,7 +63,7 @@ def test_hh_apply_client_surfaces_apply_errors(monkeypatch):
         def json(self):
             return {"errors": [{"type": "bad_argument", "value": "already_applied"}]}
 
-    monkeypatch.setattr("requests.request", lambda *args, **kwargs: Response())
+    monkeypatch.setattr("requests.sessions.Session.request", lambda *args, **kwargs: Response())
     client = HHApplyClient({"access_token": "token"})
 
     result = client.apply("123", "resume-1", "Hi")

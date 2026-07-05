@@ -12,7 +12,7 @@ from work_hunter.web.server import make_handler
 
 class FakeHHOperationsClient:
     updated_resumes: list[str] = []
-    requests: list[tuple[str, str, object | None]] = []
+    requests: list[tuple[str, str, object | None, object]] = []
 
     def __init__(self, config):
         self.config = config
@@ -136,6 +136,32 @@ def test_hh_call_api_blocks_mutations_without_confirm_and_masks_result(monkeypat
     assert FakeHHOperationsClient.requests == [
         ("POST", "/test", {"hello": "world"}, {"access_token": "secret"})
     ]
+
+
+def test_hh_search_uses_web_fallback_without_access_token(monkeypatch, tmp_path):
+    html = """
+    <div class="vacancy-serp-item">
+      <a data-qa="serp-item__title" href="/vacancy/123">Python Backend</a>
+      <span data-qa="vacancy-serp__vacancy-employer-text">Acme</span>
+      <span data-qa="vacancy-serp__vacancy-address">Remote</span>
+    </div>
+    """
+
+    monkeypatch.setattr("work_hunter.sources.hh.fetch_url", lambda *args, **kwargs: html)
+    app = WorkHunter(root=tmp_path)
+    app.config["sources"]["hh"]["access_token"] = ""
+    app.config["sources"]["hh"]["refresh_token"] = ""
+    app.config["sources"]["hh"]["web_fallback"] = True
+
+    result = app.search_hh_vacancies(text="python", area=["1"], limit=1)
+
+    assert result["status"] == "ok"
+    assert result["transport"] == "web"
+    assert result["fallback_reason"] == "missing_access_token"
+    assert result["count"] == 1
+    jobs = app.storage.list_jobs(source="hh", limit=5)
+    assert jobs[0].source_id == "123"
+    assert jobs[0].title == "Python Backend"
 
 
 def test_hh_operations_cli_syncs_negotiations_and_clears_skipped(monkeypatch, tmp_path, capsys):

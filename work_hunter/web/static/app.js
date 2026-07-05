@@ -859,7 +859,7 @@ async function loadAgentCockpit() {
 }
 
 async function loadAgentPreflight() {
-  state.agent.preflight = await api("/api/agent/preflight");
+  state.agent.preflight = await api("/api/agent/preflight?live_auth=true");
   renderAgentDashboard();
 }
 
@@ -918,7 +918,7 @@ function renderAgentDashboard() {
   const approvals = Array.isArray(state.agent.approvals) ? state.agent.approvals : [];
   const livePending = approvals.filter((item) => item.status === "pending").length;
   $("#agent-auth-status").textContent = auth.status || preflight.status || "—";
-  $("#agent-auth-note").textContent = (preflight.actions || auth.actions || []).slice(0, 2).join(" · ") || "ready";
+  $("#agent-auth-note").textContent = (auth.actions || preflight.actions || []).slice(0, 2).join(" · ") || auth.error || "ready";
   $("#agent-pending-count").textContent = String(livePending ?? counts.pending_approvals ?? digest.approvals?.by_status?.pending ?? 0);
   $("#agent-runs-count").textContent = String(counts.mcp_runs ?? digest.runs?.total ?? 0);
   $("#agent-decisions-count").textContent = String(counts.ai_decisions ?? digest.ai_decisions?.total ?? 0);
@@ -1253,7 +1253,7 @@ async function runAgentOperation(operation, button = null) {
   try {
     const result = await api("/api/agent/run", {
       method: "POST",
-      body: JSON.stringify({ operation, params: operation === "preflight" ? { live_auth: false } : {} }),
+      body: JSON.stringify({ operation, params: operation === "preflight" ? { live_auth: true } : {} }),
     });
     $("#agent-operation-note").textContent = `${operation}: ${result.result?.status || "ok"}`;
     await Promise.all([loadAgentPreflight(), loadAgentDigest(), loadAgentOperations(), loadAgentApprovals()]);
