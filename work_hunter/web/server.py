@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config import mask_secrets
 from ..models import CalendarEvent, Resume, SavedSearch
+from ..safety import is_literal_confirmation
 from ..services import WorkHunter
 
 
@@ -353,7 +354,7 @@ def make_handler(root: Path):
                     self._send_json(
                         app.confirm_hh_reply(
                             int(body.get("plan_id") or 0),
-                            confirm=bool(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
@@ -364,8 +365,9 @@ def make_handler(root: Path):
                     self._send_json(
                         app.run_strategy(
                             str(body.get("name") or "active-profile"),
-                            dry_run=bool(body.get("dry_run", True)) or not bool(body.get("confirm")),
-                            confirm=bool(body.get("confirm")),
+                            dry_run=bool(body.get("dry_run", True))
+                            or not is_literal_confirmation(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                             resume_id=str(body.get("resume_id") or "") or None,
                         )
                     )
@@ -379,7 +381,7 @@ def make_handler(root: Path):
                             str(body.get("method") or "GET"),
                             str(body.get("path") or "/"),
                             data=body.get("data"),
-                            confirm=bool(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
@@ -391,6 +393,7 @@ def make_handler(root: Path):
                             params=body.get("params"),
                             body=body.get("body"),
                             quick=str(body.get("quick") or ""),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
@@ -526,7 +529,7 @@ def make_handler(root: Path):
                     self._send_json(
                         app.confirm_hh_campaign(
                             run_id,
-                            confirm=bool(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
@@ -590,7 +593,7 @@ def make_handler(root: Path):
                             job_id,
                             resume_id=body.get("resume_id"),
                             letter=body.get("letter"),
-                            confirm=bool(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return

@@ -96,3 +96,13 @@ def test_ui_contract_keeps_trends_explicit_and_bulk_selection_stable():
     assert "research-and-apply" in app
     assert 'id="agent-research-output"' in index
     assert "/api/agent/preflight?live_auth=true" in app
+
+
+def test_hh_api_lab_mutations_require_double_confirmation():
+    app = _read_static("app.js")
+
+    assert 'const HH_LAB_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);' in app
+    assert "function confirmHhLabMutation(payload)" in app
+    assert "if (!confirmHhLabMutation(payload)) return;" in app
+    assert "payload.confirm = true;" in app
+    assert "Final confirmation: this can change your HH account." in app

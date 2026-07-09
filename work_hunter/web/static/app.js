@@ -1188,6 +1188,14 @@ function writeHhLabOutput(payload) {
   box.textContent = JSON.stringify(payload, null, 2);
 }
 
+const HH_LAB_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function confirmHhLabMutation(payload) {
+  if (!HH_LAB_MUTATING_METHODS.has(payload.method.toUpperCase())) return true;
+  if (!window.confirm(`HH API mutation: ${payload.method} ${payload.path}. Continue?`)) return false;
+  return window.confirm("Final confirmation: this can change your HH account.");
+}
+
 async function runHhLabCall() {
   try {
     const payload = {
@@ -1196,6 +1204,8 @@ async function runHhLabCall() {
       params: parseHhLabJson("#hh-lab-params", {}),
       body: parseHhLabJson("#hh-lab-body", null),
     };
+    if (!confirmHhLabMutation(payload)) return;
+    if (HH_LAB_MUTATING_METHODS.has(payload.method.toUpperCase())) payload.confirm = true;
     writeHhLabOutput({ status: "running", request: payload });
     const result = await api("/api/hh/lab/call", { method: "POST", body: JSON.stringify(payload) });
     writeHhLabOutput(result);

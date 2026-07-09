@@ -6,6 +6,8 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
+import pytest
+
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
 
@@ -73,6 +75,89 @@ def test_hh_api_lab_call_validates_masks_and_audits(monkeypatch, tmp_path):
     runs = app.storage.list_hh_agent_mcp_runs()
     assert runs[0].tool_name == "hh_api_lab_call"
     assert runs[0].output["result"]["access_token"] == "***"
+
+
+@pytest.mark.parametrize("value", [None, False, "true", "false", 1, 0, [], {}])
+def test_hh_api_lab_mutation_requires_literal_true(monkeypatch, tmp_path, value):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHApiLabClient)
+    FakeHHApiLabClient.requests = []
+    app = WorkHunter(tmp_path)
+
+    result = app.hh_api_lab_call(
+        method="POST",
+        path="/negotiations",
+        body={"vacancy_id": "vac-1"},
+        confirm=value,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["code"] == "hh_api_lab_mutation_requires_confirmation"
+    assert result["requires_confirmation"] is True
+    assert "hh_api_mutation" in result["risk_flags"]
+    assert FakeHHApiLabClient.requests == []
+
+
+def test_hh_api_lab_confirmed_mutation_is_masked_and_audited(monkeypatch, tmp_path):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHApiLabClient)
+    FakeHHApiLabClient.requests = []
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+
+    result = app.hh_api_lab_call(
+        method="POST",
+        path="/negotiations",
+        body={"access_token": "secret"},
+        confirm=True,
+    )
+
+    assert result["status"] == "ok"
+    assert result["confirmed_by_user"] is True
+    assert result["body"]["access_token"] == "***"
+    assert FakeHHApiLabClient.requests[0]["method"] == "POST"
+    assert FakeHHApiLabClient.requests[0]["data"] == {"access_token": "secret"}
+    log = app.storage.list_hh_operation_logs()[-1]
+    assert log.payload["body"]["access_token"] == "***"
+    assert log.payload["confirmed_by_user"] is True
+
+
+def test_hh_api_lab_http_rejects_string_confirmation_without_transport(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHApiLabClient)
+    FakeHHApiLabClient.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = _post_json(
+            f"http://127.0.0.1:{server.server_port}",
+            "/api/hh/lab/call",
+            {"method": "POST", "path": "/negotiations", "confirm": "false"},
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert result["status"] == "blocked"
+    assert FakeHHApiLabClient.requests == []
+
+
+def test_hh_call_api_mutation_requires_literal_true(monkeypatch, tmp_path):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHApiLabClient)
+    FakeHHApiLabClient.requests = []
+    app = WorkHunter(tmp_path)
+
+    result = app.hh_call_api(
+        "POST",
+        "/negotiations",
+        data={"vacancy_id": "vac-1"},
+        confirm="false",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["confirmed_by_user"] is False
+    assert FakeHHApiLabClient.requests == []
 
 
 def test_hh_api_lab_blocks_unsafe_paths(tmp_path):

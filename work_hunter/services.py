@@ -54,6 +54,7 @@ from .hh_agent.resume_templates import (
 )
 from .hh_transport import HHTransportError
 from .resume_payloads import load_hh_resume_payload, validate_hh_resume_payload
+from .safety import READ_ONLY_HTTP_METHODS, is_literal_confirmation, require_mutation_confirmation
 from .scoring import score_job
 from .sources.getmatch import parse_getmatch_offer
 from .sources import (
@@ -254,7 +255,6 @@ HH_APPLY_ERROR_OUTCOMES = {
 
 HH_API_LAB_ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 HH_API_LAB_BLOCKED_PATH_PARTS = ("/token", "/oauth")
-HH_API_READ_ONLY_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 SOURCE_CAPABILITIES: dict[str, dict[str, str]] = {
@@ -2641,17 +2641,18 @@ class WorkHunter:
             "path": request["path"],
             "params": mask_secrets(request.get("params") or {}),
             "body": mask_secrets(request.get("body") or {}),
-            "confirmed_by_user": bool(confirm),
+            "confirmed_by_user": is_literal_confirmation(confirm),
         }
-        if request["method"] not in HH_API_READ_ONLY_METHODS and not confirm:
-            return {
-                "status": "blocked",
-                "code": "mutation_requires_confirm",
-                "message": "HH API mutating calls require --confirm.",
-                "requires_confirmation": True,
-                "risk_flags": ["external_mutating_request"],
-                **safe_input,
-            }
+        if request["method"] not in READ_ONLY_HTTP_METHODS:
+            blocked = require_mutation_confirmation(
+                confirm,
+                code="mutation_requires_confirm",
+                message="HH API mutating calls require --confirm.",
+                risk_flags=("external_mutating_request",),
+                context=safe_input,
+            )
+            if blocked is not None:
+                return blocked
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required.", **safe_input}
@@ -3336,6 +3337,7 @@ class WorkHunter:
         params: Any = None,
         body: Any = None,
         quick: str = "",
+        confirm: bool = False,
     ) -> dict[str, Any]:
         request = self._hh_api_lab_quick_request(quick) if quick else {
             "method": method,
@@ -3352,14 +3354,25 @@ class WorkHunter:
                 params={**dict(request.get("params") or {}), **_normalize_hh_api_lab_params(params)},
                 body=body if body is not None else request.get("body"),
             )
-        client = HHApplyClient(self.hh_config())
         safe_input = {
             "method": request["method"],
             "path": request["path"],
             "params": mask_secrets(request.get("params") or {}),
             "body": mask_secrets(request.get("body") or {}),
             "quick": quick,
+            "confirmed_by_user": is_literal_confirmation(confirm),
         }
+        if request["method"] not in READ_ONLY_HTTP_METHODS:
+            blocked = require_mutation_confirmation(
+                confirm,
+                code="hh_api_lab_mutation_requires_confirmation",
+                message="Mutating HH API Lab calls require explicit confirmation.",
+                risk_flags=("hh_api_mutation", "external_mutating_request"),
+                context=safe_input,
+            )
+            if blocked is not None:
+                return blocked
+        client = HHApplyClient(self.hh_config())
         if not client.has_token():
             return {
                 "status": "blocked",
@@ -3367,6 +3380,12 @@ class WorkHunter:
                 **safe_input,
             }
         run_id = self.storage.start_hh_agent_mcp_run("hh_api_lab_call", safe_input)
+        self.storage.append_hh_operation_log(
+            operation_id=run_id,
+            level="info",
+            message="Started HH API Lab call",
+            payload=safe_input,
+        )
         try:
             result = client.request_json(
                 str(request["method"]),
@@ -3377,6 +3396,12 @@ class WorkHunter:
         except Exception as exc:
             output = {"status": "error", "operation_id": run_id, "error": str(exc), **safe_input}
             self.storage.finish_hh_agent_mcp_run(run_id, status="error", output=output, error=str(exc))
+            self.storage.append_hh_operation_log(
+                operation_id=run_id,
+                level="error",
+                message="Finished HH API Lab call with error",
+                payload={**safe_input, "status": "error"},
+            )
             return output
         output = {
             "status": "ok",
@@ -3385,6 +3410,12 @@ class WorkHunter:
             "result": mask_secrets(result),
         }
         self.storage.finish_hh_agent_mcp_run(run_id, status="ok", output=output)
+        self.storage.append_hh_operation_log(
+            operation_id=run_id,
+            level="info",
+            message="Finished HH API Lab call",
+            payload={**safe_input, "status": "ok"},
+        )
         return output
 
     def _hh_api_lab_quick_request(self, quick: str) -> dict[str, Any]:
