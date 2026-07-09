@@ -12,6 +12,7 @@ from ..config import mask_secrets
 from ..models import CalendarEvent, Resume, SavedSearch
 from ..safety import is_literal_confirmation
 from ..services import WorkHunter
+from .security import SECURITY_HEADERS, ensure_loopback_listener, request_boundary_error
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -29,6 +30,7 @@ UI_ROUTES = {
 
 
 def run_server(root: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
+    ensure_loopback_listener(host)
     handler = make_handler(Path(root) if root is not None else Path.cwd())
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Work Hunter UI: http://{host}:{port}")
@@ -43,6 +45,14 @@ def run_server(root: str | Path | None = None, host: str = "127.0.0.1", port: in
 def make_handler(root: Path):
     class WorkHunterHandler(BaseHTTPRequestHandler):
         server_version = "WorkHunterHTTP/0.1"
+
+        def end_headers(self) -> None:
+            for name, value in SECURITY_HEADERS.items():
+                self.send_header(name, value)
+            super().end_headers()
+
+        def do_OPTIONS(self) -> None:
+            self._send_json({"error": "method_not_allowed"}, HTTPStatus.METHOD_NOT_ALLOWED)
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -300,6 +310,18 @@ def make_handler(root: Path):
             self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
+            boundary_error = request_boundary_error(
+                method=self.command,
+                host_header=self.headers.get("Host", ""),
+                origin_header=self.headers.get("Origin"),
+                content_type=self.headers.get("Content-Type"),
+                listener_host=str(self.server.server_address[0]),
+                listener_port=self.server.server_port,
+            )
+            if boundary_error is not None:
+                status, error, message = boundary_error
+                self._send_json({"error": error, "message": message}, status)
+                return
             parsed = urlparse(self.path)
             path = parsed.path
             body = self._read_json()
