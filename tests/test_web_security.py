@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from http import HTTPStatus
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 
 import pytest
 
+from work_hunter.web import security as web_security
+from work_hunter.web import server as web_server
 from work_hunter.web.security import ensure_loopback_listener, request_boundary_error
 from work_hunter.web.server import make_handler, run_server
 
@@ -319,6 +322,228 @@ def test_duplicate_authority_headers_are_rejected_before_dispatch(
     assert code == 403
     assert activity == {"body_read": False, "constructed": False}
     assert_security_headers(response_headers)
+
+
+@pytest.mark.parametrize(
+    ("parser_name", "value"),
+    [
+        ("_host_authority", "127.0.0.\t1:8787"),
+        ("_host_authority", "127.0.0.\r1:8787"),
+        ("_host_authority", "127.0.0.\n1:8787"),
+        ("_host_authority", "127.0.0. 1:8787"),
+        ("_host_authority", "127.0.0.\x001:8787"),
+        ("_host_authority", "local\u00a0host:8787"),
+        ("_host_authority", "127.0.0.1\uff1a8787"),
+        ("_http_origin", "h\tttp://127.0.0.1:8787"),
+        ("_http_origin", "ht\rtp://127.0.0.1:8787"),
+        ("_http_origin", "htt\np://127.0.0.1:8787"),
+        ("_http_origin", "http://127.0.0. 1:8787"),
+        ("_http_origin", "http://127.0.0.\x001:8787"),
+        ("_http_origin", "http://local\u00a0host:8787"),
+        ("_http_origin", "http\uff1a//127.0.0.1:8787"),
+    ],
+)
+def test_authority_rejects_non_visible_ascii_before_urlsplit(
+    monkeypatch, parser_name, value
+):
+    parsed = False
+
+    def fail_urlsplit(*args, **kwargs):
+        nonlocal parsed
+        parsed = True
+        raise AssertionError("malformed authority must be rejected before urlsplit")
+
+    monkeypatch.setattr(web_security, "urlsplit", fail_urlsplit)
+    assert getattr(web_security, parser_name)(value) is None
+    assert parsed is False
+
+
+@pytest.mark.parametrize(
+    ("header_name", "value_template"),
+    [
+        ("Host", "127.0.0.\t1:{port}"),
+        ("Origin", "h\tttp://127.0.0.1:{port}"),
+    ],
+)
+def test_embedded_tab_authority_is_forbidden_before_dispatch(
+    cockpit, monkeypatch, header_name, value_template
+):
+    constructed = False
+
+    def fail_constructor(*args, **kwargs):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("WorkHunter must not be constructed")
+
+    host = f"127.0.0.1:{cockpit.server_port}"
+    headers = {"Host": host}
+    headers[header_name] = value_template.format(port=cockpit.server_port)
+    monkeypatch.setattr("work_hunter.web.server.WorkHunter", fail_constructor)
+    code, response_headers, body = raw_request(
+        cockpit,
+        "GET",
+        "/api/resumes",
+        headers,
+        None,
+    )
+    assert code == 403
+    assert json.loads(body)["error"] in {"host_not_loopback", "cross_origin_request"}
+    assert constructed is False
+    assert_security_headers(response_headers)
+
+
+def test_rejected_body_responses_close_gracefully_under_synchronized_stress(
+    cockpit, monkeypatch
+):
+    boundary_entered = threading.Event()
+    body_sent = threading.Event()
+    original_boundary = web_server.request_boundary_error
+
+    def synchronized_boundary(**kwargs):
+        error = original_boundary(**kwargs)
+        if error is not None:
+            boundary_entered.set()
+            if not body_sent.wait(timeout=5):
+                raise AssertionError("client did not queue rejected request body")
+        return error
+
+    def fail_dispatch(*args, **kwargs):
+        raise AssertionError("rejected request must not reach dispatch")
+
+    monkeypatch.setattr(web_server, "request_boundary_error", synchronized_boundary)
+    monkeypatch.setattr(web_server, "WorkHunter", fail_dispatch)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_read_json", fail_dispatch)
+    request_body = b"x" * (64 * 1024)
+
+    for attempt in range(16):
+        boundary_entered.clear()
+        body_sent.clear()
+        with socket.create_connection(("127.0.0.1", cockpit.server_port), timeout=5) as connection:
+            connection.settimeout(5)
+            request_headers = (
+                "POST /api/score HTTP/1.1\r\n"
+                "Host: evil.test\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(request_body)}\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode("ascii")
+            connection.sendall(request_headers)
+            assert boundary_entered.wait(timeout=5), f"boundary not reached on attempt {attempt}"
+            connection.sendall(request_body)
+            body_sent.set()
+            response_chunks = []
+            try:
+                while chunk := connection.recv(64 * 1024):
+                    response_chunks.append(chunk)
+            except OSError as exc:
+                pytest.fail(f"response connection aborted on attempt {attempt}: {exc!r}")
+
+        response = b"".join(response_chunks)
+        raw_headers, response_body = response.split(b"\r\n\r\n", 1)
+        header_lines = raw_headers.decode("iso-8859-1").split("\r\n")
+        response_headers = {
+            name.lower(): value.strip()
+            for name, value in (line.split(":", 1) for line in header_lines[1:])
+        }
+        assert header_lines[0].split()[1] == "403"
+        assert len(response_body) == int(response_headers["content-length"])
+        assert json.loads(response_body)["error"] == "host_not_loopback"
+        assert response_headers["connection"] == "close"
+        assert_security_headers(response_headers)
+
+
+def test_rejected_body_discard_has_a_short_deadline(cockpit, monkeypatch):
+    discard_finished = threading.Event()
+    original_discard = cockpit.RequestHandlerClass._discard_rejected_body
+
+    def tracked_discard(handler):
+        try:
+            original_discard(handler)
+        finally:
+            discard_finished.set()
+
+    def fail_dispatch(*args, **kwargs):
+        raise AssertionError("rejected request must not reach dispatch")
+
+    monkeypatch.setattr(web_server, "WorkHunter", fail_dispatch)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_read_json", fail_dispatch)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_discard_rejected_body", tracked_discard)
+    with socket.create_connection(("127.0.0.1", cockpit.server_port), timeout=5) as connection:
+        connection.settimeout(5)
+        request_headers = (
+            "POST /api/score HTTP/1.1\r\n"
+            "Host: evil.test\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 1000000000\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+        started = time.monotonic()
+        connection.sendall(request_headers)
+        response_chunks = []
+        while chunk := connection.recv(64 * 1024):
+            response_chunks.append(chunk)
+        assert discard_finished.wait(timeout=2)
+        elapsed = time.monotonic() - started
+
+    response = b"".join(response_chunks)
+    raw_headers, response_body = response.split(b"\r\n\r\n", 1)
+    response_headers = {
+        name.lower(): value.strip()
+        for name, value in (
+            line.split(":", 1)
+            for line in raw_headers.decode("iso-8859-1").split("\r\n")[1:]
+        )
+    }
+    assert elapsed < 2
+    assert raw_headers.startswith(b"HTTP/1.0 403")
+    assert json.loads(response_body)["error"] == "host_not_loopback"
+    assert_security_headers(response_headers)
+
+
+def test_rejected_body_discard_handles_unreasonable_content_length(cockpit, monkeypatch):
+    handler_error = threading.Event()
+    discard_finished = threading.Event()
+    original_discard = cockpit.RequestHandlerClass._discard_rejected_body
+
+    def tracked_discard(handler):
+        try:
+            original_discard(handler)
+        finally:
+            discard_finished.set()
+
+    def record_handler_error(*args, **kwargs):
+        handler_error.set()
+
+    def fail_dispatch(*args, **kwargs):
+        raise AssertionError("rejected request must not reach dispatch")
+
+    monkeypatch.setattr(web_server, "WorkHunter", fail_dispatch)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_read_json", fail_dispatch)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_discard_rejected_body", tracked_discard)
+    monkeypatch.setattr(cockpit, "handle_error", record_handler_error)
+    with socket.create_connection(("127.0.0.1", cockpit.server_port), timeout=5) as connection:
+        connection.settimeout(5)
+        request_headers = (
+            "POST /api/score HTTP/1.1\r\n"
+            "Host: evil.test\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {'9' * 5000}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+        connection.sendall(request_headers)
+        response_chunks = []
+        while chunk := connection.recv(64 * 1024):
+            response_chunks.append(chunk)
+
+    assert discard_finished.wait(timeout=2)
+    assert handler_error.wait(timeout=0.5) is False
+    response = b"".join(response_chunks)
+    raw_headers, response_body = response.split(b"\r\n\r\n", 1)
+    assert raw_headers.startswith(b"HTTP/1.0 403")
+    assert json.loads(response_body)["error"] == "host_not_loopback"
 
 
 def test_same_origin_json_and_originless_local_script_are_accepted(cockpit):

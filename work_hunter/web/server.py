@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import socket
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,6 +18,8 @@ from .security import SECURITY_HEADERS, ensure_loopback_listener, request_bounda
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+REJECTED_BODY_DRAIN_LIMIT = 1024 * 1024
+REJECTED_BODY_DRAIN_SECONDS = 0.25
 UI_ROUTES = {
     "/jobs",
     "/calendar",
@@ -76,8 +80,68 @@ def make_handler(root: Path):
             if boundary_error is None:
                 return True
             status, error, message = boundary_error
-            self._send_json({"error": error, "message": message}, status)
+            self._send_boundary_error(status, error, message)
             return False
+
+        def _send_boundary_error(self, status: HTTPStatus, error: str, message: str) -> None:
+            payload = json.dumps(
+                {"error": error, "message": message},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.close_connection = True
+            self.send_response(status)
+            self.send_header("Connection", "close")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            self._discard_rejected_body()
+
+        def _discard_rejected_body(self) -> None:
+            content_lengths = self.headers.get_all("Content-Length", [])
+            transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+            target = 0
+            if transfer_encodings or len(content_lengths) > 1:
+                target = REJECTED_BODY_DRAIN_LIMIT
+            elif content_lengths:
+                raw_length = content_lengths[0]
+                if (
+                    raw_length.isascii()
+                    and raw_length.isdigit()
+                    and len(raw_length) <= len(str(REJECTED_BODY_DRAIN_LIMIT))
+                ):
+                    target = min(int(raw_length), REJECTED_BODY_DRAIN_LIMIT)
+                else:
+                    target = REJECTED_BODY_DRAIN_LIMIT
+            if target <= 0:
+                return
+
+            deadline = time.monotonic() + REJECTED_BODY_DRAIN_SECONDS
+            previous_timeout = self.connection.gettimeout()
+            try:
+                remaining = target
+                while remaining > 0:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    self.connection.settimeout(timeout)
+                    try:
+                        chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                    except (OSError, TimeoutError):
+                        break
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            finally:
+                try:
+                    self.connection.settimeout(previous_timeout)
+                except OSError:
+                    pass
 
         def end_headers(self) -> None:
             for name, value in SECURITY_HEADERS.items():

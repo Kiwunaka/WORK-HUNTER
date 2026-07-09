@@ -13,6 +13,10 @@ SECURITY_HEADERS = {
 }
 
 
+def _is_visible_ascii(value: str) -> bool:
+    return bool(value) and all(0x21 <= ord(char) <= 0x7E for char in value)
+
+
 def _canonical_ipv4_loopback(host: str) -> str | None:
     if host.casefold() == "localhost":
         return "localhost"
@@ -24,7 +28,7 @@ def _canonical_ipv4_loopback(host: str) -> str | None:
 
 
 def _host_authority(value: str) -> tuple[str, int] | None:
-    if not value or value != value.strip() or any(char in value for char in "@/?#"):
+    if not _is_visible_ascii(value) or any(char in value for char in "@/?#"):
         return None
     try:
         parsed = urlsplit(f"//{value}")
@@ -49,7 +53,7 @@ def _host_authority(value: str) -> tuple[str, int] | None:
 
 
 def _http_origin(value: str) -> tuple[str, int] | None:
-    if not value or value != value.strip():
+    if not _is_visible_ascii(value):
         return None
     try:
         parsed = urlsplit(value)
