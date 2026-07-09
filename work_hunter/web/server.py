@@ -31,9 +31,10 @@ UI_ROUTES = {
 
 def run_server(root: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
     ensure_loopback_listener(host)
+    bind_host = "127.0.0.1" if host.casefold() == "localhost" else host
     handler = make_handler(Path(root) if root is not None else Path.cwd())
-    server = ThreadingHTTPServer((host, port), handler)
-    print(f"Work Hunter UI: http://{host}:{port}")
+    server = ThreadingHTTPServer((bind_host, port), handler)
+    print(f"Work Hunter UI: http://{bind_host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -46,13 +47,51 @@ def make_handler(root: Path):
     class WorkHunterHandler(BaseHTTPRequestHandler):
         server_version = "WorkHunterHTTP/0.1"
 
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            host_values = self.headers.get_all("Host", [])
+            origin_values = self.headers.get_all("Origin", [])
+            if len(host_values) != 1:
+                boundary_error = (
+                    HTTPStatus.FORBIDDEN,
+                    "host_not_loopback",
+                    "Loopback Host header required.",
+                )
+            elif len(origin_values) > 1:
+                boundary_error = (
+                    HTTPStatus.FORBIDDEN,
+                    "cross_origin_request",
+                    "Cross-origin requests are blocked.",
+                )
+            else:
+                boundary_error = request_boundary_error(
+                    method=self.command,
+                    host_header=host_values[0],
+                    origin_header=origin_values[0] if origin_values else None,
+                    content_type=self.headers.get("Content-Type"),
+                    listener_host=str(self.server.server_address[0]),
+                    listener_port=self.server.server_port,
+                )
+            if boundary_error is None:
+                return True
+            status, error, message = boundary_error
+            self._send_json({"error": error, "message": message}, status)
+            return False
+
         def end_headers(self) -> None:
             for name, value in SECURITY_HEADERS.items():
                 self.send_header(name, value)
             super().end_headers()
 
         def do_OPTIONS(self) -> None:
-            self._send_json({"error": "method_not_allowed"}, HTTPStatus.METHOD_NOT_ALLOWED)
+            payload = json.dumps({"error": "method_not_allowed"}).encode("utf-8")
+            self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+            self.send_header("Allow", "GET, POST")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -310,18 +349,6 @@ def make_handler(root: Path):
             self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
-            boundary_error = request_boundary_error(
-                method=self.command,
-                host_header=self.headers.get("Host", ""),
-                origin_header=self.headers.get("Origin"),
-                content_type=self.headers.get("Content-Type"),
-                listener_host=str(self.server.server_address[0]),
-                listener_port=self.server.server_port,
-            )
-            if boundary_error is not None:
-                status, error, message = boundary_error
-                self._send_json({"error": error, "message": message}, status)
-                return
             parsed = urlparse(self.path)
             path = parsed.path
             body = self._read_json()

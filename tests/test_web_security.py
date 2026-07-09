@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
+import socket
 import threading
+from http import HTTPStatus
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 
 import pytest
 
-from work_hunter.web.security import ensure_loopback_listener
+from work_hunter.web.security import ensure_loopback_listener, request_boundary_error
 from work_hunter.web.server import make_handler, run_server
 
 
@@ -35,6 +38,51 @@ def raw_request(cockpit, method: str, path: str, headers: dict[str, str], body: 
         connection.close()
 
 
+def raw_request_with_header_pairs(
+    cockpit,
+    method: str,
+    path: str,
+    headers: list[tuple[str, str]],
+    body: bytes | None,
+):
+    connection = HTTPConnection("127.0.0.1", cockpit.server_port, timeout=5)
+    try:
+        connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        for name, value in headers:
+            connection.putheader(name, value)
+        if body is not None:
+            connection.putheader("Content-Length", str(len(body)))
+        connection.endheaders(body)
+        response = connection.getresponse()
+        response_body = response.read().decode("utf-8")
+        response_headers = {name.lower(): value for name, value in response.getheaders()}
+        return response.status, response_headers, response_body
+    finally:
+        connection.close()
+
+
+def assert_security_headers(headers: dict[str, str]) -> None:
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["x-frame-options"] == "DENY"
+    assert headers["referrer-policy"] == "no-referrer"
+
+
+def boundary_error(
+    host_header: str,
+    origin_header: str | None,
+    *,
+    listener_port: int = 8787,
+):
+    return request_boundary_error(
+        method="POST",
+        host_header=host_header,
+        origin_header=origin_header,
+        content_type="application/json",
+        listener_host="127.0.0.1",
+        listener_port=listener_port,
+    )
+
+
 def test_non_loopback_bind_is_rejected_before_server_creation():
     with pytest.raises(ValueError, match="loopback"):
         ensure_loopback_listener("0.0.0.0")
@@ -55,6 +103,55 @@ def test_run_server_rejects_non_loopback_before_server_creation(monkeypatch, tmp
 
 
 @pytest.mark.parametrize(
+    ("host", "expected_bind_host"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("localhost", "127.0.0.1"),
+    ],
+)
+def test_run_server_uses_verified_ipv4_loopback_endpoint(
+    monkeypatch, tmp_path, host, expected_bind_host
+):
+    addresses = []
+
+    def fake_getaddrinfo(*args, **kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+        ]
+
+    class FakeServer:
+        def __init__(self, address, handler):
+            addresses.append(address)
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            return None
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("work_hunter.web.server.ThreadingHTTPServer", FakeServer)
+    run_server(tmp_path, host=host, port=0)
+    assert addresses == [(expected_bind_host, 0)]
+
+
+def test_ipv6_listener_is_rejected_by_ipv4_only_contract():
+    with pytest.raises(ValueError, match="IPv4 loopback"):
+        ensure_loopback_listener("::1")
+
+
+def test_localhost_resolution_must_remain_on_ipv4_loopback(monkeypatch):
+    def fake_getaddrinfo(*args, **kwargs):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.10", 0)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ValueError, match="IPv4 loopback"):
+        ensure_loopback_listener("localhost")
+
+
+@pytest.mark.parametrize(
     ("headers", "status"),
     [
         ({"Host": "evil.test", "Content-Type": "application/json"}, 403),
@@ -66,6 +163,35 @@ def test_mutation_boundary_rejects_unsafe_request_before_service(
     cockpit, monkeypatch, headers, status
 ):
     constructed = False
+    body_read = False
+
+    def fail_constructor(*args, **kwargs):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("WorkHunter must not be constructed")
+
+    def fail_read_json(*args, **kwargs):
+        nonlocal body_read
+        body_read = True
+        raise AssertionError("request body must not be parsed")
+
+    monkeypatch.setattr("work_hunter.web.server.WorkHunter", fail_constructor)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_read_json", fail_read_json)
+    code, response_headers, _ = raw_request(
+        cockpit,
+        "POST",
+        "/api/score",
+        headers,
+        b"{not-json",
+    )
+    assert code == status
+    assert constructed is False
+    assert body_read is False
+    assert_security_headers(response_headers)
+
+
+def test_hostile_get_is_rejected_before_service(cockpit, monkeypatch):
+    constructed = False
 
     def fail_constructor(*args, **kwargs):
         nonlocal constructed
@@ -73,9 +199,126 @@ def test_mutation_boundary_rejects_unsafe_request_before_service(
         raise AssertionError("WorkHunter must not be constructed")
 
     monkeypatch.setattr("work_hunter.web.server.WorkHunter", fail_constructor)
-    code, _, _ = raw_request(cockpit, "POST", "/api/score", headers, b"{}")
-    assert code == status
+    code, headers, body = raw_request(
+        cockpit,
+        "GET",
+        "/api/resumes",
+        {"Host": f"evil.test:{cockpit.server_port}"},
+        None,
+    )
+    assert code == 403
+    assert json.loads(body)["error"] == "host_not_loopback"
     assert constructed is False
+    assert_security_headers(headers)
+
+
+@pytest.mark.parametrize(
+    ("host_header", "origin_header", "listener_port"),
+    [
+        ("127.0.0.1:8787", "http://127.0.0.1:8787", 8787),
+        ("localhost:8787", "http://localhost:8787", 8787),
+        ("127.0.0.1", "http://127.0.0.1", 80),
+        ("127.0.0.1:80", "http://127.0.0.1", 80),
+    ],
+)
+def test_identical_http_origins_are_accepted(host_header, origin_header, listener_port):
+    assert boundary_error(host_header, origin_header, listener_port=listener_port) is None
+
+
+@pytest.mark.parametrize(
+    ("host_header", "origin_header"),
+    [
+        ("127.0.0.1:8787", "http://localhost:8787"),
+        ("localhost:8787", "http://127.0.0.1:8787"),
+        ("127.0.0.1:8787", "http://127.0.0.2:8787"),
+        ("[::1]:8787", "http://[::1]:8787"),
+    ],
+)
+def test_distinct_or_unsupported_loopback_origins_are_rejected(host_header, origin_header):
+    error = boundary_error(host_header, origin_header)
+    assert error is not None
+    assert error[0] == HTTPStatus.FORBIDDEN
+
+
+@pytest.mark.parametrize(
+    ("header_name", "value_template"),
+    [
+        ("Host", "127.0.0.1:nope"),
+        ("Host", "[::1"),
+        ("Host", "user@127.0.0.1:{port}"),
+        ("Host", "127.0.0.1:{port}/path"),
+        ("Host", "127.0.0.1:99999"),
+        ("Origin", "http://127.0.0.1:nope"),
+        ("Origin", "http://[::1"),
+        ("Origin", "http://user@127.0.0.1:{port}"),
+        ("Origin", "http://127.0.0.1:{port}/path"),
+        ("Origin", "http://127.0.0.1:{port}?query=yes"),
+        ("Origin", "http://127.0.0.1:{port}#fragment"),
+    ],
+)
+def test_malformed_authority_returns_controlled_forbidden_before_body_or_service(
+    cockpit, monkeypatch, header_name, value_template
+):
+    activity = {"body_read": False, "constructed": False}
+
+    def fail_constructor(*args, **kwargs):
+        activity["constructed"] = True
+        raise AssertionError("WorkHunter must not be constructed")
+
+    def fail_read_json(*args, **kwargs):
+        activity["body_read"] = True
+        raise AssertionError("request body must not be parsed")
+
+    host = f"127.0.0.1:{cockpit.server_port}"
+    headers = {"Host": host, "Content-Type": "application/json"}
+    headers[header_name] = value_template.format(port=cockpit.server_port)
+    monkeypatch.setattr("work_hunter.web.server.WorkHunter", fail_constructor)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_read_json", fail_read_json)
+    code, response_headers, body = raw_request(
+        cockpit,
+        "POST",
+        "/api/score",
+        headers,
+        b"{not-json",
+    )
+    assert code == 403
+    assert json.loads(body)["error"] in {"host_not_loopback", "cross_origin_request"}
+    assert activity == {"body_read": False, "constructed": False}
+    assert_security_headers(response_headers)
+
+
+@pytest.mark.parametrize("duplicate_header", ["Host", "Origin"])
+def test_duplicate_authority_headers_are_rejected_before_dispatch(
+    cockpit, monkeypatch, duplicate_header
+):
+    activity = {"body_read": False, "constructed": False}
+
+    def fail_constructor(*args, **kwargs):
+        activity["constructed"] = True
+        raise AssertionError("WorkHunter must not be constructed")
+
+    def fail_read_json(*args, **kwargs):
+        activity["body_read"] = True
+        raise AssertionError("request body must not be parsed")
+
+    host = f"127.0.0.1:{cockpit.server_port}"
+    headers = [("Host", host), ("Content-Type", "application/json")]
+    if duplicate_header == "Host":
+        headers.insert(1, ("Host", host))
+    else:
+        headers.extend([("Origin", f"http://{host}"), ("Origin", f"http://{host}")])
+    monkeypatch.setattr("work_hunter.web.server.WorkHunter", fail_constructor)
+    monkeypatch.setattr(cockpit.RequestHandlerClass, "_read_json", fail_read_json)
+    code, response_headers, _ = raw_request_with_header_pairs(
+        cockpit,
+        "POST",
+        "/api/score",
+        headers,
+        b"{not-json",
+    )
+    assert code == 403
+    assert activity == {"body_read": False, "constructed": False}
+    assert_security_headers(response_headers)
 
 
 def test_same_origin_json_and_originless_local_script_are_accepted(cockpit):
@@ -94,9 +337,24 @@ def test_same_origin_json_and_originless_local_script_are_accepted(cockpit):
 def test_all_responses_include_security_headers(cockpit):
     code, headers, _ = raw_request(cockpit, "GET", "/", {}, None)
     assert code == 200
-    assert headers["x-content-type-options"] == "nosniff"
-    assert headers["x-frame-options"] == "DENY"
-    assert headers["referrer-policy"] == "no-referrer"
+    assert_security_headers(headers)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "headers", "body", "status"),
+    [
+        ("GET", "/missing", {}, None, 404),
+        ("POST", "/api/score", {"Host": "evil.test", "Content-Type": "application/json"}, b"{}", 403),
+        ("POST", "/api/score", {"Content-Type": "text/plain"}, b"{}", 415),
+        ("OPTIONS", "/api/score", {}, None, 405),
+    ],
+)
+def test_explicit_error_responses_include_security_headers(
+    cockpit, method, path, headers, body, status
+):
+    code, response_headers, _ = raw_request(cockpit, method, path, headers, body)
+    assert code == status
+    assert_security_headers(response_headers)
 
 
 def test_options_is_rejected_without_cors_authorization_headers(cockpit):
@@ -105,3 +363,4 @@ def test_options_is_rejected_without_cors_authorization_headers(cockpit):
     assert "access-control-allow-origin" not in headers
     assert "access-control-allow-methods" not in headers
     assert "access-control-allow-headers" not in headers
+    assert headers["allow"] == "GET, POST"
