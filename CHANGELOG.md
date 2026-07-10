@@ -22,4 +22,4 @@
 ### Packaging and verification
 
 - Package UI and SQL resources in the 1.0.0 wheel.
-- Add non-root wheel-based Docker image, Python 3.11/3.12 CI, mypy, browser, and dependency-audit gates.
+- Add a non-root wheel-based Docker build definition; final image build and safe smoke remain pending release verification.

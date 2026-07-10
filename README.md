@@ -174,7 +174,7 @@ python -m build
 
 The cockpit is loopback-only. Real HH mutations require a literal confirmation flag. Strings such as `"true"` do not authorize them.
 
-Release verification never reads the repository's private `.work-hunter` directory.
+Release verification does not read or copy file contents or secrets from .work-hunter; product smokes use isolated roots.
 
 ## Current Agent Notes
 
