@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
 from work_hunter.storage import Storage
 
 
@@ -62,3 +68,73 @@ def test_migrations_are_idempotent(tmp_path):
     assert count == 1
     assert applied >= 1
 
+
+def test_storage_enables_foreign_keys_and_busy_timeout(tmp_path):
+    storage = Storage(tmp_path / "db.sqlite3")
+
+    assert storage.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert storage.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    with pytest.raises(sqlite3.IntegrityError):
+        storage.save_application(999, "applied")
+
+
+def test_concurrent_storage_initialization_is_serialized(tmp_path):
+    path = tmp_path / "db.sqlite3"
+    barrier = threading.Barrier(8)
+
+    def construct(_: int) -> None:
+        barrier.wait()
+        storage = Storage(path)
+        storage.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(construct, index) for index in range(8)]
+        for future in futures:
+            future.result()
+
+    storage = Storage(path)
+    assert storage.conn.execute(
+        "SELECT COUNT(*) FROM schema_migrations"
+    ).fetchone()[0] == 1
+
+
+def test_failed_migration_rolls_back_schema_and_version(tmp_path):
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "0001_valid.sql").write_text(
+        "CREATE TABLE migration_before_failure(id INTEGER);",
+        encoding="utf-8",
+    )
+    (migrations / "9999_broken.sql").write_text(
+        "CREATE TABLE partial_schema(id INTEGER); THIS IS INVALID;",
+        encoding="utf-8",
+    )
+    path = tmp_path / "db.sqlite3"
+
+    with pytest.raises(sqlite3.Error):
+        Storage(path, migrations_dir=migrations)
+
+    conn = sqlite3.connect(path)
+    names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert "jobs" not in names
+    assert "schema_migrations" not in names
+    assert "migration_before_failure" not in names
+    assert "partial_schema" not in names
+
+
+def test_failed_migration_closes_constructor_connection(tmp_path):
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "9999_broken.sql").write_text("THIS IS INVALID;", encoding="utf-8")
+    storage = Storage.__new__(Storage)
+
+    with pytest.raises(sqlite3.Error):
+        Storage.__init__(storage, tmp_path / "db.sqlite3", migrations_dir=migrations)
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        storage.conn.execute("SELECT 1")

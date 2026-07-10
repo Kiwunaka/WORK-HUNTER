@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from .models import (
     Application,
@@ -178,20 +179,7 @@ def _json_dumps_redacted(value: Any) -> str:
     return json.dumps(redact_for_storage(value or {}), ensure_ascii=False)
 
 
-class Storage:
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
-        self.conn.row_factory = sqlite3.Row
-        self._migrate()
-
-    def close(self) -> None:
-        self.conn.close()
-
-    def _migrate(self) -> None:
-        self.conn.executescript(
-            """
+BASE_SCHEMA_SQL = """
             CREATE TABLE IF NOT EXISTS jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
@@ -670,11 +658,65 @@ class Storage:
                 updated_at TEXT NOT NULL DEFAULT '',
                 UNIQUE(name)
             );
-            """
+"""
+
+
+class Storage:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        migrations_dir: str | Path | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.migrations_dir = (
+            Path(migrations_dir)
+            if migrations_dir is not None
+            else Path(__file__).with_name("migrations")
         )
-        self.conn.commit()
-        self._apply_migrations()
-        self._ensure_backbone_columns()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.path)
+        try:
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON")
+            self.conn.execute("PRAGMA busy_timeout = 5000")
+            self._migrate()
+        except Exception:
+            self.conn.close()
+            raise
+
+    def close(self) -> None:
+        self.conn.close()
+
+    @contextmanager
+    def _schema_transaction(self) -> Iterator[None]:
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except Exception:
+            self.conn.rollback()
+            raise
+        else:
+            self.conn.commit()
+
+    def _execute_sql_script(self, script: str) -> None:
+        pending: list[str] = []
+        for character in script:
+            pending.append(character)
+            if character != ";":
+                continue
+            candidate = "".join(pending).strip()
+            if candidate and sqlite3.complete_statement(candidate):
+                self.conn.execute(candidate)
+                pending.clear()
+        if "".join(pending).strip():
+            raise sqlite3.OperationalError("Incomplete SQL migration statement")
+
+    def _migrate(self) -> None:
+        with self._schema_transaction():
+            self._execute_sql_script(BASE_SCHEMA_SQL)
+            self._apply_migrations()
+            self._ensure_backbone_columns()
 
     def _apply_migrations(self) -> None:
         self.conn.execute(
@@ -685,24 +727,21 @@ class Storage:
             )
             """
         )
-        migrations_dir = Path(__file__).with_name("migrations")
-        if not migrations_dir.exists():
-            self.conn.commit()
+        if not self.migrations_dir.exists():
             return
         applied = {
             row["version"]
             for row in self.conn.execute("SELECT version FROM schema_migrations").fetchall()
         }
-        for path in sorted(migrations_dir.glob("*.sql")):
+        for path in sorted(self.migrations_dir.glob("*.sql")):
             version = path.name
             if version in applied:
                 continue
-            self.conn.executescript(path.read_text(encoding="utf-8"))
+            self._execute_sql_script(path.read_text(encoding="utf-8"))
             self.conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                 (version, utc_now()),
             )
-        self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = {
@@ -731,7 +770,6 @@ class Storage:
         self._ensure_column("applications", "sent_at", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("applications", "result_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("applications", "error", "TEXT NOT NULL DEFAULT ''")
-        self.conn.commit()
 
     def upsert_job(self, job: Job) -> int:
         self.conn.execute(
