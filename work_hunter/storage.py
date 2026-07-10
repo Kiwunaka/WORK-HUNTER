@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -52,6 +53,12 @@ def _is_readonly_sql(sql: str) -> bool:
     if command not in {"select", "with"}:
         return False
     return MUTATING_SQL_RE.search(stripped) is None
+
+
+def _utc_cutoff_days(days: int, *, now: datetime | None = None) -> str:
+    reference = now or datetime.now(timezone.utc)
+    cutoff = reference - timedelta(days=max(0, int(days)))
+    return cutoff.replace(microsecond=0).isoformat()
 
 
 def _hh_api_lab_snippet_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -3058,7 +3065,7 @@ class Storage:
         }
 
     def get_ghost_jobs(self, days: int = 7) -> list[Job]:
-        cutoff = utc_now()
+        cutoff = _utc_cutoff_days(days)
         rows = self.conn.execute(
             """
             SELECT j.*
@@ -3066,7 +3073,7 @@ class Storage:
             INNER JOIN applications a ON a.job_id = j.id
             WHERE j.status = 'applied'
               AND a.status = 'applied'
-              AND a.applied_at <= ?
+              AND datetime(a.applied_at) <= datetime(?)
             ORDER BY a.applied_at ASC
             """,
             (cutoff,),
