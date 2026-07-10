@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,116 @@ def test_save_config_replaces_complete_temp_file(monkeypatch, tmp_path):
     assert replacements[0]["destination"] == path
     assert replacements[0]["payload"] == config
     assert json.loads(path.read_text(encoding="utf-8")) == config
+
+
+def test_save_config_replace_failure_preserves_old_file_and_cleans_temp(
+    monkeypatch,
+    tmp_path,
+):
+    path = tmp_path / "config.json"
+    path.write_text('{"version": "old"}\n', encoding="utf-8")
+    copied_modes: list[tuple[Path, Path]] = []
+    replacement_sources: list[Path] = []
+    directory_syncs: list[Path] = []
+    original_copymode = shutil.copymode
+
+    def record_copymode(source, destination, *args, **kwargs):
+        copied_modes.append((Path(source), Path(destination)))
+        return original_copymode(source, destination, *args, **kwargs)
+
+    def fail_replace(source, destination):
+        replacement_sources.append(Path(source))
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(shutil, "copymode", record_copymode)
+    monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(
+        config_module,
+        "_fsync_directory",
+        lambda directory: directory_syncs.append(Path(directory)),
+        raising=False,
+    )
+
+    with pytest.raises(OSError, match="replace failed"):
+        save_config(path, {"version": "new"})
+
+    assert path.read_text(encoding="utf-8") == '{"version": "old"}\n'
+    assert len(copied_modes) == 1
+    assert copied_modes[0][0] == path
+    assert replacement_sources == [copied_modes[0][1]]
+    assert not replacement_sources[0].exists()
+    assert directory_syncs == []
+
+
+def test_save_config_serialization_failure_preserves_old_file_and_cleans_temp(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"version": "old"}\n', encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        save_config(path, {"unsupported": object()})
+
+    assert path.read_text(encoding="utf-8") == '{"version": "old"}\n'
+    assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []
+
+
+def test_save_config_fsyncs_parent_directory_after_replace(monkeypatch, tmp_path):
+    path = tmp_path / "nested" / "config.json"
+    directory_syncs: list[Path] = []
+    monkeypatch.setattr(
+        config_module,
+        "_fsync_directory",
+        lambda directory: directory_syncs.append(Path(directory)),
+        raising=False,
+    )
+
+    save_config(path, {"status": "ok"})
+
+    assert directory_syncs == [path.parent]
+
+
+def test_fsync_directory_uses_and_closes_directory_descriptor(monkeypatch, tmp_path):
+    sync_directory = getattr(config_module, "_fsync_directory", None)
+    assert callable(sync_directory)
+    opened: list[Path] = []
+    synced: list[int] = []
+    closed: list[int] = []
+
+    def open_directory(path, flags):
+        opened.append(Path(path))
+        return 91
+
+    monkeypatch.setattr(config_module.os, "open", open_directory)
+    monkeypatch.setattr(config_module.os, "fsync", lambda fd: synced.append(fd))
+    monkeypatch.setattr(config_module.os, "close", lambda fd: closed.append(fd))
+
+    sync_directory(tmp_path)
+
+    assert opened == [tmp_path]
+    assert synced == [91]
+    assert closed == [91]
+
+
+def test_fsync_directory_ignores_unsupported_platform(monkeypatch, tmp_path):
+    sync_directory = getattr(config_module, "_fsync_directory", None)
+    assert callable(sync_directory)
+    monkeypatch.setattr(
+        config_module.os,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unsupported")),
+    )
+
+    sync_directory(tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not portable to Windows")
+def test_save_config_preserves_existing_posix_mode(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text("{}\n", encoding="utf-8")
+    path.chmod(0o640)
+
+    save_config(path, {"status": "ok"})
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
 def test_mask_secrets():

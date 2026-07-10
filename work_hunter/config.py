@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import tempfile
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .sources.public_boards import PUBLIC_BOARD_SOURCE_NAMES, public_board_default_config
 
@@ -28,6 +30,7 @@ HH_ACCOUNT_SECRET_KEYS = frozenset(
     {"access_token", "refresh_token", "client_secret"}
 )
 _MISSING_CONFIG_VALUE = object()
+_CONFIG_WRITE_LOCK = threading.RLock()
 
 
 def _default_profile() -> dict[str, Any]:
@@ -397,6 +400,11 @@ def load_config(path: str | Path) -> dict[str, Any]:
 
 
 def save_config(path: str | Path, config: dict[str, Any]) -> None:
+    with _CONFIG_WRITE_LOCK:
+        _save_config(path, config)
+
+
+def _save_config(path: str | Path, config: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
@@ -406,14 +414,55 @@ def save_config(path: str | Path, config: dict[str, Any]) -> None:
     )
     temporary = Path(temporary_name)
     try:
+        # Existing files retain portable mode bits. New files keep mkstemp's
+        # restrictive platform default; ACL and ownership follow os.replace.
+        if path.exists():
+            try:
+                shutil.copymode(path, temporary, follow_symlinks=False)
+            except (NotImplementedError, OSError):
+                pass
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(config, fh, ensure_ascii=False, indent=2)
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _fsync_directory(directory: str | Path) -> None:
+    """Best-effort durability for the replaced directory entry."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_fd = os.open(directory, flags)
+    except (NotImplementedError, OSError):
+        return
+    try:
+        try:
+            os.fsync(directory_fd)
+        except (NotImplementedError, OSError):
+            pass
+    finally:
+        os.close(directory_fd)
+
+
+def update_config(
+    path: str | Path,
+    update: Callable[[dict[str, Any]], None],
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    path = Path(path)
+    with _CONFIG_WRITE_LOCK:
+        if path.exists():
+            config = load_config(path)
+        else:
+            config = copy.deepcopy(fallback or default_config())
+        update(config)
+        _save_config(path, config)
+        return config
 
 
 def active_profile(config: dict[str, Any]) -> dict[str, Any]:

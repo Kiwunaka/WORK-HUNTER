@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import copy
 import csv
 import importlib.util
 import io
@@ -7,6 +8,7 @@ import json
 import re
 import smtplib
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime
@@ -25,6 +27,7 @@ from .config import (
     mask_secrets,
     merge_masked_config,
     save_config,
+    update_config,
 )
 from .letters import chat_completion, draft_cover_letter, draft_cover_letter_ai
 from .models import (
@@ -74,6 +77,9 @@ from .sources import (
 from .sources.hh import HHApplyClient
 from .sources.common import clean_text, fetch_url
 from .storage import Storage
+
+
+_HH_IDENTITY_WRITE_LOCK = threading.RLock()
 
 
 def _format_experience(about: dict[str, Any]) -> str:
@@ -944,7 +950,15 @@ class WorkHunter:
                 result[source_name] = {"status": "disabled", "count": 0}
                 continue
             try:
-                collector = self._collector(source_name, source_config)
+                if source_name == "hh":
+                    source_config, backend = self._hh_runtime()
+                    collector = self._collector(
+                        source_name,
+                        source_config,
+                        backend=backend,
+                    )
+                else:
+                    collector = self._collector(source_name, source_config)
                 remaining = None if max_results <= 0 else max_results - total_unique
                 fetch_limit = None if remaining is None else min(max_results, remaining + len(seen))
                 jobs = collector.collect(profile, limit=fetch_limit)
@@ -1135,20 +1149,41 @@ class WorkHunter:
     def hh_config(self) -> dict[str, Any]:
         return active_hh_config(self.config)
 
-    def _persist_hh_identity_patch(self, patch: dict[str, Any]) -> None:
-        active_account = str(self.config.get("hh_account_profile") or "default")
-        accounts = self.config.setdefault("hh_account_profiles", {})
-        account_config = accounts.setdefault(active_account, {})
-        account_config.update(patch)
-        if active_account == "default":
-            sources = self.config.setdefault("sources", {})
-            source_config = sources.setdefault("hh", {})
-            source_config.update(patch)
-        save_config(self.config_path, self.config)
+    def _persist_hh_identity_patch(
+        self,
+        account_name: str,
+        patch: dict[str, Any],
+    ) -> None:
+        def merge_identity(config: dict[str, Any]) -> None:
+            accounts = config.setdefault("hh_account_profiles", {})
+            account_config = accounts.setdefault(account_name, {})
+            account_config.update(patch)
+            if account_name == "default":
+                sources = config.setdefault("sources", {})
+                source_config = sources.setdefault("hh", {})
+                source_config.update(patch)
+
+        with _HH_IDENTITY_WRITE_LOCK:
+            self.config = update_config(
+                self.config_path,
+                merge_identity,
+                fallback=self.config,
+            )
+
+    def _hh_runtime(self) -> tuple[dict[str, Any], CallbackConfigBackend]:
+        with _HH_IDENTITY_WRITE_LOCK:
+            config_snapshot = copy.deepcopy(self.config)
+        account_name = str(config_snapshot.get("hh_account_profile") or "default")
+        config = active_hh_config(config_snapshot)
+
+        def save_identity_patch(patch: dict[str, Any]) -> None:
+            self._persist_hh_identity_patch(account_name, patch)
+
+        backend = CallbackConfigBackend(config, save_identity_patch)
+        return config, backend
 
     def _hh_client(self) -> HHApplyClient:
-        config = self.hh_config()
-        backend = CallbackConfigBackend(config, self._persist_hh_identity_patch)
+        config, backend = self._hh_runtime()
         return HHApplyClient(config, backend=backend)
 
     def list_hh_account_profiles(self) -> dict[str, Any]:
@@ -2087,16 +2122,8 @@ class WorkHunter:
         client = self._hh_client()
         token = client.refresh_token()
         access_token = str(token.get("access_token") or "")
-        refresh_token = str(token.get("refresh_token") or "")
         if not access_token:
             raise RuntimeError("HH refresh response did not include access_token")
-        identity_patch = {"access_token": access_token}
-        if refresh_token:
-            identity_patch["refresh_token"] = refresh_token
-        expires_at = token.get("expires_at") or token.get("access_expires_at") or ""
-        if expires_at:
-            identity_patch["access_expires_at"] = str(expires_at)
-        self._persist_hh_identity_patch(identity_patch)
         hh_config = self.hh_config()
         return {
             "status": "ok",
@@ -3894,7 +3921,8 @@ class WorkHunter:
         reason: str,
         api_error: str = "",
     ) -> dict[str, Any]:
-        hh_config = dict(self.hh_config())
+        hh_config, backend = self._hh_runtime()
+        hh_config = dict(hh_config)
         if area:
             hh_config["area"] = area[0]
         hh_config["per_page"] = min(100, max(1, int(limit)))
@@ -3904,7 +3932,10 @@ class WorkHunter:
         }
         imported_jobs: list[Job] = []
         try:
-            for job in HHSource(hh_config).collect(profile, limit=max(1, int(limit))):
+            for job in HHSource(hh_config, backend=backend).collect(
+                profile,
+                limit=max(1, int(limit)),
+            ):
                 job.id = self.storage.upsert_job(job)
                 imported_jobs.append(job)
         except Exception as exc:
@@ -4940,9 +4971,15 @@ class WorkHunter:
             "by_level": by_level,
         }
 
-    def _collector(self, source_name: str, source_config: dict[str, Any]):
+    def _collector(
+        self,
+        source_name: str,
+        source_config: dict[str, Any],
+        *,
+        backend: CallbackConfigBackend | None = None,
+    ):
         if source_name == "hh":
-            return HHSource(source_config)
+            return HHSource(source_config, backend=backend)
         if source_name == "habr":
             return HabrSource(source_config)
         if source_name == "geekjob":

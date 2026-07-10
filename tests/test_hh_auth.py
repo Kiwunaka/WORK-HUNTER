@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -30,11 +32,20 @@ class FakeRefreshHHClient:
 
     def refresh_token(self):
         self.calls.append("refresh")
-        return {
+        token = {
             "access_token": "new-access",
             "refresh_token": "new-refresh",
             "expires_at": "2030-01-01T00:00:00+00:00",
         }
+        if self.backend is not None:
+            self.backend.save(
+                {
+                    "access_token": token["access_token"],
+                    "refresh_token": token["refresh_token"],
+                    "access_expires_at": token["expires_at"],
+                }
+            )
+        return token
 
 
 class FakeFailingRefreshHHClient:
@@ -148,6 +159,268 @@ def test_rotated_default_refresh_token_updates_account_and_source(monkeypatch, t
 
     reloaded = WorkHunter(tmp_path)
     assert reloaded.hh_config()["refresh_token"] == "new-refresh"
+
+
+def test_named_account_collector_rotation_persists_to_app_and_disk(monkeypatch, tmp_path):
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"].update(
+        {
+            "access_token": "default-expired-access",
+            "refresh_token": "default-old-refresh",
+            "access_expires_at": "2000-01-01T00:00:00+00:00",
+            "web_fallback": False,
+            "pages": 1,
+        }
+    )
+    app.config["profiles"]["default"]["queries"] = ["python"]
+    app.save_hh_account_profile(
+        "personal",
+        access_token="personal-expired-access",
+        refresh_token="personal-old-refresh",
+        access_expires_at="2000-01-01T00:00:00+00:00",
+    )
+    app.use_hh_account_profile("personal")
+    app.save_config(app.config)
+
+    refresh_payloads: list[dict[str, str]] = []
+
+    def token_request(*args, **kwargs):
+        refresh_payloads.append(dict(kwargs["data"]))
+        return FakeResponse(
+            200,
+            {
+                "access_token": "collector-new-access",
+                "refresh_token": "collector-new-refresh",
+                "expires_at": "2031-01-01T00:00:00+00:00",
+            },
+        )
+
+    monkeypatch.setattr("requests.request", token_request)
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: FakeResponse(200, {"items": []}),
+    )
+
+    result = app.sync_sources(sources=["hh"], limit=1)
+
+    assert result["hh"] == {"status": "ok", "count": 0}
+    assert refresh_payloads[0]["refresh_token"] == "personal-old-refresh"
+    assert app.hh_config()["refresh_token"] == "collector-new-refresh"
+    assert app.config["sources"]["hh"]["refresh_token"] == "default-old-refresh"
+
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.hh_config()["access_token"] == "collector-new-access"
+    assert reloaded.hh_config()["refresh_token"] == "collector-new-refresh"
+
+
+def test_named_account_fallback_rotation_persists_to_disk(monkeypatch, tmp_path):
+    app = WorkHunter(tmp_path)
+    app.save_hh_account_profile(
+        "personal",
+        access_token="personal-expired-access",
+        refresh_token="personal-old-refresh",
+        access_expires_at="2000-01-01T00:00:00+00:00",
+    )
+    app.use_hh_account_profile("personal")
+    refresh_payloads: list[dict[str, str]] = []
+
+    def token_request(*args, **kwargs):
+        refresh_payloads.append(dict(kwargs["data"]))
+        return FakeResponse(
+            200,
+            {
+                "access_token": "fallback-new-access",
+                "refresh_token": "fallback-new-refresh",
+                "expires_at": "2031-01-01T00:00:00+00:00",
+            },
+        )
+
+    monkeypatch.setattr("requests.request", token_request)
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: FakeResponse(200, {"items": []}),
+    )
+
+    result = app._search_hh_vacancies_web_fallback(
+        text="python",
+        area=None,
+        salary=None,
+        limit=1,
+        reason="api_error",
+    )
+
+    assert result["status"] == "ok"
+    assert result["count"] == 0
+    assert refresh_payloads[0]["refresh_token"] == "personal-old-refresh"
+    assert WorkHunter(tmp_path).hh_config()["refresh_token"] == "fallback-new-refresh"
+
+
+def test_hh_client_pins_account_when_active_profile_changes(monkeypatch, tmp_path):
+    app = WorkHunter(tmp_path)
+    for name in ("alice", "bob"):
+        app.save_hh_account_profile(
+            name,
+            access_token=f"{name}-expired-access",
+            refresh_token=f"{name}-old-refresh",
+            access_expires_at="2000-01-01T00:00:00+00:00",
+        )
+    app.use_hh_account_profile("alice")
+    alice_client = app._hh_client()
+    app.use_hh_account_profile("bob")
+
+    monkeypatch.setattr(
+        "requests.request",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "access_token": "alice-new-access",
+                "refresh_token": "alice-new-refresh",
+                "expires_at": "2031-01-01T00:00:00+00:00",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: FakeResponse(200, {"id": "alice"}),
+    )
+
+    assert alice_client.whoami() == {"id": "alice"}
+
+    reloaded = WorkHunter(tmp_path)
+    accounts = reloaded.config["hh_account_profiles"]
+    assert accounts["alice"]["refresh_token"] == "alice-new-refresh"
+    assert accounts["bob"]["refresh_token"] == "bob-old-refresh"
+    assert reloaded.config["hh_account_profile"] == "bob"
+
+
+def test_hh_runtime_pins_account_and_credentials_from_same_snapshot(monkeypatch, tmp_path):
+    app = WorkHunter(tmp_path)
+    for name in ("alice", "bob"):
+        app.save_hh_account_profile(
+            name,
+            access_token=f"{name}-expired-access",
+            refresh_token=f"{name}-old-refresh",
+            access_expires_at="2000-01-01T00:00:00+00:00",
+        )
+    app.use_hh_account_profile("alice")
+    original_hh_config = app.hh_config
+    switched_during_construction = False
+
+    def switch_before_config_snapshot():
+        nonlocal switched_during_construction
+        switched_during_construction = True
+        app.use_hh_account_profile("bob")
+        return original_hh_config()
+
+    monkeypatch.setattr(app, "hh_config", switch_before_config_snapshot)
+    alice_client = app._hh_client()
+    if not switched_during_construction:
+        app.use_hh_account_profile("bob")
+
+    refresh_payloads: list[dict[str, str]] = []
+
+    def token_request(*args, **kwargs):
+        refresh_payloads.append(dict(kwargs["data"]))
+        return FakeResponse(
+            200,
+            {
+                "access_token": "alice-new-access",
+                "refresh_token": "alice-new-refresh",
+                "expires_at": "2031-01-01T00:00:00+00:00",
+            },
+        )
+
+    monkeypatch.setattr("requests.request", token_request)
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: FakeResponse(200, {"id": "alice"}),
+    )
+
+    assert alice_client.whoami() == {"id": "alice"}
+    assert refresh_payloads[0]["refresh_token"] == "alice-old-refresh"
+
+    reloaded = WorkHunter(tmp_path)
+    accounts = reloaded.config["hh_account_profiles"]
+    assert accounts["alice"]["refresh_token"] == "alice-new-refresh"
+    assert accounts["bob"]["refresh_token"] == "bob-old-refresh"
+    assert reloaded.config["hh_account_profile"] == "bob"
+
+
+def test_identity_patch_merges_with_fresh_disk_config(monkeypatch, tmp_path):
+    stale_app = WorkHunter(tmp_path)
+    stale_app.save_hh_account_profile(
+        "personal",
+        access_token="expired-access",
+        refresh_token="old-refresh",
+        access_expires_at="2000-01-01T00:00:00+00:00",
+    )
+    stale_app.use_hh_account_profile("personal")
+    stale_client = stale_app._hh_client()
+
+    newer_app = WorkHunter(tmp_path)
+    newer_app.config["research"]["max_results"] = 777
+    newer_app.config["about"]["summary"] = "newer-state"
+    newer_app.save_config(newer_app.config)
+
+    monkeypatch.setattr(
+        "requests.request",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_at": "2031-01-01T00:00:00+00:00",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: FakeResponse(200, {"id": "me-1"}),
+    )
+
+    assert stale_client.whoami() == {"id": "me-1"}
+
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["research"]["max_results"] == 777
+    assert reloaded.config["about"]["summary"] == "newer-state"
+    assert reloaded.hh_config()["refresh_token"] == "new-refresh"
+    assert stale_app.config["research"]["max_results"] == 777
+
+
+def test_explicit_refresh_persists_rotation_once(monkeypatch, tmp_path):
+    app = WorkHunter(tmp_path)
+    app.save_hh_account_profile(
+        "personal",
+        access_token="expired-access",
+        refresh_token="old-refresh",
+        access_expires_at="2000-01-01T00:00:00+00:00",
+    )
+    app.use_hh_account_profile("personal")
+
+    monkeypatch.setattr(
+        "requests.request",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_at": "2031-01-01T00:00:00+00:00",
+            },
+        ),
+    )
+    replacements: list[Path] = []
+    original_replace = os.replace
+
+    def record_replace(source, destination):
+        replacements.append(Path(destination))
+        original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", record_replace)
+
+    result = app.refresh_hh_token()
+
+    assert result["refresh_token"] == "new-refresh"
+    assert replacements == [app.config_path]
 
 
 def test_hh_refresh_cli_outputs_masked_result(monkeypatch, tmp_path, capsys):

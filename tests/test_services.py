@@ -44,7 +44,7 @@ def test_sync_sources_default_includes_public_board_sources(monkeypatch, tmp_pat
         def collect(self, profile, limit=None):
             return []
 
-    def fake_collector(self, source_name, source_config):
+    def fake_collector(self, source_name, source_config, *, backend=None):
         collected.append(source_name)
         return EmptyCollector()
 

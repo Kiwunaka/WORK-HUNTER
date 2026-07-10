@@ -21,8 +21,14 @@ HH_SEARCH_URL = "https://hh.ru/search/vacancy"
 
 
 class HHSource:
-    def __init__(self, config: dict[str, Any]):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        backend: ConfigBackend | None = None,
+    ):
         self.config = config
+        self.backend = backend
 
     def collect(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
         if self._api_ready():
@@ -47,7 +53,7 @@ class HHSource:
         return config
 
     def _collect_api(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
-        session = HHApiSession(self._api_config())
+        session = HHApiSession(self._api_config(), backend=self.backend)
         queries = profile.get("queries") or profile.get("desired_roles") or [""]
         per_page = min(int(self.config.get("per_page", 25)), 100)
         pages = max(1, int(self.config.get("pages", 1)))
