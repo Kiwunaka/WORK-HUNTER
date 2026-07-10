@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
 
+import pytest
+
 from work_hunter.cli import main as cli_main
+from work_hunter.config import config_path, database_path
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
 
@@ -69,6 +73,37 @@ def test_hh_auth_status_cli(monkeypatch, tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
     assert payload["authorized"] is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["hh-auth-status"],
+        ["hh", "auth", "status"],
+    ],
+    ids=["flat", "nested"],
+)
+def test_hh_auth_status_cli_without_token_does_not_write(command, tmp_path, capsys):
+    cli_main(["--root", str(tmp_path), *command])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "missing_access_token"
+    assert payload["authorized"] is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_cli_creates_database_with_migrations(tmp_path, capsys):
+    cli_main(["--root", str(tmp_path), "init"])
+    capsys.readouterr()
+
+    database = database_path(tmp_path)
+    assert config_path(tmp_path).is_file()
+    assert database.is_file()
+    with sqlite3.connect(database) as connection:
+        applied = connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations"
+        ).fetchone()[0]
+    assert applied > 0
 
 
 def test_hh_auth_status_web_endpoint(tmp_path):

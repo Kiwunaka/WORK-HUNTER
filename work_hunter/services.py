@@ -917,13 +917,20 @@ class WorkHunter:
         self.config = load_config(self.config_path)
         self._config_baseline = copy.deepcopy(self.config)
         self._config_aliases: list[dict[str, Any]] = []
-        self.storage = Storage(database_path(self.root))
+        self._storage: Storage | None = None
+
+    @property
+    def storage(self) -> Storage:
+        if self._storage is None:
+            self._storage = Storage(database_path(self.root))
+        return self._storage
 
     def active_profile_id(self) -> str:
         selected = self.config.get("profile", "default")
         return selected if isinstance(selected, str) and selected else "default"
 
     def init(self, *, overwrite: bool = False) -> Path:
+        _ = self.storage
         if overwrite or not self.config_path.exists():
             self._replace_config(self.config)
         return self.config_path
