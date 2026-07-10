@@ -1,9 +1,23 @@
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 import pytest
 
 from work_hunter.models import Job, JobScore, LetterDraft
-from work_hunter.storage import Storage, _utc_cutoff_days
+from work_hunter.storage import Storage, _required_lastrowid, _utc_cutoff_days
+
+
+class _FakeCursor:
+    def __init__(self, lastrowid: int | None):
+        self.lastrowid = lastrowid
+
+
+def test_required_lastrowid_enforces_sqlite_insert_invariant():
+    assert _required_lastrowid(cast(sqlite3.Cursor, _FakeCursor(42))) == 42
+
+    with pytest.raises(RuntimeError, match="^SQLite INSERT did not produce a row id$"):
+        _required_lastrowid(cast(sqlite3.Cursor, _FakeCursor(None)))
 
 
 def test_upsert_job_and_status(tmp_path):

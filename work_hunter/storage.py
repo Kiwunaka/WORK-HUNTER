@@ -55,6 +55,13 @@ def _is_readonly_sql(sql: str) -> bool:
     return MUTATING_SQL_RE.search(stripped) is None
 
 
+def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
+    value = cursor.lastrowid
+    if value is None:
+        raise RuntimeError("SQLite INSERT did not produce a row id")
+    return int(value)
+
+
 def _utc_cutoff_days(days: int, *, now: datetime | None = None) -> str:
     reference = now or datetime.now(timezone.utc)
     try:
@@ -968,7 +975,7 @@ class Storage:
             (draft.job_id, draft.template_name, draft.body, draft.created_at),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def get_latest_letter(self, job_id: int) -> LetterDraft | None:
         row = self.conn.execute(
@@ -1035,7 +1042,7 @@ class Storage:
             (kind, utc_now()),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def finish_run(self, run_id: int, *, count: int = 0, error: str = "") -> None:
         self.conn.execute(
@@ -1165,7 +1172,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def get_apply_plan(self, plan_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
@@ -1362,7 +1369,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_employer_snapshots(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -1413,7 +1420,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_email_followups(self) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM hh_email_followups ORDER BY id").fetchall()
@@ -1644,7 +1651,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def update_hh_campaign_run(
         self,
@@ -1703,7 +1710,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def update_hh_campaign_item(
         self,
@@ -1764,7 +1771,7 @@ class Storage:
             (tool_name, _json_dumps_redacted(input_data or {}), "running", utc_now()),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def finish_hh_agent_mcp_run(
         self,
@@ -1837,7 +1844,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_agent_events(
         self,
@@ -1897,7 +1904,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_agent_tasks(
         self,
@@ -1945,7 +1952,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def update_hh_agent_outbox(
         self,
@@ -2027,7 +2034,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def update_hh_agent_webhook(
         self,
@@ -2097,7 +2104,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_vacancy_analysis(self, vacancy_id: str | None = None) -> list[HHVacancyAnalysis]:
         if vacancy_id:
@@ -2146,7 +2153,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_application_attempts(self, vacancy_id: str | None = None) -> list[HHApplicationAttempt]:
         if vacancy_id:
@@ -2223,7 +2230,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_ai_decisions(self) -> list[HHAIDecision]:
         rows = self.conn.execute("SELECT * FROM hh_ai_decisions ORDER BY id").fetchall()
@@ -2263,7 +2270,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def update_hh_pending_message(
         self,
@@ -2334,7 +2341,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_operation_logs(self, operation_id: int | None = None) -> list[HHOperationLog]:
         if operation_id is None:
@@ -2577,7 +2584,7 @@ class Storage:
             ),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _required_lastrowid(cur)
 
     def list_hh_form_reviews(self, status: str | None = None) -> list[dict[str, Any]]:
         if status:
@@ -2738,7 +2745,7 @@ class Storage:
                 ),
             )
             self.conn.commit()
-            return int(cur.lastrowid)
+            return _required_lastrowid(cur)
         else:
             self.conn.execute(
                 """
@@ -2845,7 +2852,7 @@ class Storage:
                 ),
             )
             self.conn.commit()
-            return int(cur.lastrowid)
+            return _required_lastrowid(cur)
         else:
             self.conn.execute(
                 """

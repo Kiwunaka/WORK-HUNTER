@@ -261,8 +261,11 @@ class TelegramRemote:
 
 def _telegram_user_id(container: dict[str, Any]) -> int | None:
     user = container.get("from") or {}
+    value = user.get("id") if isinstance(user, dict) else None
+    if value is None:
+        return None
     try:
-        return int(user.get("id"))
+        return int(value)
     except (TypeError, ValueError):
         return None
 
