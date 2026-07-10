@@ -138,3 +138,108 @@ def test_failed_migration_closes_constructor_connection(tmp_path):
 
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         storage.conn.execute("SELECT 1")
+
+
+@pytest.mark.parametrize(
+    ("script", "verification_sql", "expected"),
+    [
+        pytest.param(
+            "CREATE TABLE custom(value TEXT); -- valid footer;",
+            "SELECT value FROM custom",
+            [],
+            id="trailing-line-comment",
+        ),
+        pytest.param(
+            "CREATE TABLE custom(value TEXT); /* valid footer; */",
+            "SELECT value FROM custom",
+            [],
+            id="trailing-block-comment",
+        ),
+        pytest.param(
+            "-- comment-only migration;",
+            None,
+            [],
+            id="line-comment-only",
+        ),
+        pytest.param(
+            "/* comment-only migration; */",
+            None,
+            [],
+            id="block-comment-only",
+        ),
+        pytest.param(
+            """
+            CREATE TABLE custom(value TEXT);
+            INSERT INTO custom(value) VALUES ('inside;string');
+            """,
+            "SELECT value FROM custom",
+            ["inside;string"],
+            id="semicolon-in-string",
+        ),
+        pytest.param(
+            """
+            CREATE TABLE custom(value TEXT);
+            CREATE TRIGGER add_second AFTER INSERT ON custom
+            WHEN NEW.value = 'first;value'
+            BEGIN
+                INSERT INTO custom(value) VALUES ('second');
+            END;
+            INSERT INTO custom(value) VALUES ('first;value');
+            """,
+            "SELECT value FROM custom ORDER BY rowid",
+            ["first;value", "second"],
+            id="trigger-with-inner-statements",
+        ),
+    ],
+)
+def test_valid_migration_script_is_applied_and_versioned(
+    tmp_path,
+    script: str,
+    verification_sql: str | None,
+    expected: list[str],
+):
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    version = "0001_custom.sql"
+    (migrations / version).write_text(script, encoding="utf-8")
+
+    storage = Storage(tmp_path / "db.sqlite3", migrations_dir=migrations)
+
+    applied = storage.conn.execute(
+        "SELECT version FROM schema_migrations"
+    ).fetchall()
+    assert [row["version"] for row in applied] == [version]
+    if verification_sql is not None:
+        rows = storage.conn.execute(verification_sql).fetchall()
+        assert [row[0] for row in rows] == expected
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        pytest.param("CREATE TABLE incomplete(", id="incomplete-statement"),
+        pytest.param(
+            "CREATE TABLE missing_terminator(id INTEGER)",
+            id="missing-semicolon",
+        ),
+        pytest.param("THIS IS INVALID;", id="invalid-statement"),
+        pytest.param("/* unterminated comment", id="unterminated-comment"),
+    ],
+)
+def test_incomplete_or_invalid_migration_rolls_back(tmp_path, script: str):
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "0001_invalid.sql").write_text(script, encoding="utf-8")
+    path = tmp_path / "db.sqlite3"
+
+    with pytest.raises(sqlite3.Error):
+        Storage(path, migrations_dir=migrations)
+
+    conn = sqlite3.connect(path)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert tables == set()

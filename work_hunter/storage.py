@@ -709,7 +709,8 @@ class Storage:
             if candidate and sqlite3.complete_statement(candidate):
                 self.conn.execute(candidate)
                 pending.clear()
-        if "".join(pending).strip():
+        remainder = "".join(pending).strip()
+        if remainder and not sqlite3.complete_statement(f"SELECT 1; {remainder}"):
             raise sqlite3.OperationalError("Incomplete SQL migration statement")
 
     def _migrate(self) -> None:
