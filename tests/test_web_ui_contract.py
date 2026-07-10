@@ -66,6 +66,27 @@ def test_ui_deep_links_and_static_assets_are_served(tmp_path):
         server.server_close()
 
 
+def test_ghost_jobs_route_handles_arbitrarily_large_days(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        status, content_type, body = _get_text(
+            base,
+            "/api/ghost-jobs?days=10000000000000000000000000000000000000000",
+        )
+
+        assert status == 200
+        assert "application/json" in content_type
+        assert json.loads(body) == []
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 def test_ui_static_contract_has_routes_and_no_duplicate_ids():
     index = _read_static("index.html")
     app = _read_static("app.js")

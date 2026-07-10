@@ -57,7 +57,10 @@ def _is_readonly_sql(sql: str) -> bool:
 
 def _utc_cutoff_days(days: int, *, now: datetime | None = None) -> str:
     reference = now or datetime.now(timezone.utc)
-    cutoff = reference - timedelta(days=max(0, int(days)))
+    try:
+        cutoff = reference - timedelta(days=max(0, int(days)))
+    except OverflowError:
+        cutoff = datetime.min.replace(tzinfo=timezone.utc)
     return cutoff.replace(microsecond=0).isoformat()
 
 
@@ -1096,6 +1099,12 @@ class Storage:
             ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status,
                 notes = excluded.notes,
+                applied_at = CASE
+                    WHEN applications.status != 'applied'
+                         AND excluded.status = 'applied'
+                    THEN excluded.applied_at
+                    ELSE applications.applied_at
+                END,
                 updated_at = excluded.updated_at,
                 source = excluded.source,
                 source_id = excluded.source_id,
@@ -3073,8 +3082,8 @@ class Storage:
             INNER JOIN applications a ON a.job_id = j.id
             WHERE j.status = 'applied'
               AND a.status = 'applied'
-              AND datetime(a.applied_at) <= datetime(?)
-            ORDER BY a.applied_at ASC
+              AND julianday(a.applied_at) <= julianday(?)
+            ORDER BY julianday(a.applied_at) ASC, a.id ASC
             """,
             (cutoff,),
         ).fetchall()
