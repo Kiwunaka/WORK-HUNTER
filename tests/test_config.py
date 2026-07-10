@@ -77,17 +77,20 @@ def test_merge_masked_config_preserves_nested_secrets_for_mask_empty_and_none():
 
 
 @pytest.mark.parametrize(
-    "submitted",
+    ("submitted", "preserves_list_secret"),
     [
-        {"ai": None},
-        {"ai": {"api_key": []}},
-        {"sources": {"hh": None}},
-        {"hh_account_profiles": {"work": None}},
-        {"custom": None},
-        {"custom": [{"access_token": "***"}]},
+        ({"ai": None}, True),
+        ({"ai": {"api_key": []}}, True),
+        ({"sources": {"hh": None}}, True),
+        ({"hh_account_profiles": {"work": None}}, True),
+        ({"custom": None}, True),
+        ({"custom": [{"access_token": "***"}]}, False),
     ],
 )
-def test_merge_masked_config_rejects_structural_secret_clear_bypasses(submitted):
+def test_merge_masked_config_rejects_structural_secret_clear_bypasses(
+    submitted,
+    preserves_list_secret,
+):
     stored = {
         "ai": {"api_key": "saved-ai-value", "model": "model-a"},
         "sources": {"hh": {"access_token": "saved-hh-value"}},
@@ -105,7 +108,10 @@ def test_merge_masked_config_rejects_structural_secret_clear_bypasses(submitted)
         merged["hh_account_profiles"]["work"]["refresh_token"]
         == "saved-profile-value"
     )
-    assert merged["custom"][0]["access_token"] == "saved-list-value"
+    if preserves_list_secret:
+        assert merged["custom"][0]["access_token"] == "saved-list-value"
+    else:
+        assert "access_token" not in merged["custom"][0]
 
 
 def test_clear_config_secret_value_copies_and_clears_only_allowlisted_path():

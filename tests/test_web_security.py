@@ -688,6 +688,142 @@ def test_config_http_update_cannot_clear_secret_via_parent_replacement(
     assert reloaded.config["ai"]["api_key"] == "saved-ai-value"
 
 
+@pytest.mark.parametrize(
+    ("submitted", "expected"),
+    [
+        pytest.param(
+            [{"id": "two", "refresh_token": "***", "label": "new-two"}],
+            [{"id": "two", "refresh_token": "saved-two", "label": "new-two"}],
+            id="remove-first",
+        ),
+        pytest.param(
+            [
+                {"id": "zero", "access_token": "***", "label": "new-zero"},
+                {"id": "one", "access_token": "***", "label": "new-one"},
+                {"id": "two", "refresh_token": "***", "label": "new-two"},
+            ],
+            [
+                {"id": "zero", "label": "new-zero"},
+                {"id": "one", "access_token": "saved-one", "label": "new-one"},
+                {"id": "two", "refresh_token": "saved-two", "label": "new-two"},
+            ],
+            id="insert-first",
+        ),
+        pytest.param(
+            [
+                {"id": "two", "refresh_token": "***", "label": "new-two"},
+                {"id": "one", "access_token": "***", "label": "new-one"},
+            ],
+            [
+                {"id": "two", "refresh_token": "saved-two", "label": "new-two"},
+                {"id": "one", "access_token": "saved-one", "label": "new-one"},
+            ],
+            id="reorder",
+        ),
+        pytest.param(
+            [
+                {"id": "one", "access_token": "***", "label": "new-one"},
+                {"id": "two", "refresh_token": "***", "label": "new-two"},
+                {
+                    "id": "three",
+                    "client_secret": "new-three-secret",
+                    "label": "new-three",
+                },
+            ],
+            [
+                {"id": "one", "access_token": "saved-one", "label": "new-one"},
+                {"id": "two", "refresh_token": "saved-two", "label": "new-two"},
+                {
+                    "id": "three",
+                    "client_secret": "new-three-secret",
+                    "label": "new-three",
+                },
+            ],
+            id="append",
+        ),
+    ],
+)
+def test_config_service_merges_secret_lists_by_stable_identity(
+    tmp_path,
+    submitted,
+    expected,
+):
+    app = WorkHunter(tmp_path)
+    app.config["custom"] = [
+        {"id": "one", "access_token": "saved-one", "label": "old-one"},
+        {"id": "two", "refresh_token": "saved-two", "label": "old-two"},
+    ]
+    app.save_config(app.config)
+
+    app.update_config_from_client({"custom": submitted})
+    reloaded = WorkHunter(tmp_path)
+
+    assert reloaded.config["custom"] == expected
+
+
+@pytest.mark.parametrize(
+    ("stored", "submitted", "expected"),
+    [
+        pytest.param(
+            [
+                {"id": "duplicate", "access_token": "saved-left", "label": "left"},
+                {"id": "duplicate", "access_token": "saved-right", "label": "right"},
+            ],
+            [
+                {"id": "duplicate", "access_token": "***", "label": "right"},
+                {"id": "duplicate", "access_token": "***", "label": "left"},
+            ],
+            [
+                {"id": "duplicate", "label": "right"},
+                {"id": "duplicate", "label": "left"},
+            ],
+            id="ambiguous-identity",
+        ),
+        pytest.param(
+            [
+                {"access_token": "saved-left", "label": "left"},
+                {"refresh_token": "saved-right", "label": "right"},
+            ],
+            [{"refresh_token": "***", "label": "right"}],
+            [{"label": "right"}],
+            id="no-identity",
+        ),
+        pytest.param(
+            [
+                {"name": "left", "access_token": "saved-left"},
+                {"name": "right", "access_token": "saved-right"},
+            ],
+            [{"name": "right", "access_token": "***", "label": "renamed"}],
+            [{"name": "right", "label": "renamed"}],
+            id="mutable-name-is-not-identity",
+        ),
+        pytest.param(
+            [
+                {"slug": "left", "access_token": "saved-left"},
+                {"slug": "right", "access_token": "saved-right"},
+            ],
+            [{"slug": "right", "access_token": "***", "label": "renamed"}],
+            [{"slug": "right", "label": "renamed"}],
+            id="mutable-slug-is-not-identity",
+        ),
+    ],
+)
+def test_config_service_scrubs_unmatched_secret_list_placeholders(
+    tmp_path,
+    stored,
+    submitted,
+    expected,
+):
+    app = WorkHunter(tmp_path)
+    app.config["custom"] = stored
+    app.save_config(app.config)
+
+    app.update_config_from_client({"custom": submitted})
+    reloaded = WorkHunter(tmp_path)
+
+    assert reloaded.config["custom"] == expected
+
+
 def test_masked_config_http_round_trip_preserves_secrets_inside_lists(
     cockpit,
     tmp_path,
@@ -695,11 +831,16 @@ def test_masked_config_http_round_trip_preserves_secrets_inside_lists(
     app = WorkHunter(tmp_path)
     app.config["custom"] = [
         {
+            "id": "zero",
             "access_token": "saved-list-zero",
             "enabled": False,
             "label": "old-zero",
         },
-        {"refresh_token": "saved-list-one", "label": "old-one"},
+        {
+            "id": "one",
+            "refresh_token": "saved-list-one",
+            "label": "old-one",
+        },
     ]
     app.save_config(app.config)
     status, _, raw = raw_request(cockpit, "GET", "/api/config", {}, None)
@@ -711,8 +852,16 @@ def test_masked_config_http_round_trip_preserves_secrets_inside_lists(
     masked["custom"][1]["label"] = "new-one"
     masked["custom"].extend(
         [
-            {"client_secret": "***", "label": "new-placeholder"},
-            {"client_secret": "new-list-secret", "label": "new-configured"},
+            {
+                "id": "two",
+                "client_secret": "***",
+                "label": "new-placeholder",
+            },
+            {
+                "id": "three",
+                "client_secret": "new-list-secret",
+                "label": "new-configured",
+            },
         ]
     )
     host = f"127.0.0.1:{cockpit.server_port}"
@@ -728,29 +877,44 @@ def test_masked_config_http_round_trip_preserves_secrets_inside_lists(
     assert status == 200
     response = json.loads(response_raw)
     assert response["custom"][0] == {
+        "id": "zero",
         "access_token": "***",
         "enabled": True,
         "label": "new-zero",
     }
     assert response["custom"][1] == {
+        "id": "one",
         "refresh_token": "***",
         "label": "new-one",
     }
-    assert response["custom"][2] == {"label": "new-placeholder"}
+    assert response["custom"][2] == {
+        "id": "two",
+        "label": "new-placeholder",
+    }
     assert response["custom"][3] == {
+        "id": "three",
         "client_secret": "***",
         "label": "new-configured",
     }
     reloaded = WorkHunter(tmp_path)
     assert reloaded.config["custom"] == [
         {
+            "id": "zero",
             "access_token": "saved-list-zero",
             "enabled": True,
             "label": "new-zero",
         },
-        {"refresh_token": "saved-list-one", "label": "new-one"},
-        {"label": "new-placeholder"},
-        {"client_secret": "new-list-secret", "label": "new-configured"},
+        {
+            "id": "one",
+            "refresh_token": "saved-list-one",
+            "label": "new-one",
+        },
+        {"id": "two", "label": "new-placeholder"},
+        {
+            "id": "three",
+            "client_secret": "new-list-secret",
+            "label": "new-configured",
+        },
     ]
 
 

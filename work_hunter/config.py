@@ -211,6 +211,93 @@ def _contains_sensitive_key(value: Any) -> bool:
     return False
 
 
+def _list_item_identity(
+    item: Any,
+) -> tuple[tuple[str, str | int], ...] | None:
+    if not isinstance(item, dict):
+        return None
+
+    keys: dict[str, list[Any]] = {}
+    for key, value in item.items():
+        if not isinstance(key, str) or is_sensitive_key(key):
+            continue
+        keys.setdefault(key.casefold(), []).append(value)
+
+    def identity_for(identity_keys: list[str]) -> tuple[tuple[str, str | int], ...] | None:
+        if not identity_keys:
+            return None
+        identity: list[tuple[str, str | int]] = []
+        for key in identity_keys:
+            values = keys[key]
+            if len(values) != 1:
+                return None
+            value = values[0]
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                return None
+            if isinstance(value, str) and not value:
+                return None
+            identity.append((key, value))
+        return tuple(identity)
+
+    for exact_key in ("id", "uid", "uuid"):
+        if exact_key in keys:
+            return identity_for([exact_key])
+
+    id_keys = sorted(key for key in keys if key.endswith("_id"))
+    if id_keys:
+        return identity_for(id_keys)
+    return None
+
+
+def _merge_masked_list(stored: Any, submitted: list[Any]) -> list[Any]:
+    stored_list = stored if isinstance(stored, list) else []
+    requires_identity = _contains_sensitive_key(stored_list) or _contains_sensitive_key(
+        submitted
+    )
+    if not requires_identity:
+        return [
+            _merge_masked_value(
+                stored_list[index]
+                if index < len(stored_list)
+                else _MISSING_CONFIG_VALUE,
+                value,
+            )
+            for index, value in enumerate(submitted)
+        ]
+
+    stored_by_identity: dict[
+        tuple[tuple[str, str | int], ...],
+        list[Any],
+    ] = {}
+    for item in stored_list:
+        identity = _list_item_identity(item)
+        if identity is not None:
+            stored_by_identity.setdefault(identity, []).append(item)
+
+    submitted_identity_counts: dict[tuple[tuple[str, str | int], ...], int] = {}
+    for item in submitted:
+        identity = _list_item_identity(item)
+        if identity is not None:
+            submitted_identity_counts[identity] = (
+                submitted_identity_counts.get(identity, 0) + 1
+            )
+
+    merged: list[Any] = []
+    for item in submitted:
+        identity = _list_item_identity(item)
+        stored_matches = stored_by_identity.get(identity, []) if identity else []
+        if (
+            identity is not None
+            and len(stored_matches) == 1
+            and submitted_identity_counts[identity] == 1
+        ):
+            current = stored_matches[0]
+        else:
+            current = _MISSING_CONFIG_VALUE
+        merged.append(_merge_masked_value(current, item))
+    return merged
+
+
 def _merge_masked_value(
     stored: Any,
     submitted: Any,
@@ -251,20 +338,7 @@ def _merge_masked_value(
         return merged
 
     if isinstance(submitted, list):
-        stored_list = stored if isinstance(stored, list) else []
-        merged_list = [
-            _merge_masked_value(
-                stored_list[index]
-                if index < len(stored_list)
-                else _MISSING_CONFIG_VALUE,
-                value,
-            )
-            for index, value in enumerate(submitted)
-        ]
-        stored_tail = stored_list[len(submitted) :]
-        if _contains_sensitive_key(stored_tail):
-            merged_list.extend(copy.deepcopy(stored_tail))
-        return merged_list
+        return _merge_masked_list(stored, submitted)
 
     return copy.deepcopy(submitted)
 
