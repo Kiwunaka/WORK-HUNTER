@@ -184,3 +184,18 @@ def test_agent_resume_update_ui_sends_literal_confirmation():
     assert "Update your HH resumes now?" in app
     assert "params.confirm = true;" in app
     assert "JSON.stringify({ operation, params })" in app
+
+
+def test_resume_edit_and_ghost_actions_keep_explicit_record_identity():
+    app = _read_static("app.js")
+
+    assert "resumes: []" in app
+    assert "function resetResumeForm()" in app
+    assert "function resumePayloadFromForm()" in app
+    assert "const original = state.resumes.find" in app
+    assert "profile_id: original?.profile_id" in app
+    assert "is_active: original?.is_active === true" in app
+    assert "state.resumes = resumes;" in app
+    assert "async function updateJobStatus(jobId, status)" in app
+    assert "async function markGhostJob(jobId)" in app
+    assert 'onclick="markGhostJob(${j.id})"' in app

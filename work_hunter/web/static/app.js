@@ -1,5 +1,6 @@
 const state = {
   jobs: [],
+  resumes: [],
   selectedId: null,
   config: null,
   chatMessages: [],
@@ -54,6 +55,14 @@ async function api(path, options = {}) {
     throw new Error(data.error || response.statusText);
   }
   return data;
+}
+
+function requirePositiveInteger(value, label) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return parsed;
 }
 
 async function loadJobs() {
@@ -169,20 +178,18 @@ async function scoreJobs() {
   }
 }
 
-async function markSelected(status) {
-  if (!state.selectedId) return;
-  await api(`/api/jobs/${state.selectedId}/status`, {
+async function updateJobStatus(jobId, status) {
+  const id = requirePositiveInteger(jobId, "job id");
+  await api(`/api/jobs/${id}/status`, {
     method: "POST",
     body: JSON.stringify({ status }),
   });
-  if (status === "applied") {
-    try {
-      await api(`/api/jobs/${state.selectedId}/apply`, { method: "POST", body: JSON.stringify({ status: "applied" }) });
-    } catch (e) { /* ignore if endpoint missing */ }
-  }
-  try { await api(`/api/jobs/${state.selectedId}/record-event`, { method: "POST", body: JSON.stringify({ action: status }) }); } catch (e) {}
+}
+
+async function markSelected(status) {
+  if (!state.selectedId) return;
+  await updateJobStatus(state.selectedId, status);
   await loadJobs();
-  await selectJob(state.selectedId);
 }
 
 async function prepareLetter() {
@@ -1568,28 +1575,40 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 let editingResumeId = 0;
 
+function resetResumeForm() {
+  editingResumeId = 0;
+  $("#resume-name-input").value = "";
+  $("#resume-body-input").value = "";
+}
+
 function showResumeForm(id = 0) {
-  editingResumeId = id;
+  editingResumeId = Number(id) || 0;
+  const resume = state.resumes.find((item) => Number(item.id) === editingResumeId);
+  $("#resume-name-input").value = resume?.name || "";
+  $("#resume-body-input").value = resume?.body || "";
   $("#resume-form").style.display = "block";
-  $("#save-resume-button").textContent = id ? "Обновить" : "Сохранить";
-  if (id) {
-  }
   $("#resume-name-input").focus();
+}
+
+function resumePayloadFromForm() {
+  const original = state.resumes.find((item) => Number(item.id) === editingResumeId);
+  return {
+    id: editingResumeId,
+    name: $("#resume-name-input").value.trim(),
+    body: $("#resume-body-input").value,
+    profile_id: original?.profile_id || state.profile?.active || "default",
+    is_active: original?.is_active === true,
+    ats_score: original?.ats_score ?? null,
+  };
 }
 
 function hideResumeForm() {
   $("#resume-form").style.display = "none";
-  editingResumeId = 0;
+  resetResumeForm();
 }
 
 async function saveResume() {
-  const body = {
-    name: $("#resume-name-input").value.trim(),
-    body: $("#resume-body-input").value,
-    profile_id: state.profile?.active || "default",
-    is_active: false,
-  };
-  if (editingResumeId) body.id = editingResumeId;
+  const body = resumePayloadFromForm();
   try {
     await api("/api/resumes", { method: "POST", body: JSON.stringify(body) });
     hideResumeForm();
@@ -1600,6 +1619,7 @@ async function saveResume() {
 async function loadResumes() {
   try {
     const resumes = await api("/api/resumes");
+    state.resumes = resumes;
     const list = $("#resumes-list");
     list.innerHTML = "";
     for (const r of resumes) {
@@ -1931,10 +1951,15 @@ async function loadGhostJobs() {
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(j.title)}</strong>
         <div class="meta">${escapeHtml(j.company || "?")} · ${escapeHtml(j.source)}</div>
-        <button onclick="markSelected('ghosted');loadGhostJobs();" style="margin-top:4px;">Отметить ghosted</button>
+        <button onclick="markGhostJob(${j.id})" style="margin-top:4px;">Отметить ghosted</button>
       </div>`;
     }
   } catch (e) { console.error(e); }
+}
+
+async function markGhostJob(jobId) {
+  await updateJobStatus(jobId, "ghosted");
+  await loadGhostJobs();
 }
 
 function shareToTelegram() {
