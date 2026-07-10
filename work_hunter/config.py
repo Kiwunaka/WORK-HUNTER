@@ -629,6 +629,7 @@ def update_config(
     fallback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = Path(path)
+    owner_pid = os.getpid()
     with _CONFIG_WRITE_LOCK:
         with _config_file_lock(path):
             if path.exists():
@@ -636,8 +637,32 @@ def update_config(
             else:
                 config = copy.deepcopy(fallback or default_config())
             update(config)
+            _assert_config_transaction_owner(owner_pid)
             _save_config(path, config)
             return config
+
+
+def _assert_config_transaction_owner(owner_pid: int) -> None:
+    if os.getpid() != owner_pid:
+        raise RuntimeError(
+            "Config transaction inherited across fork must be restarted"
+        )
+
+
+def reconcile_config_snapshot(
+    path: str | Path,
+    baseline: dict[str, Any],
+    desired: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = Path(path)
+    with _CONFIG_WRITE_LOCK:
+        with _config_file_lock(path):
+            if path.exists():
+                fresh = load_config(path)
+            else:
+                fresh = copy.deepcopy(baseline)
+            reconciled = merge_config_snapshot_changes(baseline, desired, fresh)
+            return fresh, reconciled
 
 
 def active_profile(config: dict[str, Any]) -> dict[str, Any]:

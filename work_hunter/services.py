@@ -28,6 +28,7 @@ from .config import (
     mask_secrets,
     merge_config_snapshot_changes,
     merge_masked_config,
+    reconcile_config_snapshot,
     save_config,
     update_config,
 )
@@ -769,6 +770,7 @@ class WorkHunter:
         self.config_path = config_path(self.root)
         self.config = load_config(self.config_path)
         self._config_baseline = copy.deepcopy(self.config)
+        self._config_aliases: list[dict[str, Any]] = []
         self.storage = Storage(database_path(self.root))
 
     def init(self, *, overwrite: bool = False) -> Path:
@@ -917,15 +919,42 @@ class WorkHunter:
                 merge_changes,
                 fallback=baseline,
             )
-            self.config = updated
-            self._config_baseline = copy.deepcopy(updated)
+            previous_config = self.config
+            self._accept_config(updated, config)
+            self._remember_config_alias(previous_config)
+            self._remember_config_alias(config)
+            self.config = config
 
     def _replace_config(self, config: dict[str, Any]) -> None:
         with _HH_IDENTITY_WRITE_LOCK:
             replacement = copy.deepcopy(config)
             save_config(self.config_path, replacement)
-            self.config = replacement
-            self._config_baseline = copy.deepcopy(replacement)
+            self._accept_config(replacement, config)
+            self.config = config
+
+    def _accept_config(
+        self,
+        updated: dict[str, Any],
+        *aliases: dict[str, Any],
+        baseline: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot = copy.deepcopy(updated)
+        synchronized: set[int] = set()
+        for mapping in (self.config, *self._config_aliases, *aliases):
+            mapping_id = id(mapping)
+            if mapping_id in synchronized:
+                continue
+            mapping.clear()
+            mapping.update(copy.deepcopy(snapshot))
+            synchronized.add(mapping_id)
+        self._config_baseline = copy.deepcopy(
+            snapshot if baseline is None else baseline
+        )
+        return self.config
+
+    def _remember_config_alias(self, mapping: dict[str, Any]) -> None:
+        if all(alias is not mapping for alias in self._config_aliases):
+            self._config_aliases.append(mapping)
 
     def _update_config_fresh(
         self,
@@ -937,9 +966,7 @@ class WorkHunter:
                 update,
                 fallback=self.config,
             )
-            self.config = updated
-            self._config_baseline = copy.deepcopy(updated)
-            return updated
+            return self._accept_config(updated)
 
     def update_config_from_client(self, patch: dict[str, Any]) -> dict[str, Any]:
         def apply_patch(config: dict[str, Any]) -> None:
@@ -1223,10 +1250,32 @@ class WorkHunter:
                 source_config = sources.setdefault("hh", {})
                 source_config.update(patch)
 
-        self._update_config_fresh(merge_identity)
+        with _HH_IDENTITY_WRITE_LOCK:
+            baseline = copy.deepcopy(self._config_baseline)
+            desired = copy.deepcopy(self.config)
+            updated = update_config(
+                self.config_path,
+                merge_identity,
+                fallback=self.config,
+            )
+            reconciled = merge_config_snapshot_changes(
+                baseline,
+                desired,
+                updated,
+            )
+            merge_identity(reconciled)
+            self._accept_config(reconciled, baseline=updated)
 
     def _hh_runtime(self) -> tuple[dict[str, Any], CallbackConfigBackend]:
         with _HH_IDENTITY_WRITE_LOCK:
+            baseline = copy.deepcopy(self._config_baseline)
+            desired = copy.deepcopy(self.config)
+            fresh, reconciled = reconcile_config_snapshot(
+                self.config_path,
+                baseline,
+                desired,
+            )
+            self._accept_config(reconciled, baseline=fresh)
             config_snapshot = copy.deepcopy(self.config)
         account_name = str(config_snapshot.get("hh_account_profile") or "default")
         config = active_hh_config(config_snapshot)
@@ -2188,7 +2237,7 @@ class WorkHunter:
         access_token = str(token.get("access_token") or "")
         if not access_token:
             raise RuntimeError("HH refresh response did not include access_token")
-        hh_config = self.hh_config()
+        hh_config = client.config
         return {
             "status": "ok",
             "access_token": access_token,

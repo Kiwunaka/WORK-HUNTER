@@ -49,6 +49,40 @@ def test_after_fork_reset_replaces_process_locks_descriptors_and_thread_state(
     services_module._HH_IDENTITY_WRITE_LOCK.release()
 
 
+def test_update_config_checks_transaction_owner_before_private_save(
+    monkeypatch,
+    tmp_path,
+):
+    assert_owner = getattr(config_module, "_assert_config_transaction_owner", None)
+    assert callable(assert_owner)
+    owner_checks: list[int] = []
+    private_saves: list[Path] = []
+
+    def reject_inherited_transaction(owner_pid: int) -> None:
+        owner_checks.append(owner_pid)
+        raise RuntimeError("inherited config transaction")
+
+    monkeypatch.setattr(
+        config_module,
+        "_assert_config_transaction_owner",
+        reject_inherited_transaction,
+    )
+    monkeypatch.setattr(
+        config_module,
+        "_save_config",
+        lambda path, config: private_saves.append(Path(path)),
+    )
+
+    with pytest.raises(RuntimeError, match="inherited config transaction"):
+        config_module.update_config(
+            tmp_path / "config.json",
+            lambda config: config.update({"status": "updated"}),
+        )
+
+    assert owner_checks == [os.getpid()]
+    assert private_saves == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="os.fork and SIGALRM are POSIX-only")
 def test_fork_child_does_not_inherit_held_config_or_identity_rlocks(tmp_path):
     env = os.environ.copy()
@@ -74,3 +108,34 @@ def test_fork_child_does_not_inherit_held_config_or_identity_rlocks(tmp_path):
         f"stdout={result.stdout!r}; stderr={result.stderr!r}"
     )
     assert "child_exit=0" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.fork and SIGALRM are POSIX-only")
+def test_fork_child_cannot_continue_inherited_active_transaction(tmp_path):
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        item for item in (str(_REPO_ROOT), existing_pythonpath) if item
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_REPO_ROOT / "tests" / "fork_active_transaction_worker.py"),
+            str(tmp_path),
+        ],
+        cwd=_REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"active fork worker exit={result.returncode}; "
+        f"stdout={result.stdout!r}; stderr={result.stderr!r}"
+    )
+    assert "active_child_exit=0" in result.stdout

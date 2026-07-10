@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
@@ -387,6 +388,76 @@ def test_identity_patch_merges_with_fresh_disk_config(monkeypatch, tmp_path):
     assert stale_app.config["research"]["max_results"] == 777
 
 
+def test_hh_runtime_reconciles_external_rotation_and_account_switch_with_local_edits(
+    tmp_path,
+):
+    setup_app = WorkHunter(tmp_path)
+    setup_app.save_hh_account_profile(
+        "alice",
+        access_token="alice-old-access",
+        refresh_token="alice-old-refresh",
+    )
+    setup_app.save_hh_account_profile(
+        "bob",
+        access_token="bob-old-access",
+        refresh_token="bob-old-refresh",
+    )
+    setup_app.use_hh_account_profile("alice")
+
+    owner = WorkHunter(tmp_path)
+    owner_alias = owner.config
+    owner.config["about"]["summary"] = "unsaved-local-summary"
+    external = WorkHunter(tmp_path)
+    external._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-new-access",
+            "refresh_token": "alice-new-refresh",
+        },
+    )
+
+    alice_client = owner._hh_client()
+
+    assert alice_client.session.identity.refresh_token == "alice-new-refresh"
+    assert owner.config is owner_alias
+    assert owner.config["about"]["summary"] == "unsaved-local-summary"
+
+    alice_client.session.backend.save(
+        {
+            "access_token": "alice-runtime-access",
+            "refresh_token": "alice-runtime-refresh",
+        }
+    )
+
+    assert owner.config is owner_alias
+    assert owner.config["about"]["summary"] == "unsaved-local-summary"
+    assert (
+        owner.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-runtime-refresh"
+    )
+
+    external._persist_hh_identity_patch(
+        "bob",
+        {
+            "access_token": "bob-new-access",
+            "refresh_token": "bob-new-refresh",
+        },
+    )
+    external.use_hh_account_profile("bob")
+
+    bob_client = owner._hh_client()
+
+    assert bob_client.session.identity.refresh_token == "bob-new-refresh"
+    assert owner.config["hh_account_profile"] == "bob"
+    assert owner.config["about"]["summary"] == "unsaved-local-summary"
+
+    owner.save_config(owner.config)
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["about"]["summary"] == "unsaved-local-summary"
+    assert reloaded.config["hh_account_profile"] == "bob"
+    assert reloaded.hh_config()["refresh_token"] == "bob-new-refresh"
+
+
 def test_stale_workhunter_save_preserves_newer_identity_rotation(tmp_path):
     stale_app = WorkHunter(tmp_path)
     stale_app.save_hh_account_profile(
@@ -434,6 +505,108 @@ def test_stale_workhunter_save_preserves_newer_identity_rotation(tmp_path):
     assert (
         second_reload.config["hh_account_profiles"]["alice"]["refresh_token"]
         == "alice-newer-refresh"
+    )
+
+
+def test_config_alias_stays_canonical_after_save_and_identity_callback(tmp_path):
+    app = WorkHunter(tmp_path)
+    app.save_hh_account_profile(
+        "alice",
+        access_token="alice-old-access",
+        refresh_token="alice-old-refresh",
+    )
+    config_alias = app.config
+
+    rotating_app = WorkHunter(tmp_path)
+    rotating_app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-new-access",
+            "refresh_token": "alice-new-refresh",
+        },
+    )
+
+    config_alias["about"]["summary"] = "first-alias-save"
+    app.save_config(config_alias)
+
+    assert app.config is config_alias
+    assert (
+        config_alias["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-new-refresh"
+    )
+
+    app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-newer-access",
+            "refresh_token": "alice-newer-refresh",
+        },
+    )
+
+    assert app.config is config_alias
+    assert (
+        config_alias["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-newer-refresh"
+    )
+
+    separate_mapping = copy.deepcopy(config_alias)
+    separate_mapping["research"]["max_results"] = 654
+    app.save_config(separate_mapping)
+
+    assert app.config is separate_mapping
+    assert separate_mapping == config_alias
+    separate_mapping["about"]["summary"] = "unsaved-via-accepted-mapping"
+    app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-final-access",
+            "refresh_token": "alice-final-refresh",
+        },
+    )
+
+    assert (
+        separate_mapping["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-final-refresh"
+    )
+    assert separate_mapping["about"]["summary"] == "unsaved-via-accepted-mapping"
+    assert (
+        config_alias["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-final-refresh"
+    )
+
+    config_alias["research"]["max_results"] = 655
+    app.save_config(config_alias)
+    assert app.config is config_alias
+    assert (
+        WorkHunter(tmp_path).config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-final-refresh"
+    )
+
+    app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-ultimate-access",
+            "refresh_token": "alice-ultimate-refresh",
+        },
+    )
+    assert (
+        separate_mapping["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-ultimate-refresh"
+    )
+    assert (
+        config_alias["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-ultimate-refresh"
+    )
+
+    separate_mapping["research"]["max_results"] = 656
+    app.save_config(separate_mapping)
+    assert app.config is separate_mapping
+
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["research"]["max_results"] == 656
+    assert (
+        reloaded.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-ultimate-refresh"
     )
 
 
@@ -577,6 +750,57 @@ def test_explicit_refresh_persists_rotation_once(monkeypatch, tmp_path):
 
     assert result["refresh_token"] == "new-refresh"
     assert replacements == [app.config_path]
+
+
+def test_refresh_result_stays_pinned_when_active_account_switches_mid_request(
+    monkeypatch,
+    tmp_path,
+):
+    app = WorkHunter(tmp_path)
+    app.save_hh_account_profile(
+        "alice",
+        access_token="alice-old-access",
+        refresh_token="alice-old-refresh",
+    )
+    app.save_hh_account_profile(
+        "bob",
+        access_token="bob-old-access",
+        refresh_token="bob-old-refresh",
+    )
+    app.use_hh_account_profile("alice")
+
+    def switch_to_bob_during_refresh(*args, **kwargs):
+        app.use_hh_account_profile("bob")
+        return FakeResponse(
+            200,
+            {
+                "access_token": "alice-new-access",
+                "refresh_token": "alice-new-refresh",
+                "expires_at": "2032-01-01T00:00:00+00:00",
+            },
+        )
+
+    monkeypatch.setattr("requests.request", switch_to_bob_during_refresh)
+
+    result = app.refresh_hh_token()
+
+    assert result == {
+        "status": "ok",
+        "access_token": "alice-new-access",
+        "refresh_token": "alice-new-refresh",
+        "access_expires_at": "2032-01-01T00:00:00+00:00",
+    }
+    assert app.config["hh_account_profile"] == "bob"
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["hh_account_profile"] == "bob"
+    assert (
+        reloaded.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-new-refresh"
+    )
+    assert (
+        reloaded.config["hh_account_profiles"]["bob"]["refresh_token"]
+        == "bob-old-refresh"
+    )
 
 
 def test_hh_refresh_cli_outputs_masked_result(monkeypatch, tmp_path, capsys):
