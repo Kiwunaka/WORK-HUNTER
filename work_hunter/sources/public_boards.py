@@ -424,17 +424,22 @@ def _payload_url(payload: dict[str, Any], base_url: str) -> str:
     return ""
 
 
+def _payload_source_id_text(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return ""
+    return clean_text(str(value))
+
+
 def _source_id_from_url_or_payload(source: str, url: str, payload: dict[str, Any]) -> str:
     for key in PAYLOAD_SOURCE_ID_KEYS:
         raw = payload.get(key)
         if isinstance(raw, dict):
             for nested_key in ("value", "id", "@id"):
-                nested_raw = raw.get(nested_key)
-                text = clean_text(str(nested_raw)) if nested_raw is not None else ""
+                text = _payload_source_id_text(raw.get(nested_key))
                 if text:
                     return text
             continue
-        text = clean_text(str(raw)) if raw is not None else ""
+        text = _payload_source_id_text(raw)
         if text:
             return text
     if url:

@@ -10,25 +10,45 @@ from typing import Mapping
 
 USER_AGENT = "WorkHunter/0.1 (personal@example.invalid)"
 TRACKING_QUERY_KEYS = frozenset({"gclid", "yclid"})
+_SAFE_TRACKING_QUERY_KEY_BYTES = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+
+
+def _query_component_bytes(value: str) -> bytes:
+    encoded = value.replace("+", " ").encode("utf-8", errors="surrogatepass")
+    return urllib.parse.unquote_to_bytes(encoded)
+
+
+def _is_tracking_query_key(key: bytes) -> bool:
+    if not key or any(byte not in _SAFE_TRACKING_QUERY_KEY_BYTES for byte in key):
+        return False
+    lowered = key.decode("ascii").lower()
+    return lowered.startswith("utm_") or lowered in TRACKING_QUERY_KEYS
+
+
+def _canonicalize_query(query: str) -> str:
+    pairs: list[tuple[bytes, bytes]] = []
+    if query:
+        for field in query.split("&"):
+            if not field:
+                continue
+            raw_key, _, raw_value = field.partition("=")
+            key = _query_component_bytes(raw_key)
+            if _is_tracking_query_key(key):
+                continue
+            pairs.append((key, _query_component_bytes(raw_value)))
+    return urllib.parse.urlencode(sorted(pairs), doseq=True)
 
 
 def canonicalize_job_url(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
-    query = [
-        (key, value)
-        for key, value in urllib.parse.parse_qsl(
-            parsed.query,
-            keep_blank_values=True,
-        )
-        if not key.lower().startswith("utm_")
-        and key.lower() not in TRACKING_QUERY_KEYS
-    ]
     return urllib.parse.urlunsplit(
         (
             parsed.scheme.lower(),
             parsed.netloc.lower(),
             parsed.path or "/",
-            urllib.parse.urlencode(sorted(query), doseq=True),
+            _canonicalize_query(parsed.query),
             "",
         )
     )

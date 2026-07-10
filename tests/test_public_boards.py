@@ -5,6 +5,7 @@ import hashlib
 import work_hunter.sources.common as source_common
 from work_hunter.models import Job
 from work_hunter.services import WorkHunter
+from work_hunter.storage import Storage
 from work_hunter.sources.public_boards import (
     PublicBoardSpec,
     PublicJobBoardSource,
@@ -23,6 +24,58 @@ def test_canonicalize_job_url_preserves_repeated_identity_query_pairs():
 
     assert canonical == (
         "https://app.rvc.global/vacancy/view?id=1&tag=backend&tag=python+api"
+    )
+
+
+def test_invalid_percent_octets_remain_distinct_job_identities():
+    first = source_common.canonicalize_job_url(
+        "https://app.rvc.global/vacancy/view?id=%FF"
+    )
+    second = source_common.canonicalize_job_url(
+        "https://app.rvc.global/vacancy/view?id=%FE"
+    )
+    html = """
+      <a href="/vacancy/view?id=%FF">Backend One</a>
+      <a href="/vacancy/view?id=%FE">Backend Two</a>
+    """
+
+    jobs = parse_public_board_html(
+        html,
+        source="rvc",
+        base_url="https://app.rvc.global",
+    )
+
+    assert first == "https://app.rvc.global/vacancy/view?id=%FF"
+    assert second == "https://app.rvc.global/vacancy/view?id=%FE"
+    assert source_common.canonicalize_job_url(first) == first
+    assert source_common.canonicalize_job_url(second) == second
+    assert len(jobs) == 2
+    assert len({job.source_id for job in jobs}) == 2
+
+
+def test_canonicalize_query_bytes_preserves_malformed_repeated_blank_pairs():
+    canonical = source_common.canonicalize_job_url(
+        "https://app.rvc.global/vacancy/view"
+        "?utm_%FF=keep&flag&flag=&id=%F&id=%G0"
+    )
+
+    assert canonical == (
+        "https://app.rvc.global/vacancy/view"
+        "?flag=&flag=&id=%25F&id=%25G0&utm_%FF=keep"
+    )
+    assert source_common.canonicalize_job_url(canonical) == canonical
+
+
+def test_tracking_filter_only_removes_safe_ascii_keys():
+    canonical = source_common.canonicalize_job_url(
+        "https://app.rvc.global/vacancy/view"
+        "?UTM_Source=x&%75tm_medium=y&gclid=z&YCLID=q"
+        "&utm_%=keep&utm_%G0=also&=blank&&"
+    )
+
+    assert canonical == (
+        "https://app.rvc.global/vacancy/view"
+        "?=blank&utm_%25=keep&utm_%25G0=also"
     )
 
 
@@ -154,6 +207,84 @@ def test_payload_vacancy_identifiers_take_priority_over_url_fallback():
     )
 
     assert [job.source_id for job in jobs] == ["vac-42", "schema-42", "0"]
+
+
+def test_payload_ids_accept_only_supported_scalar_values():
+    invalid_ids = [False, [1], {}, None, 1.5]
+    payloads = [
+        {
+            "title": f"Backend Engineer {index}",
+            "company": "Acme",
+            "url": f"/vacancy/view?id={index}",
+            "vacancy_id": invalid_id,
+        }
+        for index, invalid_id in enumerate(invalid_ids, start=1)
+    ]
+    payloads.extend(
+        [
+            {
+                "title": "Nested Invalid Identifier",
+                "company": "Acme",
+                "url": "/vacancy/view?id=6",
+                "identifier": {"value": [6]},
+            },
+            {
+                "title": "Lower Priority Identifier",
+                "company": "Acme",
+                "url": "/vacancy/view?id=7",
+                "vacancy_id": True,
+                "id": "valid-lower-id",
+            },
+        ]
+    )
+
+    jobs = extract_jobs_from_json_like(
+        payloads,
+        source="rvc",
+        base_url="https://app.rvc.global",
+    )
+
+    expected_fallback_ids = [
+        "rvc-"
+        + hashlib.sha256(
+            source_common.canonicalize_job_url(job.url).encode("utf-8")
+        ).hexdigest()[:24]
+        for job in jobs[:6]
+    ]
+    assert [job.source_id for job in jobs] == [
+        *expected_fallback_ids,
+        "valid-lower-id",
+    ]
+
+
+def test_invalid_payload_ids_do_not_collapse_jobs_on_disk(tmp_path):
+    jobs = extract_jobs_from_json_like(
+        [
+            {
+                "title": "Backend One",
+                "company": "Acme",
+                "url": "/vacancy/view?id=one",
+                "vacancy_id": False,
+            },
+            {
+                "title": "Backend Two",
+                "company": "Beta",
+                "url": "/vacancy/view?id=two",
+                "vacancy_id": False,
+            },
+        ],
+        source="rvc",
+        base_url="https://app.rvc.global",
+    )
+    storage = Storage(tmp_path / "jobs.sqlite3")
+
+    storage.upsert_jobs(jobs)
+    persisted = storage.list_jobs(limit=10, source="rvc")
+    storage.close()
+
+    assert len(jobs) == 2
+    assert {job.url for job in persisted} == {job.url for job in jobs}
+    assert len({job.source_id for job in jobs}) == 2
 
 
 def test_url_less_payload_fallback_ids_use_sha256_prefix():
