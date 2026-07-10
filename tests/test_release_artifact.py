@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import shlex
@@ -56,23 +55,6 @@ def _docker_json_instruction(stage: list[str], name: str) -> list[str]:
     value = json.loads(matches[0].split(maxsplit=1)[1])
     assert isinstance(value, list) and all(isinstance(item, str) for item in value)
     return value
-
-
-def _dockerignore_includes(patterns: list[str], path: str) -> bool:
-    included = True
-    for raw_pattern in patterns:
-        if not raw_pattern or raw_pattern.startswith("#"):
-            continue
-        negated = raw_pattern.startswith("!")
-        pattern = raw_pattern[1:] if negated else raw_pattern
-        directory_pattern = pattern.endswith("/")
-        pattern = pattern.rstrip("/")
-        matches = fnmatch.fnmatchcase(path, pattern)
-        if directory_pattern:
-            matches = matches or path.startswith(f"{pattern}/")
-        if matches:
-            included = negated
-    return included
 
 
 def _offline_environment() -> dict[str, str]:
@@ -335,7 +317,11 @@ def test_optional_browser_image_path_installs_complete_browser_extra():
 
 
 def test_dockerignore_allowlists_only_release_build_inputs():
-    patterns = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    patterns = [
+        line
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
     assert patterns[:5] == [
         "**",
         "!pyproject.toml",
@@ -344,29 +330,27 @@ def test_dockerignore_allowlists_only_release_build_inputs():
         "!work_hunter/**",
     ]
     assert [pattern for pattern in patterns if pattern.startswith("!")] == patterns[1:5]
-
-    for included_path in {
-        "pyproject.toml",
-        "README.md",
-        "work_hunter/cli.py",
-        "work_hunter/web/static/index.html",
-        "work_hunter/migrations/0001_backbone.sql",
-    }:
-        assert _dockerignore_includes(patterns, included_path)
-
-    for private_path in {
-        ".git/config",
-        ".superpowers/sdd/release-task-5-report.md",
-        ".work-hunter/config.json",
-        "external/donor/secrets.json",
-        "outputs/report.json",
-        "work_hunter/nested/.work-hunter/config.json",
-        "work_hunter/nested/.env.production",
-        "work_hunter/nested/session.cookies",
-        "work_hunter/nested/cookies.txt",
-        "work_hunter/nested/cookies-backup.json",
-        "work_hunter/nested/private.pem",
-        "work_hunter/nested/private.key",
-        "work_hunter/nested/state.sqlite3",
-    }:
-        assert not _dockerignore_includes(patterns, private_path)
+    last_exception = 4
+    required_recursive_excludes = {
+        "**/.superpowers",
+        "**/.superpowers/**",
+        "**/.work-hunter",
+        "**/.work-hunter/**",
+        "**/.env*",
+        "**/*.db",
+        "**/*.sqlite",
+        "**/*.sqlite3",
+        "**/*.har",
+        "**/*.session",
+        "**/*.cookies",
+        "**/cookies.txt",
+        "**/*cookies*.txt",
+        "**/*cookies*.json",
+        "**/*.pem",
+        "**/*.key",
+        "**/*.p12",
+        "**/*.pfx",
+    }
+    for required in required_recursive_excludes:
+        assert required in patterns
+        assert patterns.index(required) > last_exception
