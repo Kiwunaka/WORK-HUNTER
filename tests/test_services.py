@@ -212,6 +212,36 @@ def test_package_details_rejects_malformed_editable_metadata(
     assert package["version"] == __version__
 
 
+@pytest.mark.parametrize("direct_url", ["file:", "file:relative", "%00"])
+def test_package_details_rejects_non_absolute_or_nul_file_url(
+    monkeypatch,
+    tmp_path,
+    direct_url,
+):
+    monkeypatch.chdir(tmp_path)
+    project_name = "relative" if direct_url == "file:relative" else "project"
+    project_root = tmp_path if direct_url == "file:" else tmp_path / project_name
+    package_root = project_root / "work_hunter"
+    package_root.mkdir(parents=True)
+    if direct_url == "%00":
+        direct_url = f"{project_root.as_uri()}%00"
+    distribution = _FakeDistribution(
+        version="4.4.4",
+        package_path=package_root,
+        direct_url=json.dumps({"url": direct_url, "dir_info": {"editable": True}}),
+    )
+    _mock_package_distributions(monkeypatch, [distribution])
+
+    try:
+        package = _package_details(package_root)
+    except Exception as exc:
+        pytest.fail(f"_package_details raised for malformed file URL: {exc!r}")
+
+    assert package["install_mode"] == "source"
+    assert package["editable"] is False
+    assert package["version"] == __version__
+
+
 def _use_python_profile(app: WorkHunter) -> None:
     app.config["profiles"]["python"] = {
         "queries": ["python"],

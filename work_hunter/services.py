@@ -103,7 +103,7 @@ def _read_distribution_text(
 def _same_resolved_path(left: Path, right: Path) -> bool:
     try:
         return left.resolve() == right.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return False
 
 
@@ -119,7 +119,8 @@ def _file_url_path(url: str) -> Path | None:
     if parsed.netloc and parsed.netloc.lower() != "localhost":
         url_path = f"//{parsed.netloc}{url_path}"
     try:
-        return Path(urllib.request.url2pathname(url_path))
+        path = Path(urllib.request.url2pathname(url_path))
+        return path if path.is_absolute() else None
     except (OSError, TypeError, ValueError):
         return None
 
