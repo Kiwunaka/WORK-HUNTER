@@ -13,8 +13,10 @@ from work_hunter.web.server import make_handler
 class FakeHHOperationsClient:
     updated_resumes: list[str] = []
     requests: list[tuple[str, str, object | None, object]] = []
+    constructed = 0
 
     def __init__(self, config):
+        type(self).constructed += 1
         self.config = config
 
     def has_token(self):
@@ -109,12 +111,50 @@ def test_hh_skipped_vacancies_can_be_saved_listed_and_cleared(tmp_path):
 def test_update_hh_resumes_updates_only_publishable_resumes(monkeypatch, tmp_path):
     monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
     FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
 
-    result = app.update_hh_resumes()
+    result = app.update_hh_resumes(confirm=True)
 
     assert result == {"status": "ok", "count": 1, "updated": ["resume-1"]}
+    assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
+
+
+def test_update_hh_resumes_blocks_before_transport_without_confirmation(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+
+    result = app.update_hh_resumes()
+
+    assert result["status"] == "blocked"
+    assert result["code"] == "resume_mutation_requires_confirmation"
+    assert FakeHHOperationsClient.updated_resumes == []
+    assert FakeHHOperationsClient.constructed == 0
+
+
+def test_update_hh_resumes_cli_requires_confirm(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+    app.save_config(app.config)
+    arguments = ["--root", str(tmp_path), "hh-update-resumes"]
+
+    cli_main(arguments)
+    blocked = json.loads(capsys.readouterr().out)
+    assert blocked["status"] == "blocked"
+    assert FakeHHOperationsClient.updated_resumes == []
+    assert FakeHHOperationsClient.constructed == 0
+
+    cli_main([*arguments, "--confirm"])
+    updated = json.loads(capsys.readouterr().out)
+    assert updated == {"status": "ok", "count": 1, "updated": ["resume-1"]}
     assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
 
 
@@ -204,7 +244,7 @@ def test_hh_operations_web_api_exposes_operational_loop(monkeypatch, tmp_path):
             negotiations_payload = json.loads(response.read().decode("utf-8"))
         req = urllib.request.Request(
             f"{base}/api/hh/resumes/update",
-            data=b"{}",
+            data=b'{"confirm": true}',
             method="POST",
             headers={"Content-Type": "application/json"},
         )
@@ -227,6 +267,36 @@ def test_hh_operations_web_api_exposes_operational_loop(monkeypatch, tmp_path):
     assert negotiations_payload[0]["id"] == "neg-1"
     assert update_payload == {"status": "ok", "count": 1, "updated": ["resume-1"]}
     assert clear_payload == {"status": "ok", "count": 1}
+
+
+def test_resume_http_update_rejects_string_confirmation(monkeypatch, tmp_path):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+    app.save_config(app.config)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/hh/resumes/update",
+            data=b'{"confirm": "false"}',
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert result["status"] == "blocked"
+    assert result["code"] == "resume_mutation_requires_confirmation"
+    assert FakeHHOperationsClient.updated_resumes == []
+    assert FakeHHOperationsClient.constructed == 0
 
 
 def test_hh_operator_summary_exposes_cockpit_metrics(monkeypatch, tmp_path):

@@ -437,7 +437,11 @@ def make_handler(root: Path):
                     self._send_json(mask_secrets(app.refresh_hh_token()))
                     return
                 if path == "/api/hh/resumes/update":
-                    self._send_json(app.update_hh_resumes())
+                    self._send_json(
+                        app.update_hh_resumes(
+                            confirm=is_literal_confirmation(body.get("confirm")),
+                        )
+                    )
                     return
                 if path == "/api/hh/resume-template/preview":
                     self._send_json(

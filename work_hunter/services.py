@@ -2095,7 +2095,15 @@ class WorkHunter:
             "access_expires_at": hh_config.get("access_expires_at", ""),
         }
 
-    def update_hh_resumes(self) -> dict[str, Any]:
+    def update_hh_resumes(self, *, confirm: bool = False) -> dict[str, Any]:
+        blocked = require_mutation_confirmation(
+            confirm,
+            code="resume_mutation_requires_confirmation",
+            message="HH resume mutations require explicit confirmation.",
+            risk_flags=("resume_mutation", "external_mutating_request"),
+        )
+        if blocked is not None:
+            return blocked
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
@@ -2114,14 +2122,29 @@ class WorkHunter:
         self,
         payload: dict[str, Any],
         *,
-        dry_run: bool = False,
+        dry_run: bool = True,
         publish: bool = False,
         validate: bool = False,
+        confirm: bool = False,
     ) -> dict[str, Any]:
         validation = validate_hh_resume_payload(payload) if validate else None
         payload_to_create = validation["payload"] if validation else payload
         if validation and not validation["valid"]:
             return {"status": "invalid", "payload": payload_to_create, "validation": validation}
+        if not dry_run:
+            blocked = require_mutation_confirmation(
+                confirm,
+                code="resume_mutation_requires_confirmation",
+                message="HH resume mutations require explicit confirmation.",
+                risk_flags=("resume_mutation", "external_mutating_request"),
+            )
+            if blocked is not None:
+                return blocked
+        if dry_run:
+            result = {"status": "dry_run", "payload": payload_to_create}
+            if validation:
+                result["validation"] = validation
+            return result
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
             result = {
@@ -2129,11 +2152,6 @@ class WorkHunter:
                 "message": "HH access token is required.",
                 "payload": payload_to_create,
             }
-            if validation:
-                result["validation"] = validation
-            return result
-        if dry_run:
-            result = {"status": "dry_run", "payload": payload_to_create}
             if validation:
                 result["validation"] = validation
             return result
@@ -2149,9 +2167,10 @@ class WorkHunter:
         self,
         path: str | Path,
         *,
-        dry_run: bool = False,
+        dry_run: bool = True,
         publish: bool = False,
         validate: bool = True,
+        confirm: bool = False,
     ) -> dict[str, Any]:
         payload = load_hh_resume_payload(path)
         return self.create_hh_resume(
@@ -2159,6 +2178,7 @@ class WorkHunter:
             dry_run=dry_run,
             publish=publish,
             validate=validate,
+            confirm=confirm,
         )
 
     def preview_hh_resume_template(
@@ -2194,12 +2214,27 @@ class WorkHunter:
         title: str | None = None,
         dry_run: bool = True,
         publish: bool = False,
+        confirm: bool = False,
     ) -> dict[str, Any]:
+        if not dry_run:
+            blocked = require_mutation_confirmation(
+                confirm,
+                code="resume_mutation_requires_confirmation",
+                message="HH resume mutations require explicit confirmation.",
+                risk_flags=("resume_mutation", "external_mutating_request"),
+            )
+            if blocked is not None:
+                return blocked
         client = HHApplyClient(self.hh_config())
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required.", "resume_id": resume_id}
         payload = _clone_resume_payload(client.get_resume(resume_id), title=title)
-        return self.create_hh_resume(payload, dry_run=dry_run, publish=publish)
+        return self.create_hh_resume(
+            payload,
+            dry_run=dry_run,
+            publish=publish,
+            confirm=confirm,
+        )
 
     def sync_hh_negotiations(self, *, status: str = "active") -> dict[str, Any]:
         client = HHApplyClient(self.hh_config())

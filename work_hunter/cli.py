@@ -106,12 +106,16 @@ def main(argv: list[str] | None = None) -> None:
     hh_resumes.add_argument("--sync", action="store_true")
     hh_resumes.add_argument("--json", action="store_true")
 
-    sub.add_parser("hh-update-resumes")
+    hh_update_resumes = sub.add_parser("hh-update-resumes")
+    hh_update_resumes.add_argument("--confirm", action="store_true")
 
     hh_create_resume = sub.add_parser("hh-create-resume")
     hh_create_resume.add_argument("--payload")
     hh_create_resume.add_argument("--payload-file", type=Path)
-    hh_create_resume.add_argument("--dry-run", action="store_true")
+    hh_create_resume_mode = hh_create_resume.add_mutually_exclusive_group()
+    hh_create_resume_mode.add_argument("--real", action="store_true")
+    hh_create_resume_mode.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    hh_create_resume.add_argument("--confirm", action="store_true")
     hh_create_resume.add_argument("--publish", action="store_true")
     hh_create_resume.add_argument("--validate", action="store_true")
 
@@ -127,8 +131,10 @@ def main(argv: list[str] | None = None) -> None:
     hh_clone_resume = sub.add_parser("hh-clone-resume")
     hh_clone_resume.add_argument("resume_id")
     hh_clone_resume.add_argument("--title")
-    hh_clone_resume.add_argument("--dry-run", action="store_true", default=True)
-    hh_clone_resume.add_argument("--real", action="store_true")
+    hh_clone_resume_mode = hh_clone_resume.add_mutually_exclusive_group()
+    hh_clone_resume_mode.add_argument("--real", action="store_true")
+    hh_clone_resume_mode.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    hh_clone_resume.add_argument("--confirm", action="store_true")
     hh_clone_resume.add_argument("--publish", action="store_true")
 
     hh_negotiations = sub.add_parser("hh-negotiations")
@@ -662,16 +668,17 @@ def main(argv: list[str] | None = None) -> None:
             print_json(resumes)
         return
     if args.command == "hh-update-resumes":
-        print_json(app.update_hh_resumes())
+        print_json(app.update_hh_resumes(confirm=args.confirm))
         return
     if args.command == "hh-create-resume":
         if args.payload_file:
             print_json(
                 app.create_hh_resume_from_file(
                     args.payload_file,
-                    dry_run=args.dry_run,
+                    dry_run=not args.real,
                     publish=args.publish,
                     validate=args.validate,
+                    confirm=args.confirm,
                 )
             )
             return
@@ -680,9 +687,10 @@ def main(argv: list[str] | None = None) -> None:
         print_json(
             app.create_hh_resume(
                 json.loads(args.payload),
-                dry_run=args.dry_run,
+                dry_run=not args.real,
                 publish=args.publish,
                 validate=args.validate,
+                confirm=args.confirm,
             )
         )
         return
@@ -710,6 +718,7 @@ def main(argv: list[str] | None = None) -> None:
                 title=args.title,
                 dry_run=not args.real,
                 publish=args.publish,
+                confirm=args.confirm,
             )
         )
         return
