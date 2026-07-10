@@ -2618,7 +2618,7 @@ class Storage:
         ).fetchone()
         return row["summary"] if row else ""
 
-    def get_stats(self) -> dict[str, Any]:
+    def get_stats(self, profile_id: str = "default") -> dict[str, Any]:
         total = self.conn.execute("SELECT COUNT(*) AS cnt FROM jobs").fetchone()["cnt"]
 
         by_source_rows = self.conn.execute(
@@ -2637,8 +2637,9 @@ class Storage:
             SELECT s.total_score
             FROM job_scores s
             INNER JOIN jobs j ON s.job_id = j.id
-            WHERE s.profile_id = 'default'
-            """
+            WHERE s.profile_id = ?
+            """,
+            (profile_id,),
         ).fetchall()
         for row in score_rows:
             s = row["total_score"]
@@ -2686,7 +2687,13 @@ class Storage:
         )
         self.conn.commit()
 
-    def search_jobs(self, keywords: list[str], limit: int = 20) -> list[Job]:
+    def search_jobs(
+        self,
+        keywords: list[str],
+        limit: int = 20,
+        *,
+        profile_id: str = "default",
+    ) -> list[Job]:
         if not keywords:
             return []
         conditions = []
@@ -2699,17 +2706,17 @@ class Storage:
             f"""
             SELECT j.*
             FROM jobs j
-            LEFT JOIN job_scores s ON s.job_id = j.id AND s.profile_id = 'default'
+            LEFT JOIN job_scores s ON s.job_id = j.id AND s.profile_id = ?
             {where}
             ORDER BY COALESCE(s.total_score, -1) DESC, j.fetched_at DESC
             LIMIT ?
             """,
-            (*params, limit),
+            (profile_id, *params, limit),
         ).fetchall()
         jobs = [self._job_from_row(row) for row in rows]
         for job in jobs:
             if job.id is not None:
-                job.score = self.get_score(job.id)
+                job.score = self.get_score(job.id, profile_id)
         return jobs
 
     def save_resume(self, resume: Resume) -> int:
@@ -3073,7 +3080,12 @@ class Storage:
             "recent_actions": recent_actions,
         }
 
-    def get_ghost_jobs(self, days: int = 7) -> list[Job]:
+    def get_ghost_jobs(
+        self,
+        days: int = 7,
+        *,
+        profile_id: str = "default",
+    ) -> list[Job]:
         cutoff = _utc_cutoff_days(days)
         rows = self.conn.execute(
             """
@@ -3090,7 +3102,7 @@ class Storage:
         jobs = [self._job_from_row(row) for row in rows]
         for job in jobs:
             if job.id is not None:
-                job.score = self.get_score(job.id)
+                job.score = self.get_score(job.id, profile_id)
         return jobs
 
     def _job_from_row(self, row: sqlite3.Row) -> Job:

@@ -3883,7 +3883,11 @@ class WorkHunter:
         if preset is None:
             return {"status": "blocked", "code": "strategy_not_found", "name": name}
         min_score = int((preset.get("params") or {}).get("min_score") or 0)
-        jobs = self.storage.list_jobs(limit=20, source=str(preset.get("source") or "hh"), min_score=min_score)
+        jobs = self.list_jobs(
+            limit=20,
+            source=str(preset.get("source") or "hh"),
+            min_score=min_score,
+        )
         return {
             "status": "ok",
             "strategy": preset,
@@ -4206,7 +4210,7 @@ class WorkHunter:
         }
         run_id = self.storage.create_hh_campaign_run(filters=filters)
         counts = _campaign_counts()
-        jobs = self.storage.list_jobs(limit=limit, source="hh")
+        jobs = self.list_jobs(limit=limit, source="hh")
         for job in jobs:
             item = self._plan_hh_campaign_item(
                 run_id,
@@ -4453,10 +4457,10 @@ class WorkHunter:
         return self.prepare_letter(job_id).body
 
     def daily_report(self, *, limit: int = 10) -> dict[str, Any]:
-        jobs = self.storage.list_jobs(limit=limit, min_score=1)
+        jobs = self.list_jobs(limit=limit, min_score=1)
         top = [job.to_dict() for job in jobs]
         by_source: dict[str, int] = {}
-        for job in self.storage.list_jobs(limit=10000):
+        for job in self.list_jobs(limit=10000):
             by_source[job.source] = by_source.get(job.source, 0) + 1
         return {
             "total_jobs": sum(by_source.values()),
@@ -4713,12 +4717,20 @@ class WorkHunter:
             parsed = _parse_search_json(raw)
             keywords = parsed.get("queries", [query.split()[:5]])
             remote_only = parsed.get("remote_only", False)
-            jobs = self.storage.search_jobs(keywords, limit=limit)
+            jobs = self.storage.search_jobs(
+                keywords,
+                limit=limit,
+                profile_id=self.active_profile_id(),
+            )
             if remote_only:
                 jobs = [j for j in jobs if j.remote]
         except Exception:
             words = query.strip().split()[:5]
-            jobs = self.storage.search_jobs(words, limit=limit)
+            jobs = self.storage.search_jobs(
+                words,
+                limit=limit,
+                profile_id=self.active_profile_id(),
+            )
         return [job.to_dict() for job in jobs]
 
     def export_jobs(self, status: str | None = None, source: str | None = None, format: str = "json") -> str:
@@ -4749,7 +4761,7 @@ class WorkHunter:
     def export_applications(self, *, format: str = "jsonl") -> str:
         rows: list[dict[str, Any]] = []
         for app in self.storage.list_applications():
-            job = self.storage.get_job(app.job_id)
+            job = self.get_job(app.job_id)
             item = app.to_dict()
             if job:
                 item["job"] = {
@@ -4789,7 +4801,7 @@ class WorkHunter:
             "status": "ok",
             "since": since,
             "daily": self.daily_report(limit=20),
-            "stats": self.storage.get_stats(),
+            "stats": self.storage.get_stats(profile_id=self.active_profile_id()),
             "doctor": self.doctor(),
         }
         if format == "md":
@@ -4891,7 +4903,7 @@ class WorkHunter:
             return {"error": str(exc)}
 
     def market_trends(self, limit: int = 50) -> str:
-        jobs = self.storage.list_jobs(limit=limit)
+        jobs = self.list_jobs(limit=limit)
         ai_config = self.config.get("ai", {})
         job_texts: list[str] = []
         for job in jobs:

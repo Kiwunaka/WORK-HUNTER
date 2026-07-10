@@ -7,6 +7,8 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from work_hunter.models import Job, JobScore
+from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
 
 
@@ -81,6 +83,52 @@ def test_ghost_jobs_route_handles_arbitrarily_large_days(tmp_path):
         assert status == 200
         assert "application/json" in content_type
         assert json.loads(body) == []
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_ghost_jobs_route_serializes_active_profile_score(tmp_path):
+    app = WorkHunter(tmp_path)
+    app.config["profiles"]["python"] = {}
+    app.config["profile"] = "python"
+    app.save_config(app.config)
+    job_id = app.storage.upsert_job(
+        Job(
+            source="hh",
+            source_id="ghost-profile",
+            url="https://example.test/ghost-profile",
+            title="Ghost Profile",
+        )
+    )
+    app.storage.set_status(job_id, "applied")
+    app.storage.save_application(job_id, "applied")
+    app.storage.conn.execute(
+        "UPDATE applications SET applied_at = ? WHERE job_id = ?",
+        ("2020-01-01T00:00:00+00:00", job_id),
+    )
+    app.storage.conn.commit()
+    app.storage.save_score(
+        JobScore(job_id=job_id, profile_id="default", total_score=10)
+    )
+    app.storage.save_score(
+        JobScore(job_id=job_id, profile_id="python", total_score=90)
+    )
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        status, content_type, body = _get_text(base, "/api/ghost-jobs?days=30")
+
+        assert status == 200
+        assert "application/json" in content_type
+        jobs = json.loads(body)
+        assert jobs[0]["score"]["profile_id"] == "python"
+        assert jobs[0]["score"]["total_score"] == 90
     finally:
         server.shutdown()
         thread.join(timeout=5)

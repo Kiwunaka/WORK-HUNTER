@@ -345,7 +345,10 @@ def make_handler(root: Path):
                 query = parse_qs(parsed.query)
                 app = WorkHunter(root)
                 days = _int_arg(query, "days", 7)
-                jobs = app.storage.get_ghost_jobs(days=days)
+                jobs = app.storage.get_ghost_jobs(
+                    days=days,
+                    profile_id=app.active_profile_id(),
+                )
                 self._send_json([j.to_dict() for j in jobs])
                 return
             if path == "/api/behavior-stats":
