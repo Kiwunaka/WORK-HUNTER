@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from http.cookiejar import Cookie
 
 import pytest
+import requests
 
 from work_hunter.hh_transport import (
     ChallengeKind,
@@ -14,6 +15,7 @@ from work_hunter.hh_transport import (
     HHIdentity,
     HHOnlyCookieJar,
     HHRateLimitError,
+    HHTransportError,
     HHWebActions,
     build_android_user_agent,
     extract_xsrf_token,
@@ -240,6 +242,52 @@ def test_api_session_requires_access_token():
         HHApiSession({}).request_json("GET", "/me")
 
     assert exc.value.code == "auth_missing"
+
+
+def test_api_session_masks_and_wraps_request_exception(monkeypatch):
+    original = requests.ConnectionError(
+        "https://api.hh.ru/vacancies?access_token=secret"
+    )
+
+    def fail(*args, **kwargs):
+        raise original
+
+    monkeypatch.setattr("requests.sessions.Session.request", fail)
+    session = HHApiSession({"access_token": "token"})
+
+    with pytest.raises(HHTransportError) as error:
+        session.request_json("get", "/vacancies?access_token=secret")
+
+    assert error.value.code == "network_error"
+    assert error.value.payload == {"method": "GET", "path": "/vacancies"}
+    assert str(error.value) == "GET /vacancies failed: ConnectionError"
+    assert "secret" not in str(error.value)
+    assert error.value.__cause__ is original
+
+
+def test_api_session_masks_and_wraps_refresh_request_exception(monkeypatch):
+    original = requests.Timeout("refresh_token=secret")
+
+    def fail(*args, **kwargs):
+        raise original
+
+    monkeypatch.setattr("requests.request", fail)
+    session = HHApiSession(
+        {
+            "refresh_token": "secret",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+        }
+    )
+
+    with pytest.raises(HHTransportError) as error:
+        session.refresh_token()
+
+    assert error.value.code == "network_error"
+    assert error.value.payload == {"method": "POST", "path": "/token"}
+    assert str(error.value) == "POST /token failed: Timeout"
+    assert "secret" not in str(error.value)
+    assert error.value.__cause__ is original
 
 
 def test_extract_xsrf_token_prefers_cookie_then_html():

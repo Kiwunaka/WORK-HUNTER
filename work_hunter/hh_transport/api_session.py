@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 import requests
@@ -71,29 +72,35 @@ class HHApiSession:
                 elapsed = time.monotonic() - self._last_request_at
                 if elapsed < self.min_interval:
                     time.sleep(self.min_interval - elapsed)
-            response = self.http.request(
-                method.upper(),
-                f"{self.base_url}{path}",
-                headers={**self.headers(), **kwargs.pop("headers", {})},
-                timeout=kwargs.pop("timeout", self.timeout),
-                allow_redirects=kwargs.pop("allow_redirects", False),
-                **kwargs,
-            )
+            try:
+                response = self.http.request(
+                    method.upper(),
+                    f"{self.base_url}{path}",
+                    headers={**self.headers(), **kwargs.pop("headers", {})},
+                    timeout=kwargs.pop("timeout", self.timeout),
+                    allow_redirects=kwargs.pop("allow_redirects", False),
+                    **kwargs,
+                )
+            except requests.RequestException as exc:
+                raise _network_error(method, path, exc) from exc
             self._last_request_at = time.monotonic()
             return response
 
     def refresh_token(self) -> dict[str, Any]:
-        response = requests.request(
-            "POST",
-            f"{self.base_url}/token",
-            headers={
-                "Accept": "application/json",
-                "User-Agent": self.user_agent,
-                "HH-User-Agent": self.user_agent,
-            },
-            data=self.identity.refresh_payload(),
-            timeout=self.timeout,
-        )
+        try:
+            response = requests.request(
+                "POST",
+                f"{self.base_url}/token",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": self.user_agent,
+                    "HH-User-Agent": self.user_agent,
+                },
+                data=self.identity.refresh_payload(),
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise _network_error("POST", "/token", exc) from exc
         payload = _response_json(response)
         if response.status_code >= 400:
             raise _error_from_response(response.status_code, payload)
@@ -172,6 +179,19 @@ class HHApiSession:
         }
         headers.update(self.identity.authorization_header())
         return headers
+
+
+def _network_error(
+    method: str,
+    path: str,
+    exc: requests.RequestException,
+) -> HHTransportError:
+    safe_path = urllib.parse.urlsplit(path).path or "/"
+    return HHTransportError(
+        f"{method.upper()} {safe_path} failed: {type(exc).__name__}",
+        code="network_error",
+        payload={"method": method.upper(), "path": safe_path},
+    )
 
 
 def _response_json(response: Any) -> dict[str, Any]:

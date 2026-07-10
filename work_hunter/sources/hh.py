@@ -34,7 +34,12 @@ class HHSource:
         if self._api_ready():
             try:
                 return self._collect_api(profile, limit)
-            except (HHTransportError, RuntimeError, json.JSONDecodeError):
+            except HHTransportError as exc:
+                if exc.code != "network_error":
+                    raise
+                if not self.config.get("web_fallback", True):
+                    raise
+            except (RuntimeError, json.JSONDecodeError):
                 if not self.config.get("web_fallback", True):
                     raise
         return self._collect_web(profile, limit)
