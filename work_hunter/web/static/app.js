@@ -1258,12 +1258,20 @@ async function deleteHhLabSnippet(name) {
 }
 
 async function runAgentOperation(operation, button = null) {
+  const params = operation === "preflight" ? { live_auth: true } : {};
+  if (operation === "update-resumes") {
+    if (!window.confirm("Update your HH resumes now?")) {
+      $("#agent-operation-note").textContent = `${operation}: cancelled`;
+      return;
+    }
+    params.confirm = true;
+  }
   if (button) button.disabled = true;
   $("#agent-operation-note").textContent = `${operation}: running`;
   try {
     const result = await api("/api/agent/run", {
       method: "POST",
-      body: JSON.stringify({ operation, params: operation === "preflight" ? { live_auth: true } : {} }),
+      body: JSON.stringify({ operation, params }),
     });
     $("#agent-operation-note").textContent = `${operation}: ${result.result?.status || "ok"}`;
     await Promise.all([loadAgentPreflight(), loadAgentDigest(), loadAgentOperations(), loadAgentApprovals()]);

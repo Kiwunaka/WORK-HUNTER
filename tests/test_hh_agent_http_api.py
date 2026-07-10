@@ -51,6 +51,25 @@ class FakeResearchHHClient:
         }
 
 
+class FakeAgentResumeClient:
+    constructed = 0
+    updated_resumes: list[str] = []
+
+    def __init__(self, config):
+        type(self).constructed += 1
+        self.config = config
+
+    def has_token(self):
+        return bool(self.config.get("access_token"))
+
+    def list_resumes(self):
+        return [{"id": "resume-1", "title": "Backend", "status": {"id": "published"}}]
+
+    def update_resume(self, resume_id: str):
+        self.updated_resumes.append(resume_id)
+        return {"status": "updated", "resume_id": resume_id}
+
+
 class FakeStructuredReply:
     parsed = {
         "score": 91,
@@ -236,6 +255,46 @@ def test_hh_agent_web_api_exposes_cockpit_and_approval_queue(tmp_path):
     assert blacklist_item["employer_id"] == "emp-1"
     assert blacklist[0]["reason"] == "spam"
     assert deleted_blacklist == {"status": "ok", "deleted": 1}
+
+
+def test_hh_agent_http_update_resumes_requires_literal_confirmation(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeAgentResumeClient)
+    FakeAgentResumeClient.constructed = 0
+    FakeAgentResumeClient.updated_resumes = []
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+    app.save_config(app.config)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        blocked = _post_json(
+            base,
+            "/api/agent/run",
+            {"operation": "update-resumes", "params": {"confirm": "true"}},
+        )
+        confirmed = _post_json(
+            base,
+            "/api/agent/run",
+            {"operation": "update-resumes", "params": {"confirm": True}},
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert blocked["result"]["status"] == "blocked"
+    assert blocked["result"]["code"] == "resume_mutation_requires_confirmation"
+    assert confirmed["result"] == {
+        "status": "ok",
+        "count": 1,
+        "updated": ["resume-1"],
+    }
+    assert FakeAgentResumeClient.constructed == 1
+    assert FakeAgentResumeClient.updated_resumes == ["resume-1"]
 
 
 def test_hh_agent_web_api_runs_research_and_dry_run_apply(monkeypatch, tmp_path):

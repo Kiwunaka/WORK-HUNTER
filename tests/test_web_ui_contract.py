@@ -106,3 +106,12 @@ def test_hh_api_lab_mutations_require_double_confirmation():
     assert "if (!confirmHhLabMutation(payload)) return;" in app
     assert "payload.confirm = true;" in app
     assert "Final confirmation: this can change your HH account." in app
+
+
+def test_agent_resume_update_ui_sends_literal_confirmation():
+    app = _read_static("app.js")
+
+    assert 'operation === "update-resumes"' in app
+    assert "Update your HH resumes now?" in app
+    assert "params.confirm = true;" in app
+    assert "JSON.stringify({ operation, params })" in app

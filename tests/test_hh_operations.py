@@ -158,6 +158,29 @@ def test_update_hh_resumes_cli_requires_confirm(monkeypatch, tmp_path, capsys):
     assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
 
 
+def test_hh_agent_update_resumes_forwards_only_literal_confirmation(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+
+    blocked = app.run_hh_agent_operation("update-resumes", {"confirm": "true"})
+    assert blocked["result"]["status"] == "blocked"
+    assert blocked["result"]["code"] == "resume_mutation_requires_confirmation"
+    assert FakeHHOperationsClient.constructed == 0
+
+    confirmed = app.run_hh_agent_operation("update-resumes", {"confirm": True})
+    assert confirmed["result"] == {
+        "status": "ok",
+        "count": 1,
+        "updated": ["resume-1"],
+    }
+    assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
+
+
 def test_hh_call_api_blocks_mutations_without_confirm_and_masks_result(monkeypatch, tmp_path):
     monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
     FakeHHOperationsClient.requests = []

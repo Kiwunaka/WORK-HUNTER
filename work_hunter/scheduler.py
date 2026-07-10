@@ -91,9 +91,9 @@ class SafeTaskRunner:
             "blocked": sum(1 for item in items if item["status"] == "blocked"),
         }
         status = "completed"
-        if counts["failed"]:
+        if counts["failed"] or counts["blocked"]:
             status = "partial"
-        if counts["completed"] == 0 and counts["blocked"]:
+        if counts["completed"] == 0 and counts["blocked"] and not counts["failed"]:
             status = "blocked"
         finished_at = _now()
         return self._finish_report(
@@ -127,7 +127,7 @@ class SafeTaskRunner:
                         "message": "Scheduled hh-update-resumes requires confirm=true or real=true.",
                     }
                 else:
-                    result = self.app.update_hh_resumes()
+                    result = self.app.update_hh_resumes(confirm=True)
             elif task_name == "hh-campaign-plan":
                 result = self.app.plan_hh_campaign(
                     limit=int(task.get("limit") or 100),
@@ -138,7 +138,15 @@ class SafeTaskRunner:
                 )
             else:
                 return {"task": task_name, "status": "blocked", "reason": "task_not_safe"}
-            return {"task": task_name, "status": "completed", "result": mask_secrets(result)}
+            safe_result = mask_secrets(result)
+            if isinstance(result, dict) and result.get("status") == "blocked":
+                return {
+                    "task": task_name,
+                    "status": "blocked",
+                    "reason": str(result.get("code") or result.get("message") or "operation_blocked"),
+                    "result": safe_result,
+                }
+            return {"task": task_name, "status": "completed", "result": safe_result}
         except Exception as exc:
             return {"task": task_name, "status": "failed", "error": str(exc)}
 

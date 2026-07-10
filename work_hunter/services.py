@@ -3226,7 +3226,9 @@ class WorkHunter:
             elif operation == "sync-resumes":
                 result = self.sync_hh_resumes()
             elif operation == "update-resumes":
-                result = self.update_hh_resumes()
+                result = self.update_hh_resumes(
+                    confirm=is_literal_confirmation(params.get("confirm")),
+                )
             elif operation == "sync-negotiations":
                 result = self.sync_hh_negotiations(status=str(params.get("status") or "active"))
             elif operation == "scan-events":
