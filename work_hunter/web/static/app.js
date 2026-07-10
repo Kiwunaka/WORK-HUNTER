@@ -718,10 +718,15 @@ async function loadFavorites() {
         <div class="meta">${escapeHtml(job.company || "?" )} · ${escapeHtml(job.source)}</div>
       </td>
       <td>${escapeHtml(job.source)}</td>
-      <td class="meta">${escapeHtml((job.note_short || "").substring(0, 60))}</td>
+      <td class="meta">${escapeHtml((job.note_preview || "").substring(0, 60))}</td>
     `;
     body.appendChild(tr);
   }
+}
+
+function funnelWidth(count, total) {
+  if (!total) return 0;
+  return Math.min(100, Math.max(0, (Number(count) / Number(total)) * 100));
 }
 
 async function loadStats() {
@@ -750,14 +755,12 @@ async function loadStats() {
 
     const funnelDiv = $("#stats-funnel");
     funnelDiv.innerHTML = "";
-    if (stats.applications_by_status) {
-      const funnel = stats.applications_by_status;
-      const total = stats.total_applications || 1;
-      const stages = ["applied", "viewed", "response", "phone_screen", "interview", "offer"];
-      for (const stage of stages) {
-        const count = funnel[stage] || 0;
-        const pct = Math.round((count / total) * 100);
-        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${Math.max(pct, 2)}%;min-width:40px;"><span>${stage}</span><strong>${count}</strong></div>`;
+    if (stats.application_funnel) {
+      const total = stats.total_applications || 0;
+      for (const item of stats.application_funnel) {
+        const count = Number(item.count) || 0;
+        const status = String(item.status || "");
+        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${funnelWidth(count, total)}%;min-width:40px;"><span>${escapeHtml(status)}</span><strong>${count}</strong></div>`;
       }
     }
   } catch (e) {
@@ -859,10 +862,10 @@ function switchAgentPanel(panelName) {
   $(`#agent-panel-${panelName}`)?.classList.add("active");
 }
 
-async function loadAgentCockpit() {
+async function loadAgentCockpit({ liveAuth = false } = {}) {
   $("#agent-status-line").textContent = "Загружаю статус агента...";
   await Promise.all([
-    loadAgentPreflight(),
+    loadAgentPreflight({ liveAuth }),
     loadAgentDigest(),
     loadAgentOperations(),
     loadAgentApprovals(),
@@ -878,9 +881,22 @@ async function loadAgentCockpit() {
   refreshIcons();
 }
 
-async function loadAgentPreflight() {
-  state.agent.preflight = await api("/api/agent/preflight?live_auth=true");
+async function loadAgentPreflight({ liveAuth = false } = {}) {
+  const url = liveAuth
+    ? "/api/agent/preflight?live_auth=true"
+    : "/api/agent/preflight";
+  state.agent.preflight = await api(url);
   renderAgentDashboard();
+}
+
+async function checkAgentLiveAuth() {
+  setBusy("#agent-live-auth-button", true);
+  try {
+    await loadAgentPreflight({ liveAuth: true });
+  } finally {
+    setBusy("#agent-live-auth-button", false);
+    refreshIcons();
+  }
 }
 
 async function loadAgentDigest() {
@@ -1278,7 +1294,7 @@ async function deleteHhLabSnippet(name) {
 }
 
 async function runAgentOperation(operation, button = null) {
-  const params = operation === "preflight" ? { live_auth: true } : {};
+  const params = {};
   if (operation === "update-resumes") {
     if (!window.confirm("Update your HH resumes now?")) {
       $("#agent-operation-note").textContent = `${operation}: cancelled`;
@@ -1550,7 +1566,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#filter-with-salary")?.addEventListener("change", applySmartFilters);
   $("#filter-level")?.addEventListener("change", applySmartFilters);
   $("#refresh-stats-button")?.addEventListener("click", loadStats);
-  $("#agent-refresh-button")?.addEventListener("click", loadAgentCockpit);
+  $("#agent-refresh-button")?.addEventListener("click", () => loadAgentCockpit());
+  $("#agent-live-auth-button")?.addEventListener("click", checkAgentLiveAuth);
   $("#agent-digest-button")?.addEventListener("click", loadAgentDigest);
   $("#agent-save-template-button")?.addEventListener("click", saveAgentTemplate);
   $("#agent-save-blacklist-button")?.addEventListener("click", saveAgentBlacklist);

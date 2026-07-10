@@ -544,3 +544,33 @@ def test_ghost_action_updates_rendered_job_not_selected_job(browser_app):
     assert any(url.endswith("/api/jobs/22/record-event") for url in request_urls)
     assert not any(url.endswith("/api/jobs/11/status") for url in request_urls)
     assert not any(url.endswith("/api/jobs/11/record-event") for url in request_urls)
+
+
+def test_agent_load_is_dry_until_explicit_live_auth_click(browser_app):
+    page, base_url, _ = browser_app
+    preflight_urls: list[str] = []
+    page.on(
+        "request",
+        lambda request: (
+            preflight_urls.append(request.url)
+            if "/api/agent/preflight" in request.url
+            else None
+        ),
+    )
+    with page.expect_response(
+        lambda response: (
+            urlsplit(response.url).path == "/api/agent/preflight"
+            and "live_auth=true" not in response.url
+        )
+    ):
+        page.goto(f"{base_url}/agent", wait_until="domcontentloaded")
+    assert preflight_urls
+    assert all("live_auth=true" not in url for url in preflight_urls)
+    with page.expect_request(
+        lambda request: (
+            urlsplit(request.url).path == "/api/agent/preflight"
+            and "live_auth=true" in request.url
+        )
+    ):
+        page.locator("#agent-live-auth-button").click()
+    assert sum("live_auth=true" in url for url in preflight_urls) == 1

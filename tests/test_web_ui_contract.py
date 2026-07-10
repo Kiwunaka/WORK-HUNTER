@@ -10,7 +10,7 @@ from pathlib import Path
 
 from work_hunter.models import Job, JobScore
 from work_hunter.services import WorkHunter
-from work_hunter.web.server import make_handler
+from work_hunter.web.server import _compute_stats, _job_json, make_handler
 
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "work_hunter" / "web" / "static"
@@ -49,6 +49,32 @@ def _post_json(base: str, path: str, body: dict) -> tuple[int, dict]:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def test_stats_api_uses_one_application_status_mapping(tmp_path):
+    app = WorkHunter(tmp_path)
+    for index, status in enumerate(("applied", "response", "interview", "offer"), 1):
+        job_id = app.storage.upsert_job(
+            Job(source="x", source_id=str(index), url=f"https://x/{index}", title=status)
+        )
+        app.storage.set_status(job_id, status)
+    stats = _compute_stats(app.list_jobs(limit=20), app.storage)
+    funnel = {item["status"]: item["count"] for item in stats["application_funnel"]}
+    assert stats["total_applications"] == 4
+    assert funnel["applied"] == 1
+    assert funnel["response"] == 1
+    assert funnel["interview"] == 1
+    assert funnel["offer"] == 1
+
+
+def test_jobs_api_includes_bounded_note_preview(tmp_path):
+    app = WorkHunter(tmp_path)
+    job_id = app.storage.upsert_job(
+        Job(source="x", source_id="noted", url="https://x/noted", title="Noted")
+    )
+    app.storage.save_note(job_id, "n" * 200)
+    payload = _job_json(app.get_job(job_id), app.storage)
+    assert payload["note_preview"] == "n" * 120
 
 
 def test_ui_deep_links_and_static_assets_are_served(tmp_path):

@@ -31,6 +31,14 @@ UI_ROUTES = {
     "/stats",
     "/trends",
 }
+APPLICATION_FUNNEL_STAGES = (
+    "applied",
+    "response",
+    "phone_screen",
+    "interview",
+    "offer",
+    "rejected",
+)
 
 
 def run_server(root: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
@@ -174,7 +182,7 @@ def make_handler(root: Path):
                     status=_str_arg(query, "status"),
                     min_score=_optional_int_arg(query, "min_score"),
                 )
-                self._send_json([job.to_dict() for job in jobs])
+                self._send_json([_job_json(job, app.storage) for job in jobs])
                 return
             if path == "/api/jobs/export":
                 query = parse_qs(parsed.query)
@@ -994,6 +1002,21 @@ def _approval_action(path: str) -> tuple[int, str] | None:
     return None
 
 
+def _job_json(job: Any, storage: Any, *, note_preview_chars: int = 120) -> dict[str, Any]:
+    payload = job.to_dict()
+    note = storage.get_note(int(job.id or 0))
+    payload["note_preview"] = note[:note_preview_chars]
+    return payload
+
+
+def _application_stats(by_status: dict[str, int]) -> tuple[int, list[dict[str, object]]]:
+    funnel = [
+        {"status": status, "count": by_status.get(status, 0)}
+        for status in APPLICATION_FUNNEL_STAGES
+    ]
+    return sum(cast(int, item["count"]) for item in funnel), funnel
+
+
 def _compute_stats(jobs: list[Any], storage: Any) -> dict[str, Any]:
     total = len(jobs)
     by_source: dict[str, int] = {}
@@ -1016,22 +1039,12 @@ def _compute_stats(jobs: list[Any], storage: Any) -> dict[str, Any]:
             score_buckets["61-80"] += 1
         else:
             score_buckets["81-100"] += 1
-    applied = by_status.get("applied", 0)
-    funnel: dict[str, int] = {
-        "new": by_status.get("new", 0),
-        "saved": by_status.get("saved", 0),
-        "applied": by_status.get("applied", 0),
-        "phone_screen": by_status.get("phone_screen", 0),
-        "interview": by_status.get("interview", 0),
-        "offer": by_status.get("offer", 0),
-        "rejected": by_status.get("rejected", 0),
-        "not_interested": by_status.get("not_interested", 0),
-    }
+    total_applications, application_funnel = _application_stats(by_status)
     return {
         "total_jobs": total,
         "by_source": by_source,
         "by_status": by_status,
         "score_distribution": score_buckets,
-        "total_applications": applied,
-        "applications_by_status": funnel,
+        "total_applications": total_applications,
+        "application_funnel": application_funnel,
     }
