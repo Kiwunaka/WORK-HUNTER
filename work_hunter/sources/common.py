@@ -9,6 +9,29 @@ from typing import Mapping
 
 
 USER_AGENT = "WorkHunter/0.1 (personal@example.invalid)"
+TRACKING_QUERY_KEYS = frozenset({"gclid", "yclid"})
+
+
+def canonicalize_job_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )
+        if not key.lower().startswith("utm_")
+        and key.lower() not in TRACKING_QUERY_KEYS
+    ]
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path or "/",
+            urllib.parse.urlencode(sorted(query), doseq=True),
+            "",
+        )
+    )
 
 
 def fetch_url(

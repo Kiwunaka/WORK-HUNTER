@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from ..models import Job
-from .common import absolute_url, clean_text, fetch_url, last_path_part
+from .common import absolute_url, canonicalize_job_url, clean_text, fetch_url
 
 
 @dataclass(frozen=True)
@@ -79,6 +79,22 @@ PUBLIC_BOARD_SPECS: dict[str, PublicBoardSpec] = {
 }
 
 PUBLIC_BOARD_SOURCE_NAMES = tuple(PUBLIC_BOARD_SPECS)
+PAYLOAD_SOURCE_ID_KEYS = (
+    "vacancy_id",
+    "vacancyId",
+    "job_id",
+    "jobId",
+    "offer_id",
+    "offerId",
+    "external_id",
+    "externalId",
+    "source_id",
+    "sourceId",
+    "id",
+    "identifier",
+    "uuid",
+    "@id",
+)
 
 
 class PublicJobBoardSource:
@@ -101,7 +117,11 @@ class PublicJobBoardSource:
         for url in self._candidate_urls(profile):
             html = self.fetcher(url)
             for job in parse_public_board_html(html, source=self.source_name, base_url=self.base_url):
-                key = job.url.lower().split("?")[0] if job.url else f"{job.source}:{job.source_id}"
+                key = (
+                    canonicalize_job_url(job.url)
+                    if job.url
+                    else f"{job.source}:{job.source_id}"
+                )
                 if key in seen:
                     continue
                 seen.add(key)
@@ -405,17 +425,25 @@ def _payload_url(payload: dict[str, Any], base_url: str) -> str:
 
 
 def _source_id_from_url_or_payload(source: str, url: str, payload: dict[str, Any]) -> str:
-    for key in ("id", "@id", "identifier", "uuid"):
+    for key in PAYLOAD_SOURCE_ID_KEYS:
         raw = payload.get(key)
         if isinstance(raw, dict):
-            raw = raw.get("value") or raw.get("id") or raw.get("@id")
-        if raw:
-            return clean_text(str(raw))
+            for nested_key in ("value", "id", "@id"):
+                nested_raw = raw.get(nested_key)
+                text = clean_text(str(nested_raw)) if nested_raw is not None else ""
+                if text:
+                    return text
+            continue
+        text = clean_text(str(raw)) if raw is not None else ""
+        if text:
+            return text
     if url:
-        path_part = last_path_part(url)
-        if path_part:
-            return path_part
-    digest = hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        canonical_url = canonicalize_job_url(url)
+        digest = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()[:24]
+        return f"{source}-{digest}"
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
     return f"{source}-{digest}"
 
 
@@ -687,7 +715,7 @@ def _dedupe_jobs(jobs: list[Job]) -> list[Job]:
     unique: list[Job] = []
     seen: set[str] = set()
     for job in jobs:
-        key = job.url.lower().split("?")[0] if job.url else f"{job.source}:{job.source_id}"
+        key = canonicalize_job_url(job.url) if job.url else f"{job.source}:{job.source_id}"
         if key in seen:
             continue
         seen.add(key)

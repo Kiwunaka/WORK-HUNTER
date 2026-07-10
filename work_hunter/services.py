@@ -78,7 +78,7 @@ from .sources import (
     TelegramSource,
 )
 from .sources.hh import HHApplyClient
-from .sources.common import clean_text, fetch_url
+from .sources.common import canonicalize_job_url, clean_text, fetch_url
 from .storage import Storage
 
 
@@ -204,7 +204,7 @@ def _job_dedupe_key(job: Job) -> str:
     if title and company:
         return f"title-company:{title}|{company}"
     if job.url:
-        return f"url:{job.url.strip().lower().split('?')[0]}"
+        return f"url:{canonicalize_job_url(job.url.strip())}"
     return f"{job.source}:{job.source_id}"
 
 
