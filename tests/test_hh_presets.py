@@ -46,6 +46,21 @@ def test_hh_campaign_preset_delete(tmp_path):
     assert app.list_hh_campaign_presets() == []
 
 
+def test_stale_named_delete_removes_concurrently_added_campaign_preset(tmp_path):
+    setup_app = WorkHunter(root=tmp_path)
+    setup_app.save_hh_campaign_preset("existing", {"limit": 1})
+    stale_app = WorkHunter(root=tmp_path)
+    newer_app = WorkHunter(root=tmp_path)
+    newer_app.save_hh_campaign_preset("concurrent", {"limit": 3})
+
+    result = stale_app.delete_hh_campaign_preset("concurrent")
+
+    assert result == {"status": "ok"}
+    assert WorkHunter(root=tmp_path).list_hh_campaign_presets() == [
+        {"name": "existing", "params": {"limit": 1}}
+    ]
+
+
 def test_hh_campaign_preset_cli_roundtrip(tmp_path, capsys):
     cli_main(
         [

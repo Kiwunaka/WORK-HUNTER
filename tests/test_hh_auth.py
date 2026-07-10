@@ -387,6 +387,162 @@ def test_identity_patch_merges_with_fresh_disk_config(monkeypatch, tmp_path):
     assert stale_app.config["research"]["max_results"] == 777
 
 
+def test_stale_workhunter_save_preserves_newer_identity_rotation(tmp_path):
+    stale_app = WorkHunter(tmp_path)
+    stale_app.save_hh_account_profile(
+        "alice",
+        access_token="alice-old-access",
+        refresh_token="alice-old-refresh",
+    )
+    stale_app.use_hh_account_profile("alice")
+
+    rotating_app = WorkHunter(tmp_path)
+    rotating_app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-new-access",
+            "refresh_token": "alice-new-refresh",
+        },
+    )
+
+    stale_app.config["about"]["summary"] = "unrelated-stale-writer"
+    stale_app.save_config(stale_app.config)
+
+    first_reload = WorkHunter(tmp_path)
+    assert first_reload.config["about"]["summary"] == "unrelated-stale-writer"
+    assert (
+        first_reload.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-new-refresh"
+    )
+    assert (
+        stale_app.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-new-refresh"
+    )
+
+    rotating_app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-newer-access",
+            "refresh_token": "alice-newer-refresh",
+        },
+    )
+    stale_app.config["research"]["max_results"] = 321
+    stale_app.save_config(stale_app.config)
+
+    second_reload = WorkHunter(tmp_path)
+    assert second_reload.config["research"]["max_results"] == 321
+    assert (
+        second_reload.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-newer-refresh"
+    )
+
+
+def test_stale_workhunter_save_defines_explicit_secret_delete_and_list_changes(tmp_path):
+    setup_app = WorkHunter(tmp_path)
+    setup_app.save_hh_account_profile(
+        "alice",
+        access_token="alice-old-access",
+        refresh_token="alice-old-refresh",
+    )
+    setup_app.config["about"]["temporary_note"] = "remove-me"
+    setup_app.save_config(setup_app.config)
+
+    stale_app = WorkHunter(tmp_path)
+    newer_app = WorkHunter(tmp_path)
+    newer_app.config["research"]["max_results"] = 777
+    newer_app.save_config(newer_app.config)
+
+    stale_app.config["hh_account_profiles"]["alice"][
+        "refresh_token"
+    ] = "alice-intentional-refresh"
+    del stale_app.config["about"]["temporary_note"]
+    stale_app.config["profiles"]["default"]["queries"] = [
+        "python platform",
+        "distributed systems",
+    ]
+    stale_app.save_config(stale_app.config)
+
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["research"]["max_results"] == 777
+    assert (
+        reloaded.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-intentional-refresh"
+    )
+    assert "temporary_note" not in reloaded.config["about"]
+    assert reloaded.config["profiles"]["default"]["queries"] == [
+        "python platform",
+        "distributed systems",
+    ]
+
+
+def test_named_account_writer_applies_explicit_value_equal_to_stale_baseline(tmp_path):
+    stale_app = WorkHunter(tmp_path)
+    stale_app.save_hh_account_profile(
+        "alice",
+        access_token="alice-old-access",
+        refresh_token="alice-old-refresh",
+    )
+
+    rotating_app = WorkHunter(tmp_path)
+    rotating_app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-new-access",
+            "refresh_token": "alice-new-refresh",
+        },
+    )
+
+    stale_app.save_hh_account_profile(
+        "alice",
+        refresh_token="alice-old-refresh",
+    )
+
+    reloaded = WorkHunter(tmp_path)
+    assert (
+        reloaded.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-old-refresh"
+    )
+    assert (
+        reloaded.config["hh_account_profiles"]["alice"]["access_token"]
+        == "alice-new-access"
+    )
+
+
+def test_identity_callback_refreshes_three_way_save_baseline(tmp_path):
+    app = WorkHunter(tmp_path)
+    app.save_hh_account_profile(
+        "alice",
+        access_token="alice-old-access",
+        refresh_token="alice-old-refresh",
+    )
+    app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-first-access",
+            "refresh_token": "alice-first-refresh",
+        },
+    )
+
+    another_app = WorkHunter(tmp_path)
+    another_app._persist_hh_identity_patch(
+        "alice",
+        {
+            "access_token": "alice-second-access",
+            "refresh_token": "alice-second-refresh",
+        },
+    )
+
+    app.config["about"]["summary"] = "saved-after-callback"
+    app.save_config(app.config)
+
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["about"]["summary"] == "saved-after-callback"
+    assert (
+        reloaded.config["hh_account_profiles"]["alice"]["refresh_token"]
+        == "alice-second-refresh"
+    )
+
+
 def test_explicit_refresh_persists_rotation_once(monkeypatch, tmp_path):
     app = WorkHunter(tmp_path)
     app.save_hh_account_profile(

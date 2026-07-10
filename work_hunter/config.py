@@ -36,6 +36,24 @@ HH_ACCOUNT_SECRET_KEYS = frozenset(
 _MISSING_CONFIG_VALUE = object()
 _CONFIG_WRITE_LOCK = threading.RLock()
 _CONFIG_LOCK_STATE = threading.local()
+_CONFIG_LOCK_FDS: set[int] = set()
+
+
+def _reset_config_state_after_fork() -> None:
+    global _CONFIG_WRITE_LOCK, _CONFIG_LOCK_STATE, _CONFIG_LOCK_FDS
+    for fd in sorted(_CONFIG_LOCK_FDS):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _CONFIG_WRITE_LOCK = threading.RLock()
+    _CONFIG_LOCK_STATE = threading.local()
+    _CONFIG_LOCK_FDS = set()
+
+
+_register_at_fork = getattr(os, "register_at_fork", None)
+if callable(_register_at_fork):
+    _register_at_fork(after_in_child=_reset_config_state_after_fork)
 
 
 def _default_profile() -> dict[str, Any]:
@@ -404,6 +422,74 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return _deep_merge(default_config(), loaded)
 
 
+def merge_config_snapshot_changes(
+    baseline: dict[str, Any],
+    desired: dict[str, Any],
+    fresh: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply baseline-to-desired changes onto a fresh config snapshot.
+
+    Unchanged values come from ``fresh``. Changed scalar values and lists replace
+    the fresh value, mappings merge recursively, and keys removed from ``desired``
+    are removed from the result.
+    """
+    merged = _merge_config_value(baseline, desired, fresh)
+    if not isinstance(merged, dict):
+        raise TypeError("Configuration root must be a mapping")
+    return merged
+
+
+def _merge_config_value(baseline: Any, desired: Any, fresh: Any) -> Any:
+    if _config_values_equal(baseline, desired):
+        if fresh is _MISSING_CONFIG_VALUE:
+            return _MISSING_CONFIG_VALUE
+        return copy.deepcopy(fresh)
+    if isinstance(baseline, dict) and isinstance(desired, dict):
+        if not isinstance(fresh, dict):
+            return copy.deepcopy(desired)
+        merged = copy.deepcopy(fresh)
+        keys = dict.fromkeys((*baseline.keys(), *desired.keys()))
+        for key in keys:
+            baseline_value = baseline.get(key, _MISSING_CONFIG_VALUE)
+            desired_value = desired.get(key, _MISSING_CONFIG_VALUE)
+            if desired_value is _MISSING_CONFIG_VALUE:
+                merged.pop(key, None)
+                continue
+            if baseline_value is _MISSING_CONFIG_VALUE:
+                merged[key] = copy.deepcopy(desired_value)
+                continue
+            fresh_value = fresh.get(key, _MISSING_CONFIG_VALUE)
+            merged_value = _merge_config_value(
+                baseline_value,
+                desired_value,
+                fresh_value,
+            )
+            if merged_value is _MISSING_CONFIG_VALUE:
+                merged.pop(key, None)
+            else:
+                merged[key] = merged_value
+        return merged
+    return copy.deepcopy(desired)
+
+
+def _config_values_equal(baseline: Any, desired: Any) -> bool:
+    if type(baseline) is not type(desired):
+        return False
+    if isinstance(baseline, dict):
+        if baseline.keys() != desired.keys():
+            return False
+        return all(
+            _config_values_equal(baseline[key], desired[key])
+            for key in baseline
+        )
+    if isinstance(baseline, list):
+        return len(baseline) == len(desired) and all(
+            _config_values_equal(baseline_value, desired_value)
+            for baseline_value, desired_value in zip(baseline, desired)
+        )
+    return bool(baseline == desired)
+
+
 def save_config(path: str | Path, config: dict[str, Any]) -> None:
     path = Path(path)
     with _CONFIG_WRITE_LOCK:
@@ -516,6 +602,7 @@ def _config_file_lock(path: Path) -> Iterator[None]:
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    _CONFIG_LOCK_FDS.add(fd)
     locked = False
     try:
         if os.fstat(fd).st_size == 0:
@@ -525,12 +612,14 @@ def _config_file_lock(path: Path) -> Iterator[None]:
         depths[lock_key] = 1
         yield
     finally:
-        try:
-            depths.pop(lock_key, None)
-            if locked:
-                _unlock_config_fd(fd)
-        finally:
-            os.close(fd)
+        if os.getpid() == process_id:
+            try:
+                depths.pop(lock_key, None)
+                if locked:
+                    _unlock_config_fd(fd)
+            finally:
+                _CONFIG_LOCK_FDS.discard(fd)
+                os.close(fd)
 
 
 def update_config(

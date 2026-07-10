@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import io
 import json
+import os
 import re
 import smtplib
 import sys
@@ -14,7 +15,7 @@ import urllib.parse
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import (
     active_hh_config,
@@ -25,6 +26,7 @@ from .config import (
     default_config,
     load_config,
     mask_secrets,
+    merge_config_snapshot_changes,
     merge_masked_config,
     save_config,
     update_config,
@@ -80,6 +82,16 @@ from .storage import Storage
 
 
 _HH_IDENTITY_WRITE_LOCK = threading.RLock()
+
+
+def _reset_hh_identity_lock_after_fork() -> None:
+    global _HH_IDENTITY_WRITE_LOCK
+    _HH_IDENTITY_WRITE_LOCK = threading.RLock()
+
+
+_register_at_fork = getattr(os, "register_at_fork", None)
+if callable(_register_at_fork):
+    _register_at_fork(after_in_child=_reset_hh_identity_lock_after_fork)
 
 
 def _format_experience(about: dict[str, Any]) -> str:
@@ -756,11 +768,12 @@ class WorkHunter:
         self.root = Path(root) if root is not None else Path.cwd()
         self.config_path = config_path(self.root)
         self.config = load_config(self.config_path)
+        self._config_baseline = copy.deepcopy(self.config)
         self.storage = Storage(database_path(self.root))
 
     def init(self, *, overwrite: bool = False) -> Path:
         if overwrite or not self.config_path.exists():
-            save_config(self.config_path, self.config)
+            self._replace_config(self.config)
         return self.config_path
 
     def doctor(self) -> dict[str, Any]:
@@ -890,12 +903,51 @@ class WorkHunter:
         return _dedupe_strings(actions)
 
     def save_config(self, config: dict[str, Any]) -> None:
-        self.config = config
-        save_config(self.config_path, config)
+        with _HH_IDENTITY_WRITE_LOCK:
+            baseline = copy.deepcopy(self._config_baseline)
+            desired = copy.deepcopy(config)
+
+            def merge_changes(fresh: dict[str, Any]) -> None:
+                merged = merge_config_snapshot_changes(baseline, desired, fresh)
+                fresh.clear()
+                fresh.update(merged)
+
+            updated = update_config(
+                self.config_path,
+                merge_changes,
+                fallback=baseline,
+            )
+            self.config = updated
+            self._config_baseline = copy.deepcopy(updated)
+
+    def _replace_config(self, config: dict[str, Any]) -> None:
+        with _HH_IDENTITY_WRITE_LOCK:
+            replacement = copy.deepcopy(config)
+            save_config(self.config_path, replacement)
+            self.config = replacement
+            self._config_baseline = copy.deepcopy(replacement)
+
+    def _update_config_fresh(
+        self,
+        update: Callable[[dict[str, Any]], None],
+    ) -> dict[str, Any]:
+        with _HH_IDENTITY_WRITE_LOCK:
+            updated = update_config(
+                self.config_path,
+                update,
+                fallback=self.config,
+            )
+            self.config = updated
+            self._config_baseline = copy.deepcopy(updated)
+            return updated
 
     def update_config_from_client(self, patch: dict[str, Any]) -> dict[str, Any]:
-        updated = merge_masked_config(self.config, patch)
-        self.save_config(updated)
+        def apply_patch(config: dict[str, Any]) -> None:
+            updated = merge_masked_config(config, patch)
+            config.clear()
+            config.update(updated)
+
+        self._update_config_fresh(apply_patch)
         return mask_secrets(self.config)
 
     def clear_config_secret(
@@ -913,8 +965,13 @@ class WorkHunter:
         )
         if blocked is not None:
             return blocked
+        def clear_secret(config: dict[str, Any]) -> None:
+            updated = clear_config_secret_value(config, path)
+            config.clear()
+            config.update(updated)
+
         try:
-            updated = clear_config_secret_value(self.config, path)
+            self._update_config_fresh(clear_secret)
         except ValueError:
             return {
                 "status": "blocked",
@@ -922,12 +979,10 @@ class WorkHunter:
                 "message": "Configuration secret path is not allowlisted.",
                 "path": path,
             }
-        self.save_config(updated)
         return {"status": "ok", "path": path}
 
     def reset_config_defaults(self) -> None:
-        self.config = default_config()
-        save_config(self.config_path, self.config)
+        self._replace_config(default_config())
 
     def sync_sources(
         self,
@@ -1109,31 +1164,36 @@ class WorkHunter:
 
     def switch_profile(self, profile_id: str) -> dict[str, Any]:
         """Switch the active search profile."""
-        profiles = self.config.get("profiles", {})
-        if profile_id not in profiles:
-            available = list(profiles.keys())
-            raise ValueError(
-                f"Profile '{profile_id}' not found. "
-                f"Available: {', '.join(available)}"
-            )
-        self.config["profile"] = profile_id
-        save_config(self.config_path, self.config)
-        return profiles[profile_id]
+        def switch(config: dict[str, Any]) -> None:
+            profiles = config.get("profiles", {})
+            if profile_id not in profiles:
+                available = list(profiles.keys())
+                raise ValueError(
+                    f"Profile '{profile_id}' not found. "
+                    f"Available: {', '.join(available)}"
+                )
+            config["profile"] = profile_id
+
+        updated = self._update_config_fresh(switch)
+        return updated["profiles"][profile_id]
 
     def update_profile(self, data: dict[str, Any]) -> dict[str, Any]:
         """Update the active profile's search preferences (queries, skills, stop_words)."""
-        profile_id = self.config.get("profile", "default")
-        profiles = self.config.get("profiles", {})
-        if profile_id not in profiles:
-            raise ValueError(f"Profile '{profile_id}' not found")
         allowed = ["queries", "desired_roles", "must_have_skills", "nice_to_have_skills",
                    "stop_words", "desired_salary", "desired_cities"]
-        for key in allowed:
-            if key in data:
-                profiles[profile_id][key] = data[key]
-        self.config["profiles"] = profiles
-        save_config(self.config_path, self.config)
-        return profiles[profile_id]
+
+        def update_active_profile(config: dict[str, Any]) -> None:
+            profile_id = config.get("profile", "default")
+            profiles = config.get("profiles", {})
+            if profile_id not in profiles:
+                raise ValueError(f"Profile '{profile_id}' not found")
+            for key in allowed:
+                if key in data:
+                    profiles[profile_id][key] = data[key]
+
+        updated = self._update_config_fresh(update_active_profile)
+        profile_id = updated.get("profile", "default")
+        return updated["profiles"][profile_id]
 
     def active_profile_info(self) -> dict[str, Any]:
         """Return the active profile id and data."""
@@ -1163,12 +1223,7 @@ class WorkHunter:
                 source_config = sources.setdefault("hh", {})
                 source_config.update(patch)
 
-        with _HH_IDENTITY_WRITE_LOCK:
-            self.config = update_config(
-                self.config_path,
-                merge_identity,
-                fallback=self.config,
-            )
+        self._update_config_fresh(merge_identity)
 
     def _hh_runtime(self) -> tuple[dict[str, Any], CallbackConfigBackend]:
         with _HH_IDENTITY_WRITE_LOCK:
@@ -1211,34 +1266,41 @@ class WorkHunter:
     def save_hh_account_profile(self, name: str, **values: Any) -> dict[str, Any]:
         if not name.strip():
             raise ValueError("HH account profile name is required")
-        accounts = dict(self.config.get("hh_account_profiles") or {})
-        account = dict(accounts.get(name) or {})
-        for key in (
+        account_keys = (
             "access_token",
             "refresh_token",
             "access_expires_at",
             "client_id",
             "client_secret",
-        ):
-            if key in values and values[key] is not None:
-                account[key] = values[key]
-        accounts[name] = account
-        self.config["hh_account_profiles"] = accounts
-        save_config(self.config_path, self.config)
+        )
+
+        def save_account(config: dict[str, Any]) -> None:
+            accounts = dict(config.get("hh_account_profiles") or {})
+            account = dict(accounts.get(name) or {})
+            for key in account_keys:
+                if key in values and values[key] is not None:
+                    account[key] = values[key]
+            accounts[name] = account
+            config["hh_account_profiles"] = accounts
+
+        updated = self._update_config_fresh(save_account)
+        account = updated["hh_account_profiles"][name]
         return {
             "name": name,
-            "active": name == self.config.get("hh_account_profile", "default"),
+            "active": name == updated.get("hh_account_profile", "default"),
             "has_access_token": bool(str(account.get("access_token") or "")),
             "has_refresh_token": bool(str(account.get("refresh_token") or "")),
         }
 
     def use_hh_account_profile(self, name: str) -> dict[str, Any]:
-        accounts = self.config.get("hh_account_profiles") or {}
-        if name not in accounts:
-            raise ValueError(f"HH account profile '{name}' not found")
-        self.config["hh_account_profile"] = name
-        save_config(self.config_path, self.config)
-        return {"active": name, "profile": self.config.get("profile", "default")}
+        def use_account(config: dict[str, Any]) -> None:
+            accounts = config.get("hh_account_profiles") or {}
+            if name not in accounts:
+                raise ValueError(f"HH account profile '{name}' not found")
+            config["hh_account_profile"] = name
+
+        updated = self._update_config_fresh(use_account)
+        return {"active": name, "profile": updated.get("profile", "default")}
 
     def latest_letter(self, job_id: int) -> LetterDraft | None:
         return self.storage.get_latest_letter(job_id)
@@ -2082,9 +2144,11 @@ class WorkHunter:
                 "message": f"Cookie file not found: {cookie_file}",
                 "next_actions": ["export cookies.txt from the browser", "retry import-cookies"],
             }
-        hh_sources = self.config.setdefault("sources", {}).setdefault("hh", {})
-        hh_sources["hh_cookie_file"] = str(cookie_file)
-        save_config(self.config_path, self.config)
+        def save_cookie_path(config: dict[str, Any]) -> None:
+            hh_sources = config.setdefault("sources", {}).setdefault("hh", {})
+            hh_sources["hh_cookie_file"] = str(cookie_file)
+
+        self._update_config_fresh(save_cookie_path)
         status = self.hh_web_status()
         return {
             "status": "ok",
@@ -2911,21 +2975,29 @@ class WorkHunter:
         )
 
     def pause_hh_agent(self, *, reason: str = "manual") -> dict[str, Any]:
-        agent_config = dict(self.config.get("hh_agent") or {})
-        agent_config["paused"] = True
-        agent_config["pause_reason"] = reason
-        agent_config["paused_at"] = datetime.now().astimezone().replace(microsecond=0).isoformat()
-        self.config["hh_agent"] = agent_config
-        save_config(self.config_path, self.config)
+        paused_at = datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+        def pause(config: dict[str, Any]) -> None:
+            agent_config = dict(config.get("hh_agent") or {})
+            agent_config["paused"] = True
+            agent_config["pause_reason"] = reason
+            agent_config["paused_at"] = paused_at
+            config["hh_agent"] = agent_config
+
+        self._update_config_fresh(pause)
         return {"status": "paused", "paused": True, "reason": reason}
 
     def resume_hh_agent(self, *, reason: str = "manual") -> dict[str, Any]:
-        agent_config = dict(self.config.get("hh_agent") or {})
-        agent_config["paused"] = False
-        agent_config["resume_reason"] = reason
-        agent_config["resumed_at"] = datetime.now().astimezone().replace(microsecond=0).isoformat()
-        self.config["hh_agent"] = agent_config
-        save_config(self.config_path, self.config)
+        resumed_at = datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+        def resume(config: dict[str, Any]) -> None:
+            agent_config = dict(config.get("hh_agent") or {})
+            agent_config["paused"] = False
+            agent_config["resume_reason"] = reason
+            agent_config["resumed_at"] = resumed_at
+            config["hh_agent"] = agent_config
+
+        self._update_config_fresh(resume)
         return {"status": "resumed", "paused": False, "reason": reason}
 
     def hh_agent_preflight(self, *, live_auth: bool = False) -> dict[str, Any]:
@@ -3588,11 +3660,15 @@ class WorkHunter:
     def save_hh_campaign_preset(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         if not name.strip():
             raise ValueError("Preset name is required")
-        presets = dict(self.config.get("hh_campaign_presets") or {})
-        presets[name] = _safe_preset_params(params)
-        self.config["hh_campaign_presets"] = presets
-        save_config(self.config_path, self.config)
-        return {"name": name, "params": presets[name]}
+        safe_params = _safe_preset_params(params)
+
+        def save_preset(config: dict[str, Any]) -> None:
+            presets = dict(config.get("hh_campaign_presets") or {})
+            presets[name] = safe_params
+            config["hh_campaign_presets"] = presets
+
+        self._update_config_fresh(save_preset)
+        return {"name": name, "params": safe_params}
 
     def get_hh_campaign_preset(self, name: str) -> dict[str, Any]:
         presets = self.config.get("hh_campaign_presets") or {}
@@ -3608,10 +3684,12 @@ class WorkHunter:
         ]
 
     def delete_hh_campaign_preset(self, name: str) -> dict[str, Any]:
-        presets = dict(self.config.get("hh_campaign_presets") or {})
-        presets.pop(name, None)
-        self.config["hh_campaign_presets"] = presets
-        save_config(self.config_path, self.config)
+        def delete_preset(config: dict[str, Any]) -> None:
+            presets = dict(config.get("hh_campaign_presets") or {})
+            presets.pop(name, None)
+            config["hh_campaign_presets"] = presets
+
+        self._update_config_fresh(delete_preset)
         return {"status": "ok"}
 
     def list_strategies(self) -> dict[str, Any]:

@@ -195,6 +195,28 @@ def test_save_config_preserves_existing_posix_mode(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
+@pytest.mark.parametrize(
+    ("baseline_value", "desired_value", "fresh_value"),
+    [
+        (True, 1, False),
+        ([True], [1], ["fresh"]),
+    ],
+)
+def test_three_way_config_merge_distinguishes_json_value_types(
+    baseline_value,
+    desired_value,
+    fresh_value,
+):
+    merged = config_module.merge_config_snapshot_changes(
+        {"value": baseline_value},
+        {"value": desired_value},
+        {"value": fresh_value},
+    )
+
+    assert merged == {"value": desired_value}
+    assert type(merged["value"]) is type(desired_value)
+
+
 def test_mask_secrets():
     masked = mask_secrets({"token": "abc", "max_tokens": 1500, "nested": {"client_secret": "def"}})
 
