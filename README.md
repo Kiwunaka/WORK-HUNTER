@@ -59,12 +59,11 @@ Use Python 3.11+.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .
+python -m pip install -e ".[ui]"
 python -m work_hunter init
+python -m work_hunter doctor --json
 python -m work_hunter config --json
 ```
-
-Current dependency note: `pyproject.toml` is still minimal. If a clean environment fails on imports such as `requests`, install the missing runtime dependency and add it to `pyproject.toml` in the same change.
 
 ## Common Commands
 
@@ -161,6 +160,22 @@ pytest tests/test_external_sessions.py tests/test_api_recon.py -q
 
 For behavior changes, write or update focused tests first. The project already has good coverage around secret masking, HH safety, agent storage, API lab, scheduler reports, and external session redaction.
 
+## Development And Release Checks
+
+```powershell
+python -m pip install --upgrade "pip>=26.1.2"
+python -m pip install -e ".[dev,browser,ui,release]"
+python -m playwright install chromium
+pytest -q
+ruff check .
+mypy work_hunter
+python -m build
+```
+
+The cockpit is loopback-only. Real HH mutations require a literal confirmation flag. Strings such as `"true"` do not authorize them.
+
+Release verification never reads the repository's private `.work-hunter` directory.
+
 ## Current Agent Notes
 
 Start with these files before making large changes:
@@ -175,7 +190,6 @@ Start with these files before making large changes:
 Known important gaps to verify before building on top:
 
 - some MCP HH agent paths are still plan/dry-run oriented and should be checked against tests before claiming true end-to-end automation;
-- `init` is currently basic and should evolve into a richer doctor/bootstrap command;
 - AI backend support exists for direct OpenAI-compatible HTTP and OpenCode, but provider routing needs a clearer registry before adding Codex/OpenCode subscription runtime support;
 - UI source status currently needs richer capability/status aggregation.
 
