@@ -4,6 +4,8 @@ from typing import Any
 
 from mcp.types import Tool
 
+from ..safety import is_literal_confirmation
+
 
 class HHMCPToolHandlers:
     TOOL_NAMES = {
@@ -172,7 +174,7 @@ class HHMCPToolHandlers:
                 resume_id=str(args.get("resume_id") or ""),
                 run_id=run_id,
                 plan_apply=True,
-                confirm_apply=bool(args.get("confirm_apply")),
+                confirm_apply=is_literal_confirmation(args.get("confirm_apply")),
             )
         raise KeyError(name)
 

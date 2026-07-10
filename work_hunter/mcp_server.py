@@ -10,6 +10,7 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from .hh_agent.mcp_handlers import HHMCPToolHandlers
+from .safety import is_literal_confirmation
 from .services import WorkHunter
 from .sources import PUBLIC_BOARD_SOURCE_NAMES
 
@@ -188,11 +189,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if name == "list_strategies":
             return _json(service.list_strategies())
         if name == "run_strategy":
+            confirm = is_literal_confirmation(args.get("confirm"))
             return _json(
                 service.run_strategy(
                     str(args.get("name") or "active-profile"),
-                    dry_run=not bool(args.get("confirm")),
-                    confirm=bool(args.get("confirm")),
+                    dry_run=not confirm,
+                    confirm=confirm,
                     resume_id=args.get("resume_id"),
                 )
             )

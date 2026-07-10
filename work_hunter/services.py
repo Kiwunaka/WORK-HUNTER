@@ -3250,7 +3250,7 @@ class WorkHunter:
                     resume_id=str(params.get("resume_id") or ""),
                     run_id=run_id,
                     plan_apply=False,
-                    confirm_apply=bool(params.get("confirm_apply", False)),
+                    confirm_apply=is_literal_confirmation(params.get("confirm_apply")),
                     min_score=_optional_int(params.get("min_score")),
                 )
             elif operation == "research-and-apply":
@@ -3260,7 +3260,7 @@ class WorkHunter:
                     resume_id=str(params.get("resume_id") or ""),
                     run_id=run_id,
                     plan_apply=True,
-                    confirm_apply=bool(params.get("confirm_apply", False)),
+                    confirm_apply=is_literal_confirmation(params.get("confirm_apply")),
                     min_score=_optional_int(params.get("min_score")),
                 )
             else:

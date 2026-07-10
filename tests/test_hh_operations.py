@@ -181,6 +181,31 @@ def test_hh_agent_update_resumes_forwards_only_literal_confirmation(
     assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
 
 
+def test_hh_agent_research_forwards_only_literal_confirmation(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_research(self, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(WorkHunter, "run_hh_research_operation", fake_research)
+    app = WorkHunter(tmp_path)
+
+    app.run_hh_agent_operation(
+        "research-vacancies",
+        {"confirm_apply": "false"},
+    )
+    app.run_hh_agent_operation(
+        "research-and-apply",
+        {"confirm_apply": "false"},
+    )
+
+    assert [call["plan_apply"] for call in calls] == [False, True]
+    assert [call["confirm_apply"] for call in calls] == [False, False]
+
+
 def test_hh_call_api_blocks_mutations_without_confirm_and_masks_result(monkeypatch, tmp_path):
     monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
     FakeHHOperationsClient.requests = []

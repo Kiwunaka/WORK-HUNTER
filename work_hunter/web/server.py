@@ -7,7 +7,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 from ..config import mask_secrets
@@ -56,6 +56,7 @@ def make_handler(root: Path):
                 return False
             host_values = self.headers.get_all("Host", [])
             origin_values = self.headers.get_all("Origin", [])
+            boundary_error: tuple[HTTPStatus, str, str] | None
             if len(host_values) != 1:
                 boundary_error = (
                     HTTPStatus.FORBIDDEN,
@@ -69,13 +70,14 @@ def make_handler(root: Path):
                     "Cross-origin requests are blocked.",
                 )
             else:
+                server = cast(ThreadingHTTPServer, self.server)
                 boundary_error = request_boundary_error(
                     method=self.command,
                     host_header=host_values[0],
                     origin_header=origin_values[0] if origin_values else None,
                     content_type=self.headers.get("Content-Type"),
-                    listener_host=str(self.server.server_address[0]),
-                    listener_port=self.server.server_port,
+                    listener_host=str(server.server_address[0]),
+                    listener_port=server.server_port,
                 )
             if boundary_error is None:
                 return True
