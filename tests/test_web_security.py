@@ -618,6 +618,54 @@ def test_masked_config_http_round_trip_never_persists_mask(cockpit, tmp_path):
     assert reloaded.config["sources"]["hh"]["access_token"] == "saved-hh-value"
 
 
+@pytest.mark.parametrize(
+    ("has_stored_value", "stored_value", "submitted_value", "expected_value"),
+    [
+        (
+            False,
+            None,
+            {"access_token": "***", "label": "new-dict"},
+            {"label": "new-dict"},
+        ),
+        (
+            False,
+            None,
+            [{"refresh_token": "", "label": "new-list"}],
+            [{"label": "new-list"}],
+        ),
+        (
+            True,
+            "legacy-scalar",
+            {"client_secret": None, "label": "scalar-to-dict"},
+            {"label": "scalar-to-dict"},
+        ),
+        (
+            True,
+            None,
+            [{"api_key": "***", "label": "null-to-list"}],
+            [{"label": "null-to-list"}],
+        ),
+    ],
+)
+def test_config_service_sanitizes_nested_placeholders_before_save(
+    tmp_path,
+    has_stored_value,
+    stored_value,
+    submitted_value,
+    expected_value,
+):
+    app = WorkHunter(tmp_path)
+    if has_stored_value:
+        app.config["new_plugin"] = stored_value
+    app.save_config(app.config)
+
+    response = app.update_config_from_client({"new_plugin": submitted_value})
+    reloaded = WorkHunter(tmp_path)
+
+    assert response["new_plugin"] == expected_value
+    assert reloaded.config["new_plugin"] == expected_value
+
+
 def test_config_http_update_cannot_clear_secret_via_parent_replacement(
     cockpit,
     tmp_path,
@@ -646,16 +694,30 @@ def test_masked_config_http_round_trip_preserves_secrets_inside_lists(
 ):
     app = WorkHunter(tmp_path)
     app.config["custom"] = [
-        {"access_token": "saved-list-value", "label": "custom-item"}
+        {
+            "access_token": "saved-list-zero",
+            "enabled": False,
+            "label": "old-zero",
+        },
+        {"refresh_token": "saved-list-one", "label": "old-one"},
     ]
     app.save_config(app.config)
     status, _, raw = raw_request(cockpit, "GET", "/api/config", {}, None)
     masked = json.loads(raw)
     assert status == 200
     assert masked["custom"][0]["access_token"] == "***"
+    assert masked["custom"][1]["refresh_token"] == "***"
+    masked["custom"][0].update({"enabled": True, "label": "new-zero"})
+    masked["custom"][1]["label"] = "new-one"
+    masked["custom"].extend(
+        [
+            {"client_secret": "***", "label": "new-placeholder"},
+            {"client_secret": "new-list-secret", "label": "new-configured"},
+        ]
+    )
     host = f"127.0.0.1:{cockpit.server_port}"
 
-    status, _, _ = raw_request(
+    status, _, response_raw = raw_request(
         cockpit,
         "POST",
         "/api/config",
@@ -664,8 +726,32 @@ def test_masked_config_http_round_trip_preserves_secrets_inside_lists(
     )
 
     assert status == 200
+    response = json.loads(response_raw)
+    assert response["custom"][0] == {
+        "access_token": "***",
+        "enabled": True,
+        "label": "new-zero",
+    }
+    assert response["custom"][1] == {
+        "refresh_token": "***",
+        "label": "new-one",
+    }
+    assert response["custom"][2] == {"label": "new-placeholder"}
+    assert response["custom"][3] == {
+        "client_secret": "***",
+        "label": "new-configured",
+    }
     reloaded = WorkHunter(tmp_path)
-    assert reloaded.config["custom"][0]["access_token"] == "saved-list-value"
+    assert reloaded.config["custom"] == [
+        {
+            "access_token": "saved-list-zero",
+            "enabled": True,
+            "label": "new-zero",
+        },
+        {"refresh_token": "saved-list-one", "label": "new-one"},
+        {"label": "new-placeholder"},
+        {"client_secret": "new-list-secret", "label": "new-configured"},
+    ]
 
 
 @pytest.mark.parametrize("confirm", [None, False, "true", 1])

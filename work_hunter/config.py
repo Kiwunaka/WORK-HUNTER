@@ -25,6 +25,7 @@ CONFIG_SECRET_CLEAR_PATHS = frozenset(
 HH_ACCOUNT_SECRET_KEYS = frozenset(
     {"access_token", "refresh_token", "client_secret"}
 )
+_MISSING_CONFIG_VALUE = object()
 
 
 def _default_profile() -> dict[str, Any]:
@@ -210,25 +211,69 @@ def _contains_sensitive_key(value: Any) -> bool:
     return False
 
 
+def _merge_masked_value(
+    stored: Any,
+    submitted: Any,
+    *,
+    sensitive_key: bool = False,
+) -> Any:
+    if sensitive_key:
+        if not isinstance(submitted, str) or submitted == "" or submitted == MASK:
+            if stored is _MISSING_CONFIG_VALUE:
+                return _MISSING_CONFIG_VALUE
+            return copy.deepcopy(stored)
+        return copy.deepcopy(submitted)
+
+    stored_has_secrets = _contains_sensitive_key(stored)
+    same_container_type = (
+        isinstance(stored, dict)
+        and isinstance(submitted, dict)
+        or isinstance(stored, list)
+        and isinstance(submitted, list)
+    )
+    if stored_has_secrets and not same_container_type:
+        return copy.deepcopy(stored)
+
+    if isinstance(submitted, dict):
+        stored_dict = stored if isinstance(stored, dict) else {}
+        merged = copy.deepcopy(stored_dict)
+        for key, value in submitted.items():
+            current = stored_dict.get(key, _MISSING_CONFIG_VALUE)
+            updated = _merge_masked_value(
+                current,
+                value,
+                sensitive_key=is_sensitive_key(key),
+            )
+            if updated is _MISSING_CONFIG_VALUE:
+                merged.pop(key, None)
+            else:
+                merged[key] = updated
+        return merged
+
+    if isinstance(submitted, list):
+        stored_list = stored if isinstance(stored, list) else []
+        merged_list = [
+            _merge_masked_value(
+                stored_list[index]
+                if index < len(stored_list)
+                else _MISSING_CONFIG_VALUE,
+                value,
+            )
+            for index, value in enumerate(submitted)
+        ]
+        stored_tail = stored_list[len(submitted) :]
+        if _contains_sensitive_key(stored_tail):
+            merged_list.extend(copy.deepcopy(stored_tail))
+        return merged_list
+
+    return copy.deepcopy(submitted)
+
+
 def merge_masked_config(
     stored: dict[str, Any],
     submitted: dict[str, Any],
 ) -> dict[str, Any]:
-    merged = copy.deepcopy(stored)
-    for key, value in submitted.items():
-        current = merged.get(key)
-        if is_sensitive_key(key):
-            if not isinstance(value, str) or value == "" or value == MASK:
-                continue
-        if _contains_sensitive_key(current) and not (
-            isinstance(current, dict) and isinstance(value, dict)
-        ):
-            continue
-        if isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = merge_masked_config(current, value)
-        else:
-            merged[key] = copy.deepcopy(value)
-    return merged
+    return _merge_masked_value(stored, submitted)
 
 
 def clear_config_secret_value(
