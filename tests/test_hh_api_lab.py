@@ -15,8 +15,9 @@ from work_hunter.web.server import make_handler
 class FakeHHApiLabClient:
     requests: list[dict] = []
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True

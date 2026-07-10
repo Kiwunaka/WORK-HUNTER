@@ -15,9 +15,10 @@ class FakeHHOperationsClient:
     requests: list[tuple[str, str, object | None, object]] = []
     constructed = 0
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         type(self).constructed += 1
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True

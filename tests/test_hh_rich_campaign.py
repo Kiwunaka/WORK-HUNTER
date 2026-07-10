@@ -9,8 +9,9 @@ from work_hunter.services import WorkHunter
 class FakeHHRichSearchClient:
     search_calls: list[dict] = []
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True

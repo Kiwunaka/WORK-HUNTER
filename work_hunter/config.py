@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -397,9 +399,21 @@ def load_config(path: str | Path) -> dict[str, Any]:
 def save_config(path: str | Path, config: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(config, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(config, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def active_profile(config: dict[str, Any]) -> dict[str, Any]:

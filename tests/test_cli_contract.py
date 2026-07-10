@@ -10,8 +10,9 @@ from work_hunter.services import WorkHunter
 class FakeHHClient:
     apply_calls: list[tuple[str, str, str]] = []
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True
@@ -113,4 +114,3 @@ def test_hh_apply_plan_persists_and_confirm_requires_flag(monkeypatch, tmp_path,
     blocked = json.loads(capsys.readouterr().out)
     assert blocked["status"] == "blocked"
     assert FakeHHClient.apply_calls == []
-

@@ -13,8 +13,9 @@ from work_hunter.web.server import make_handler
 class FakeHHAuthStatusClient:
     whoami_calls = 0
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return bool(self.config.get("access_token"))

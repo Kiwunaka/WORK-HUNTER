@@ -10,8 +10,9 @@ from work_hunter.storage import Storage
 class FakeReplyClient:
     sent: list[tuple[str, str, str | None]] = []
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True

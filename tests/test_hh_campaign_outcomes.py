@@ -7,8 +7,9 @@ from work_hunter.services import WorkHunter
 class FakeHHOutcomeClient:
     apply_result = {"status": "created"}
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True

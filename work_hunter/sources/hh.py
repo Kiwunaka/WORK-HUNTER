@@ -10,6 +10,7 @@ import urllib.parse
 from typing import Any
 
 from ..hh_transport import HHApiSession, HHTransportError
+from ..hh_transport.backends import ConfigBackend
 from ..models import Job
 from .common import USER_AGENT, absolute_url, clean_text, fetch_url
 
@@ -300,10 +301,15 @@ def _clean_process_output(value: bytes) -> str:
 
 
 class HHApplyClient:
-    def __init__(self, config: dict[str, Any]):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        backend: ConfigBackend | None = None,
+    ):
         self.config = config
         self.base_url = str(config.get("api_base_url") or HH_API_BASE).rstrip("/")
-        self.session = HHApiSession(config, base_url=self.base_url)
+        self.session = HHApiSession(config, backend=backend, base_url=self.base_url)
 
     def has_token(self) -> bool:
         return self.session.identity.has_access_token() or bool(self.session.identity.refresh_token)

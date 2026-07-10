@@ -55,6 +55,7 @@ from .hh_agent.resume_templates import (
     draft_hh_resume_payload_from_template,
 )
 from .hh_transport import HHTransportError
+from .hh_transport.backends import CallbackConfigBackend
 from .resume_payloads import load_hh_resume_payload, validate_hh_resume_payload
 from .safety import READ_ONLY_HTTP_METHODS, is_literal_confirmation, require_mutation_confirmation
 from .scoring import score_job
@@ -1134,6 +1135,22 @@ class WorkHunter:
     def hh_config(self) -> dict[str, Any]:
         return active_hh_config(self.config)
 
+    def _persist_hh_identity_patch(self, patch: dict[str, Any]) -> None:
+        active_account = str(self.config.get("hh_account_profile") or "default")
+        accounts = self.config.setdefault("hh_account_profiles", {})
+        account_config = accounts.setdefault(active_account, {})
+        account_config.update(patch)
+        if active_account == "default":
+            sources = self.config.setdefault("sources", {})
+            source_config = sources.setdefault("hh", {})
+            source_config.update(patch)
+        save_config(self.config_path, self.config)
+
+    def _hh_client(self) -> HHApplyClient:
+        config = self.hh_config()
+        backend = CallbackConfigBackend(config, self._persist_hh_identity_patch)
+        return HHApplyClient(config, backend=backend)
+
     def list_hh_account_profiles(self) -> dict[str, Any]:
         accounts = self.config.get("hh_account_profiles") or {}
         items: list[dict[str, Any]] = []
@@ -1361,7 +1378,7 @@ class WorkHunter:
                 letter_body=letter_body,
             )
 
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return self._store_apply_plan(ApplyPlan(
                 job_id=job_id,
@@ -1573,7 +1590,7 @@ class WorkHunter:
                 "plan": plan,
             }
 
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         result = client.apply(job.source_id, selected_resume, str(plan.get("letter") or ""))
         if result.get("status") == "created":
             self.storage.save_application(job_id, "applied", json.dumps(result, ensure_ascii=False))
@@ -1636,7 +1653,7 @@ class WorkHunter:
         *,
         resume_id: str,
     ) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required.", "vacancy_id": vacancy_id}
         vacancy = client.get_vacancy(vacancy_id)
@@ -1695,7 +1712,7 @@ class WorkHunter:
                 "message": "Explicit confirm=True is required before submitting HH test answers.",
                 "plan": plan,
             }
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         result = client.submit_vacancy_test(vacancy_id, resume_id, list(plan["answers"]))
         return {"status": "submitted", "vacancy_id": vacancy_id, "resume_id": resume_id, "result": result}
 
@@ -1849,7 +1866,7 @@ class WorkHunter:
         return clean_text(answer)
 
     def sync_hh_resumes(self) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         count = 0
@@ -1866,7 +1883,7 @@ class WorkHunter:
         return {"status": "ok", "count": count}
 
     def hh_whoami(self) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required."}
         try:
@@ -1894,7 +1911,7 @@ class WorkHunter:
                 "actions": actions,
             }
 
-        client = HHApplyClient(hh_config)
+        client = self._hh_client()
         try:
             me_payload = client.whoami()
             me = me_payload.get("me") if me_payload.get("status") == "ok" else me_payload
@@ -2067,27 +2084,20 @@ class WorkHunter:
         )
 
     def refresh_hh_token(self) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         token = client.refresh_token()
         access_token = str(token.get("access_token") or "")
         refresh_token = str(token.get("refresh_token") or "")
         if not access_token:
             raise RuntimeError("HH refresh response did not include access_token")
-        active_account = str(self.config.get("hh_account_profile") or "default")
-        if active_account == "default":
-            hh_config = self.config["sources"]["hh"]
-        else:
-            accounts = dict(self.config.get("hh_account_profiles") or {})
-            hh_config = dict(accounts.get(active_account) or {})
-            accounts[active_account] = hh_config
-            self.config["hh_account_profiles"] = accounts
-        hh_config["access_token"] = access_token
+        identity_patch = {"access_token": access_token}
         if refresh_token:
-            hh_config["refresh_token"] = refresh_token
+            identity_patch["refresh_token"] = refresh_token
         expires_at = token.get("expires_at") or token.get("access_expires_at") or ""
         if expires_at:
-            hh_config["access_expires_at"] = str(expires_at)
-        save_config(self.config_path, self.config)
+            identity_patch["access_expires_at"] = str(expires_at)
+        self._persist_hh_identity_patch(identity_patch)
+        hh_config = self.hh_config()
         return {
             "status": "ok",
             "access_token": access_token,
@@ -2104,7 +2114,7 @@ class WorkHunter:
         )
         if blocked is not None:
             return blocked
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         updated: list[str] = []
@@ -2145,7 +2155,7 @@ class WorkHunter:
             if validation:
                 result["validation"] = validation
             return result
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             result = {
                 "status": "blocked",
@@ -2225,7 +2235,7 @@ class WorkHunter:
             )
             if blocked is not None:
                 return blocked
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required.", "resume_id": resume_id}
         payload = _clone_resume_payload(client.get_resume(resume_id), title=title)
@@ -2237,7 +2247,7 @@ class WorkHunter:
         )
 
     def sync_hh_negotiations(self, *, status: str = "active") -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         count = 0
@@ -2395,7 +2405,7 @@ class WorkHunter:
         dry_run: bool = True,
         confirm: bool = False,
     ) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         if not template.strip():
@@ -2469,7 +2479,7 @@ class WorkHunter:
         negotiation_id = negotiation_id.strip()
         if not negotiation_id:
             raise ValueError("Negotiation id is required")
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required."}
         negotiation: dict[str, Any] | None = None
@@ -2524,7 +2534,7 @@ class WorkHunter:
                 "preview": (item.payload.get("reply") or {}).get("message", ""),
             }
         reply = item.payload.get("reply") or {}
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required.", "plan_id": plan_id}
         try:
@@ -2548,7 +2558,7 @@ class WorkHunter:
         max_age_days: int | None = None,
         now: str | None = None,
     ) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         now_dt = _parse_hh_datetime(now or "") or datetime.now().astimezone()
@@ -2611,7 +2621,7 @@ class WorkHunter:
                 "message": "Explicit confirmation is required before cleaning HH negotiations.",
                 "plan": plan,
             }
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         completed: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
         for action in plan["actions"]:
@@ -2722,7 +2732,7 @@ class WorkHunter:
             )
             if blocked is not None:
                 return blocked
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "message": "HH access token is required.", **safe_input}
         run_id = self.storage.start_hh_agent_mcp_run("hh_api_call", safe_input)
@@ -2810,7 +2820,7 @@ class WorkHunter:
         status: str = "active",
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             raise RuntimeError("HH access token is required to scan negotiation messages.")
         messages: list[dict[str, Any]] = []
@@ -3144,7 +3154,7 @@ class WorkHunter:
         }
 
     def _hh_research_client(self) -> Any:
-        return HHApplyClient(self.hh_config())
+        return self._hh_client()
 
     def _build_hh_research_service(
         self,
@@ -3443,7 +3453,7 @@ class WorkHunter:
             )
             if blocked is not None:
                 return blocked
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {
                 "status": "blocked",
@@ -3779,7 +3789,7 @@ class WorkHunter:
         premium: bool = False,
     ) -> dict[str, Any]:
         hh_config = self.hh_config()
-        client = HHApplyClient(hh_config)
+        client = self._hh_client()
         if not client.has_token():
             if hh_config.get("web_fallback", True):
                 return self._search_hh_vacancies_web_fallback(
@@ -3951,7 +3961,7 @@ class WorkHunter:
         ai_filter_mode: str = "off",
         resume_id: str | None = None,
     ) -> dict[str, Any]:
-        client = HHApplyClient(self.hh_config())
+        client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         search_params = _compact_hh_search_params(

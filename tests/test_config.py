@@ -1,3 +1,7 @@
+import json
+import os
+from pathlib import Path
+
 import pytest
 
 import work_hunter.config as config_module
@@ -15,6 +19,35 @@ def test_save_and_load_config(tmp_path):
     profile = active_profile(loaded)
     assert profile["queries"] == ["python backend"]
     assert loaded["sources"]["hh"]["enabled"] is True
+
+
+def test_save_config_replaces_complete_temp_file(monkeypatch, tmp_path):
+    path = tmp_path / "nested" / "config.json"
+    config = {"profile": "тест", "nested": {"enabled": True}}
+    replacements: list[dict[str, object]] = []
+    original_replace = os.replace
+
+    def inspect_replace(source, destination):
+        temporary = Path(source)
+        replacements.append(
+            {
+                "source": temporary,
+                "destination": Path(destination),
+                "payload": json.loads(temporary.read_text(encoding="utf-8")),
+            }
+        )
+        original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", inspect_replace)
+
+    save_config(path, config)
+
+    assert len(replacements) == 1
+    assert replacements[0]["source"].parent == path.parent
+    assert replacements[0]["source"] != path
+    assert replacements[0]["destination"] == path
+    assert replacements[0]["payload"] == config
+    assert json.loads(path.read_text(encoding="utf-8")) == config
 
 
 def test_mask_secrets():

@@ -13,9 +13,10 @@ class FakeSchedulerHHClient:
     constructed = 0
     updated_resumes: list[str] = []
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         type(self).constructed += 1
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return bool(self.config.get("access_token"))
