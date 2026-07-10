@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import copy
+import errno
+import importlib
 import json
 import os
 import shutil
 import tempfile
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .sources.public_boards import PUBLIC_BOARD_SOURCE_NAMES, public_board_default_config
 
@@ -31,6 +35,7 @@ HH_ACCOUNT_SECRET_KEYS = frozenset(
 )
 _MISSING_CONFIG_VALUE = object()
 _CONFIG_WRITE_LOCK = threading.RLock()
+_CONFIG_LOCK_STATE = threading.local()
 
 
 def _default_profile() -> dict[str, Any]:
@@ -400,8 +405,10 @@ def load_config(path: str | Path) -> dict[str, Any]:
 
 
 def save_config(path: str | Path, config: dict[str, Any]) -> None:
+    path = Path(path)
     with _CONFIG_WRITE_LOCK:
-        _save_config(path, config)
+        with _config_file_lock(path):
+            _save_config(path, config)
 
 
 def _save_config(path: str | Path, config: dict[str, Any]) -> None:
@@ -448,6 +455,84 @@ def _fsync_directory(directory: str | Path) -> None:
         os.close(directory_fd)
 
 
+def _config_lock_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.lock")
+
+
+def _lock_config_fd(fd: int) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        _lock_windows_config_fd(fd)
+        return
+    fcntl = importlib.import_module("fcntl")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _lock_windows_config_fd(fd: int) -> None:
+    msvcrt = importlib.import_module("msvcrt")
+    contention_errnos = {
+        errno.EACCES,
+        errno.EAGAIN,
+        getattr(errno, "EDEADLK", errno.EACCES),
+        getattr(errno, "EDEADLOCK", errno.EACCES),
+    }
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in contention_errnos:
+                raise
+            time.sleep(0.05)
+
+
+def _unlock_config_fd(fd: int) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    fcntl = importlib.import_module("fcntl")
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _config_file_lock(path: Path) -> Iterator[None]:
+    lock_path = _config_lock_path(path.resolve(strict=False))
+    lock_key = os.path.normcase(str(lock_path))
+    process_id = os.getpid()
+    if getattr(_CONFIG_LOCK_STATE, "process_id", None) != process_id:
+        _CONFIG_LOCK_STATE.process_id = process_id
+        _CONFIG_LOCK_STATE.depths = {}
+    depths: dict[str, int] = _CONFIG_LOCK_STATE.depths
+    depth = depths.get(lock_key, 0)
+    if depth:
+        depths[lock_key] = depth + 1
+        try:
+            yield
+        finally:
+            depths[lock_key] -= 1
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
+    try:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        _lock_config_fd(fd)
+        locked = True
+        depths[lock_key] = 1
+        yield
+    finally:
+        try:
+            depths.pop(lock_key, None)
+            if locked:
+                _unlock_config_fd(fd)
+        finally:
+            os.close(fd)
+
+
 def update_config(
     path: str | Path,
     update: Callable[[dict[str, Any]], None],
@@ -456,13 +541,14 @@ def update_config(
 ) -> dict[str, Any]:
     path = Path(path)
     with _CONFIG_WRITE_LOCK:
-        if path.exists():
-            config = load_config(path)
-        else:
-            config = copy.deepcopy(fallback or default_config())
-        update(config)
-        _save_config(path, config)
-        return config
+        with _config_file_lock(path):
+            if path.exists():
+                config = load_config(path)
+            else:
+                config = copy.deepcopy(fallback or default_config())
+            update(config)
+            _save_config(path, config)
+            return config
 
 
 def active_profile(config: dict[str, Any]) -> dict[str, Any]:

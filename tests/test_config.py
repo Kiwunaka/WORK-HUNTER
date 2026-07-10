@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import shutil
@@ -101,6 +102,10 @@ def test_save_config_serialization_failure_preserves_old_file_and_cleans_temp(tm
     assert path.read_text(encoding="utf-8") == '{"version": "old"}\n'
     assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []
 
+    save_config(path, {"version": "after-error"})
+
+    assert load_config(path)["version"] == "after-error"
+
 
 def test_save_config_fsyncs_parent_directory_after_replace(monkeypatch, tmp_path):
     path = tmp_path / "nested" / "config.json"
@@ -149,6 +154,34 @@ def test_fsync_directory_ignores_unsupported_platform(monkeypatch, tmp_path):
     )
 
     sync_directory(tmp_path)
+
+
+def test_windows_config_lock_retries_until_contention_clears(monkeypatch):
+    lock_windows = getattr(config_module, "_lock_windows_config_fd", None)
+    assert callable(lock_windows)
+    attempts: list[tuple[int, int, int]] = []
+    sleeps: list[float] = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+
+        @staticmethod
+        def locking(fd, mode, length):
+            attempts.append((fd, mode, length))
+            if len(attempts) < 3:
+                raise OSError(errno.EACCES, "locked")
+
+    monkeypatch.setattr(
+        config_module.importlib,
+        "import_module",
+        lambda name: FakeMsvcrt,
+    )
+    monkeypatch.setattr(config_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    lock_windows(91)
+
+    assert attempts == [(91, FakeMsvcrt.LK_NBLCK, 1)] * 3
+    assert sleeps == [0.05, 0.05]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not portable to Windows")
