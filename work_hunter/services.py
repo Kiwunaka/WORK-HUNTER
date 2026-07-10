@@ -773,6 +773,10 @@ class WorkHunter:
         self._config_aliases: list[dict[str, Any]] = []
         self.storage = Storage(database_path(self.root))
 
+    def active_profile_id(self) -> str:
+        selected = self.config.get("profile", "default")
+        return selected if isinstance(selected, str) and selected else "default"
+
     def init(self, *, overwrite: bool = False) -> Path:
         if overwrite or not self.config_path.exists():
             self._replace_config(self.config)
@@ -1060,11 +1064,13 @@ class WorkHunter:
         return result
 
     def score_jobs(self, *, limit: int = 10000) -> int:
-        jobs = self.storage.list_jobs(limit=limit)
+        profile_id = self.active_profile_id()
+        jobs = self.storage.list_jobs(limit=limit, profile_id=profile_id)
         count = 0
         for job in jobs:
             score = score_job(job, active_profile(self.config))
             score.job_id = job.id
+            score.profile_id = profile_id
             self.storage.save_score(score)
             count += 1
         return count
@@ -1112,10 +1118,11 @@ class WorkHunter:
             status=status,
             source=source,
             min_score=min_score,
+            profile_id=self.active_profile_id(),
         )
 
     def get_job(self, job_id: int) -> Job | None:
-        return self.storage.get_job(job_id)
+        return self.storage.get_job(job_id, profile_id=self.active_profile_id())
 
     def prepare_letter(self, job_id: int) -> LetterDraft:
         job = self.storage.get_job(job_id)
@@ -4715,7 +4722,7 @@ class WorkHunter:
         return [job.to_dict() for job in jobs]
 
     def export_jobs(self, status: str | None = None, source: str | None = None, format: str = "json") -> str:
-        jobs = self.storage.list_jobs(limit=100000, status=status, source=source)
+        jobs = self.list_jobs(limit=100000, status=status, source=source)
         if format == "csv":
             buf = io.StringIO()
             writer = csv.writer(buf)

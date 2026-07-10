@@ -405,7 +405,7 @@ def make_handler(root: Path):
                 return
             if path == "/api/stats":
                 app = WorkHunter(root)
-                jobs = app.storage.list_jobs(limit=1000000)
+                jobs = app.list_jobs(limit=1000000)
                 stats = _compute_stats(jobs, app.storage)
                 self._send_json(stats)
                 return

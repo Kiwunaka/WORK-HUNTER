@@ -787,7 +787,7 @@ class Storage:
             count += 1
         return count
 
-    def get_job(self, job_id: int) -> Job | None:
+    def get_job(self, job_id: int, profile_id: str = "default") -> Job | None:
         row = self.conn.execute(
             "SELECT * FROM jobs WHERE id = ?",
             (job_id,),
@@ -795,7 +795,7 @@ class Storage:
         if row is None:
             return None
         job = self._job_from_row(row)
-        job.score = self.get_score(job_id)
+        job.score = self.get_score(job_id, profile_id)
         return job
 
     def list_jobs(
@@ -805,6 +805,7 @@ class Storage:
         status: str | None = None,
         source: str | None = None,
         min_score: int | None = None,
+        profile_id: str = "default",
     ) -> list[Job]:
         conditions: list[str] = []
         params: list[Any] = []
@@ -823,17 +824,17 @@ class Storage:
             SELECT j.*
             FROM jobs j
             LEFT JOIN job_scores s
-                ON s.job_id = j.id AND s.profile_id = 'default'
+                ON s.job_id = j.id AND s.profile_id = ?
             {where}
             ORDER BY COALESCE(s.total_score, -1) DESC, j.fetched_at DESC
             LIMIT ?
             """,
-            (*params, limit),
+            (profile_id, *params, limit),
         ).fetchall()
         jobs = [self._job_from_row(row) for row in rows]
         for job in jobs:
             if job.id is not None:
-                job.score = self.get_score(job.id)
+                job.score = self.get_score(job.id, profile_id)
         return jobs
 
     def save_score(self, score: JobScore) -> None:
