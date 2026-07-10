@@ -257,6 +257,62 @@ def test_dynamic_busy_button_restores_label_on_success_and_error(browser_app):
     expect(button).to_have_text(original)
 
 
+def test_overlapping_busy_owners_require_matching_releases_and_restore_empty_label(
+    browser_app,
+):
+    page, base_url, _ = browser_app
+    page.goto(base_url, wait_until="networkidle")
+
+    states = page.evaluate(
+        """
+        async () => {
+          const button = document.createElement("button");
+          button.textContent = "";
+          document.body.appendChild(button);
+          const snapshot = () => ({ disabled: button.disabled, label: button.textContent });
+          const releases = [];
+          const run = (label) => {
+            setBusy(button, true, label);
+            return new Promise((resolve) => releases.push(resolve))
+              .finally(() => setBusy(button, false));
+          };
+
+          const first = run("Первый");
+          const second = run("Второй");
+          const afterTwoStarts = snapshot();
+          releases[0]();
+          await first;
+          const afterOneFinish = snapshot();
+          releases[1]();
+          await second;
+          const afterTwoFinishes = snapshot();
+          setBusy(button, false);
+          setBusy(button, true, "Новый");
+          const afterRestart = snapshot();
+          setBusy(button, false);
+          const afterRestartFinish = snapshot();
+          button.remove();
+
+          return {
+            afterTwoStarts,
+            afterOneFinish,
+            afterTwoFinishes,
+            afterRestart,
+            afterRestartFinish,
+          };
+        }
+        """
+    )
+
+    assert states == {
+        "afterTwoStarts": {"disabled": True, "label": "Второй"},
+        "afterOneFinish": {"disabled": True, "label": "Второй"},
+        "afterTwoFinishes": {"disabled": False, "label": ""},
+        "afterRestart": {"disabled": True, "label": "Новый"},
+        "afterRestartFinish": {"disabled": False, "label": ""},
+    }
+
+
 def test_initial_source_failure_does_not_abort_jobs(browser_app):
     page, base_url, app = browser_app
     app.storage.upsert_job(
@@ -313,6 +369,51 @@ def test_initial_jobs_loading_exposes_and_restores_busy_state(browser_app):
     finally:
         page.evaluate("window.__releaseJobs()")
     expect(page.locator("#jobs-body")).to_contain_text("Browser Fixture Job")
+    expect(job_list).to_have_attribute("aria-busy", "false")
+    expect(page.locator("#jobs-skeleton")).to_be_hidden()
+
+
+def test_overlapping_jobs_loads_stay_busy_until_every_request_settles(browser_app):
+    page, base_url, _ = browser_app
+    page.add_init_script(
+        """
+        const nativeFetch = window.fetch.bind(window);
+        window.__jobLoadReleases = [];
+        window.fetch = (...args) => {
+          const requestUrl = String(args[0] instanceof Request ? args[0].url : args[0]);
+          if (!requestUrl.includes("/api/jobs?")) return nativeFetch(...args);
+          const gate = new Promise((resolve) => window.__jobLoadReleases.push(resolve));
+          return gate.then(() => nativeFetch(...args));
+        };
+        """
+    )
+    page.goto(base_url, wait_until="domcontentloaded")
+    page.wait_for_function("window.__jobLoadReleases.length === 1")
+    job_list = page.locator("#jobs-body").locator("xpath=ancestor::section[1]")
+    expect(job_list).to_have_attribute("aria-busy", "true")
+    expect(page.locator("#jobs-skeleton")).to_be_visible()
+
+    try:
+        page.locator("#refresh-button").click()
+        page.wait_for_function("window.__jobLoadReleases.length === 2")
+        page.evaluate("window.__jobLoadReleases[0]()")
+        expect(page.locator("#jobs-body")).to_contain_text("Browser Fixture Job")
+        expect(job_list).to_have_attribute("aria-busy", "true")
+        expect(page.locator("#jobs-skeleton")).to_be_visible()
+    finally:
+        page.evaluate("window.__jobLoadReleases.forEach((release) => release())")
+
+    expect(job_list).to_have_attribute("aria-busy", "false")
+    expect(page.locator("#jobs-skeleton")).to_be_hidden()
+    page.evaluate(
+        """
+        setSectionLoading("jobs", false);
+        setSectionLoading("jobs", true);
+        """
+    )
+    expect(job_list).to_have_attribute("aria-busy", "true")
+    expect(page.locator("#jobs-skeleton")).to_be_visible()
+    page.evaluate("setSectionLoading('jobs', false)")
     expect(job_list).to_have_attribute("aria-busy", "false")
     expect(page.locator("#jobs-skeleton")).to_be_hidden()
 

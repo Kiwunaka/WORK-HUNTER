@@ -65,12 +65,23 @@ function requirePositiveInteger(value, label) {
   return parsed;
 }
 
+const sectionLoadingCounts = new WeakMap();
+
 function setSectionLoading(name, busy) {
   const section = document.querySelector(`[data-load-section="${name}"]`);
-  if (section) section.setAttribute("aria-busy", String(busy));
+  if (!section) return;
+  const activeCount = sectionLoadingCounts.get(section) || 0;
+  const nextCount = busy ? activeCount + 1 : Math.max(0, activeCount - 1);
+  if (nextCount > 0) {
+    sectionLoadingCounts.set(section, nextCount);
+  } else {
+    sectionLoadingCounts.delete(section);
+  }
+  const isBusy = nextCount > 0;
+  section.setAttribute("aria-busy", String(isBusy));
   if (name === "jobs") {
     const skeleton = $("#jobs-skeleton");
-    if (skeleton) skeleton.style.display = busy ? "block" : "none";
+    if (skeleton) skeleton.style.display = isBusy ? "block" : "none";
   }
 }
 
@@ -575,19 +586,31 @@ async function runIsolatedLoad(name, loader) {
   }
 }
 
-const busyButtonLabels = new WeakMap();
+const busyButtonStates = new WeakMap();
 
 function setBusy(target, busy, busyLabel = "Работаю...") {
   const button = typeof target === "string" ? document.querySelector(target) : target;
   if (!button) return;
   if (busy) {
-    if (!busyButtonLabels.has(button)) busyButtonLabels.set(button, button.textContent);
+    const state = busyButtonStates.get(button);
+    if (state) {
+      state.activeCount += 1;
+    } else {
+      busyButtonStates.set(button, {
+        activeCount: 1,
+        originalLabel: button.textContent,
+      });
+    }
     button.disabled = true;
     button.textContent = busyLabel;
   } else {
+    const state = busyButtonStates.get(button);
+    if (!state) return;
+    state.activeCount -= 1;
+    if (state.activeCount > 0) return;
     button.disabled = false;
-    button.textContent = busyButtonLabels.get(button) || button.textContent;
-    busyButtonLabels.delete(button);
+    button.textContent = state.originalLabel;
+    busyButtonStates.delete(button);
   }
 }
 
