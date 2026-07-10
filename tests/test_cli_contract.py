@@ -54,6 +54,8 @@ def test_doctor_and_nested_status_cli_are_json(tmp_path, capsys):
     doctor = json.loads(capsys.readouterr().out)
     assert doctor["core"]["database"]["status"] == "ok"
     assert doctor["hh_api"]["status"] == "missing_access_token"
+    assert "config_missing" in doctor["warnings"]
+    assert doctor["next_actions"][0] == "work-hunter init"
 
     cli_main(["--root", str(tmp_path), "hh", "auth", "status"])
     status = json.loads(capsys.readouterr().out)

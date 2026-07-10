@@ -2,6 +2,7 @@
 
 import copy
 import csv
+import importlib.metadata
 import importlib.util
 import io
 import json
@@ -17,6 +18,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Callable
 
+from . import __version__
 from .config import (
     active_hh_config,
     active_profile,
@@ -82,7 +84,50 @@ from .sources.common import canonicalize_job_url, clean_text, fetch_url
 from .storage import Storage
 
 
+PACKAGE_ROOT = Path(__file__).resolve().parent
 _HH_IDENTITY_WRITE_LOCK = threading.RLock()
+
+
+def _package_details(package_root: Path | None = None) -> dict[str, Any]:
+    package_root = package_root or PACKAGE_ROOT
+    version = __version__
+    install_mode = "source"
+    try:
+        distribution = importlib.metadata.distribution("work-hunter")
+        direct_url_text = distribution.read_text("direct_url.json") or ""
+        if direct_url_text:
+            direct_url = json.loads(direct_url_text)
+            directory_info = direct_url.get("dir_info") if isinstance(direct_url, dict) else None
+            if isinstance(directory_info, dict) and bool(directory_info.get("editable")):
+                install_mode = "editable"
+            else:
+                install_mode = "wheel"
+                version = distribution.version
+        else:
+            install_mode = "wheel"
+            version = distribution.version
+    except (importlib.metadata.PackageNotFoundError, json.JSONDecodeError):
+        pass
+
+    static_required = ("index.html", "app.js", "app.css", "manifest.json", "sw.js")
+    static_dir = package_root / "web" / "static"
+    missing_static = [name for name in static_required if not (static_dir / name).is_file()]
+    migrations_dir = package_root / "migrations"
+    migrations = sorted(path.name for path in migrations_dir.glob("*.sql"))
+    return {
+        "status": "ok" if not missing_static and migrations else "error",
+        "version": version,
+        "install_mode": install_mode,
+        "editable": install_mode == "editable",
+        "static": {
+            "status": "ok" if not missing_static else "missing",
+            "missing": missing_static,
+        },
+        "migrations": {
+            "status": "ok" if migrations else "missing",
+            "files": migrations,
+        },
+    }
 
 
 def _reset_hh_identity_lock_after_fork() -> None:
@@ -785,6 +830,7 @@ class WorkHunter:
     def doctor(self) -> dict[str, Any]:
         config_exists = self.config_path.exists()
         db_path = database_path(self.root)
+        package = _package_details()
         profile_info = self.active_profile_info()
         profile_data = profile_info["data"] if isinstance(profile_info.get("data"), dict) else {}
         hh_api = self.hh_auth_status()
@@ -838,12 +884,22 @@ class WorkHunter:
             blocked.append("missing_core_dependencies")
         if db_status != "ok":
             blocked.append("database_unavailable")
+        if package["static"]["status"] != "ok":
+            blocked.append("missing_ui_static")
+        if package["migrations"]["status"] != "ok":
+            blocked.append("missing_migrations")
+        if not config_exists:
+            warnings.append("config_missing")
         if hh_api.get("status") != "ok":
             warnings.append("hh_api_not_ready")
         if hh_web.get("status") not in {"ok", "configured", "not_configured"}:
             warnings.append("hh_web_not_ready")
         if ui_host not in {"127.0.0.1", "localhost", "::1"}:
             warnings.append("ui_host_not_local")
+
+        next_actions = self._doctor_next_actions(hh_api, hh_web, missing_deps)
+        if not config_exists:
+            next_actions.insert(0, "work-hunter init")
 
         return {
             "status": "ok" if not blocked else "blocked",
@@ -852,7 +908,7 @@ class WorkHunter:
                     "status": "ok" if sys.version_info >= (3, 11) else "blocked",
                     "version": sys.version.split()[0],
                 },
-                "package": {"status": "ok", "editable": True},
+                "package": package,
                 "dependencies": {
                     "status": "ok" if not missing_deps else "missing",
                     "missing": missing_deps,
@@ -889,7 +945,7 @@ class WorkHunter:
             "recommended_mode": "api_first" if hh_api.get("status") == "ok" else "configure_hh_api",
             "blocked": blocked,
             "warnings": warnings,
-            "next_actions": self._doctor_next_actions(hh_api, hh_web, missing_deps),
+            "next_actions": next_actions,
         }
 
     def _doctor_next_actions(

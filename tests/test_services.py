@@ -7,6 +7,30 @@ from work_hunter.services import WorkHunter
 from work_hunter.sources import PUBLIC_BOARD_SOURCE_NAMES
 
 
+def test_doctor_reports_version_install_mode_and_runtime_resources(tmp_path):
+    doctor = WorkHunter(tmp_path).doctor()
+
+    package = doctor["core"]["package"]
+    assert package["version"] == "1.0.0"
+    assert package["install_mode"] in {"editable", "wheel", "source"}
+    assert package["static"]["status"] == "ok"
+    assert package["migrations"]["status"] == "ok"
+    assert "config_missing" in doctor["warnings"]
+    assert doctor["next_actions"][0] == "work-hunter init"
+
+
+def test_doctor_blocks_when_package_resources_are_missing(monkeypatch, tmp_path):
+    empty_package = tmp_path / "empty-package"
+    empty_package.mkdir()
+    monkeypatch.setattr("work_hunter.services.PACKAGE_ROOT", empty_package)
+
+    doctor = WorkHunter(tmp_path / "runtime").doctor()
+
+    assert doctor["status"] == "blocked"
+    assert "missing_ui_static" in doctor["blocked"]
+    assert "missing_migrations" in doctor["blocked"]
+
+
 def _use_python_profile(app: WorkHunter) -> None:
     app.config["profiles"]["python"] = {
         "queries": ["python"],
