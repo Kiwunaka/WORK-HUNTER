@@ -11,6 +11,8 @@ from .backends import ConfigBackend, DictConfigBackend
 from .errors import (
     HHAuthError,
     HHForbiddenError,
+    HHNetworkError,
+    HHParseError,
     HHRateLimitError,
     HHTransportError,
     HHValidationError,
@@ -189,7 +191,7 @@ def _network_error(
     exc: requests.RequestException,
 ) -> HHTransportError:
     safe_path = urllib.parse.urlsplit(path).path or "/"
-    return HHTransportError(
+    return HHNetworkError(
         f"{method.upper()} {safe_path} failed: {type(exc).__name__}",
         code="network_error",
         payload={"method": method.upper(), "path": safe_path},
@@ -197,7 +199,7 @@ def _network_error(
 
 
 def _parse_error(response: Any, exc: ValueError) -> HHTransportError:
-    return HHTransportError(
+    return HHParseError(
         f"HH API response contained invalid JSON: {type(exc).__name__}",
         status_code=response.status_code,
         code="parse_error",

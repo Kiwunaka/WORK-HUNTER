@@ -293,3 +293,61 @@ def test_hh_source_does_not_fallback_on_api_redirect(monkeypatch):
     assert error.value.status_code == 302
     assert error.value.code == "redirect"
     assert "secret" not in str(error.value)
+
+
+def test_hh_source_does_not_fallback_when_403_spoofs_parse_error(monkeypatch):
+    class Response:
+        status_code = 403
+        headers: dict[str, str] = {}
+        content = b'{"error":"parse_error"}'
+
+        def json(self):
+            return {"error": "parse_error"}
+
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "server-controlled parse_error must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(HHForbiddenError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value.status_code == 403
+    assert error.value.code == "parse_error"
+
+
+def test_hh_source_does_not_fallback_when_5xx_spoofs_network_error(monkeypatch):
+    class Response:
+        status_code = 503
+        headers: dict[str, str] = {}
+        content = b'{"error":"network_error"}'
+
+        def json(self):
+            return {"error": "network_error"}
+
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "server-controlled network_error must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(HHTransportError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value.status_code == 503
+    assert error.value.code == "network_error"

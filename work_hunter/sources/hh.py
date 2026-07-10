@@ -9,8 +9,9 @@ import subprocess
 import urllib.parse
 from typing import Any
 
-from ..hh_transport import HHApiSession, HHTransportError
+from ..hh_transport import HHApiSession
 from ..hh_transport.backends import ConfigBackend
+from ..hh_transport.errors import HHNetworkError, HHParseError
 from ..models import Job
 from .common import USER_AGENT, absolute_url, clean_text, fetch_url
 
@@ -34,12 +35,7 @@ class HHSource:
         if self._api_ready():
             try:
                 return self._collect_api(profile, limit)
-            except HHTransportError as exc:
-                if exc.code not in {"network_error", "parse_error"}:
-                    raise
-                if not self.config.get("web_fallback", True):
-                    raise
-            except json.JSONDecodeError:
+            except (HHNetworkError, HHParseError, json.JSONDecodeError):
                 if not self.config.get("web_fallback", True):
                     raise
         return self._collect_web(profile, limit)

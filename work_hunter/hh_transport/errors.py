@@ -18,6 +18,14 @@ class HHTransportError(RuntimeError):
         self.payload = payload or {}
 
 
+class HHNetworkError(HHTransportError):
+    pass
+
+
+class HHParseError(HHTransportError):
+    pass
+
+
 class HHAuthError(HHTransportError):
     pass
 
