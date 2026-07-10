@@ -591,6 +591,21 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _strict_non_negative_int(value: Any, *, field: str) -> int:
+    message = f"{field} must be a non-negative integer"
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(message)
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if parsed < 0:
+        raise ValueError(message)
+    return parsed
+
+
 def _parse_bool(value: Any) -> bool | None:
     if value in (None, ""):
         return None
@@ -2370,12 +2385,13 @@ class WorkHunter:
                 "code": "unsupported_search_url",
                 "message": "Only hh.ru search URLs are supported.",
             }
+        salary = int(salary_values[0] or 0) or None if salary_values else None
         return self.search_hh_vacancies(
             text=(params.get("text") or [""])[0] or None,
             area=params.get("area") or None,
             professional_role=params.get("professional_role") or None,
             industry=params.get("industry") or None,
-            salary=_optional_int(salary_values[0] if salary_values else None),
+            salary=salary,
             schedule=(params.get("schedule") or [""])[0] or None,
             experience=(params.get("experience") or [""])[0] or None,
             employment=params.get("employment") or None,
@@ -3541,9 +3557,11 @@ class WorkHunter:
             elif operation == "sync-negotiations":
                 result = self.sync_hh_negotiations(status=str(params.get("status") or "active"))
             elif operation == "scan-events":
+                limit_value = params.get("limit")
+                scan_limit = None if limit_value is None else int(limit_value)
                 result = self.scan_hh_agent_events(
                     status=str(params.get("status") or "active"),
-                    limit=_optional_int(params.get("limit")),
+                    limit=scan_limit,
                 )
             elif operation == "refresh-token":
                 result = refresh_result = self.refresh_hh_token()
@@ -3958,7 +3976,7 @@ class WorkHunter:
                 break
             if not isinstance(query, dict):
                 query = {"text": str(query)}
-            result = self.search_hh_vacancies(
+            query_result = self.search_hh_vacancies(
                 text=str(query.get("text") or ""),
                 area=_string_list(query.get("area") or query.get("areas")),
                 professional_role=_string_list(query.get("professional_role")),
@@ -3969,11 +3987,14 @@ class WorkHunter:
                 employment=_string_list(query.get("employment")),
                 limit=remaining,
             )
-            query_results.append(result)
-            count = _optional_int(result.get("count")) or 0
+            query_results.append(query_result)
+            count = _strict_non_negative_int(
+                query_result.get("count"),
+                field="Search result count",
+            )
             imported_total += count
             remaining -= count
-            if result.get("status") not in {"ok", "blocked"} and count == 0:
+            if query_result.get("status") not in {"ok", "blocked"} and count == 0:
                 break
         if imported_total == 0 and query_results and any(item.get("status") != "ok" for item in query_results):
             result = {
