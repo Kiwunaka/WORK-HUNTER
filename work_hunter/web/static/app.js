@@ -181,18 +181,18 @@ function renderDetail(job) {
     <h2>${escapeHtml(job.title)}</h2>
     <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(safeExternalUrl(job.url))}" target="_blank" rel="noreferrer">открыть</a></p>
     <div class="detail-actions">
-      <button onclick="markSelected('saved')">Сохранить</button>
-      <button onclick="markSelected('hidden')">Скрыть</button>
-      <button onclick="markSelected('applied')">Откликнулся</button>
-      <button onclick="prepareLetter()">Подготовить письмо</button>
-      <button onclick="prepareLetterAi()">AI письмо</button>
-      <button onclick="fetchFullDescription()">Полное описание</button>
-      <button onclick="applyHh(true)">HH apply plan</button>
-      <button onclick="applyHh(false)" class="primary">Confirm HH apply</button>
-      <button onclick="shareToTelegram()">📤 Telegram</button>
-      <button onclick="smartClassify()">AI классификация</button>
-      <button onclick="parseJobStructure()">Структура</button>
-      <button onclick="runGapAnalysis()">Gap-анализ</button>
+      <button data-ui-action="mark-selected" data-status="saved">Сохранить</button>
+      <button data-ui-action="mark-selected" data-status="hidden">Скрыть</button>
+      <button data-ui-action="mark-selected" data-status="applied">Откликнулся</button>
+      <button data-ui-action="prepare-letter">Подготовить письмо</button>
+      <button data-ui-action="prepare-letter-ai">AI письмо</button>
+      <button data-ui-action="fetch-full-description">Полное описание</button>
+      <button data-ui-action="apply-hh" data-dry-run="true">HH apply plan</button>
+      <button data-ui-action="apply-hh" data-dry-run="false" class="primary">Confirm HH apply</button>
+      <button data-ui-action="share-to-telegram">📤 Telegram</button>
+      <button data-ui-action="smart-classify">AI классификация</button>
+      <button data-ui-action="parse-job-structure">Структура</button>
+      <button data-ui-action="run-gap-analysis">Gap-анализ</button>
     </div>
     <div class="section-title">Score</div>
     <div class="chips">
@@ -273,14 +273,14 @@ async function prepareLetter() {
 
 async function prepareLetterAi() {
   if (!state.selectedId) return;
-  setBusy("[onclick='prepareLetterAi()']", true);
+  setBusy('[data-ui-action="prepare-letter-ai"]', true);
   try {
     const draft = await api(`/api/jobs/${state.selectedId}/letter-ai`, { method: "POST", body: "{}" });
     setLetterValue(draft.body);
   } catch (err) {
     $("#action-output").textContent = `Ошибка AI: ${err.message}. Проверь API-ключ в настройках.`;
   } finally {
-    setBusy("[onclick='prepareLetterAi()']", false);
+    setBusy('[data-ui-action="prepare-letter-ai"]', false);
   }
 }
 
@@ -710,27 +710,27 @@ function loadTheme() {
 
 async function getResumeTips() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getResumeTips()']", true);
+  setBusy('[data-ui-action="get-resume-tips"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/resume-tips`, { method: "POST", body: "{}" });
     $("#resume-tips-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#resume-tips-output").textContent = `Ошибка: ${err.message}`;
   } finally {
-    setBusy("[onclick='getResumeTips()']", false);
+    setBusy('[data-ui-action="get-resume-tips"]', false);
   }
 }
 
 async function getAtsResume() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getAtsResume()']", true);
+  setBusy('[data-ui-action="get-ats-resume"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/ats-resume`, { method: "POST", body: "{}" });
     $("#ats-resume-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#ats-resume-output").textContent = `Ошибка: ${err.message}`;
   } finally {
-    setBusy("[onclick='getAtsResume()']", false);
+    setBusy('[data-ui-action="get-ats-resume"]', false);
   }
 }
 
@@ -738,33 +738,33 @@ async function getAtsAudit() {
   if (!state.selectedId) return;
   const text = $("#audit-resume-input").value.trim();
   if (!text) { $("#ats-audit-output").textContent = "Вставь текст резюме выше"; return; }
-  setBusy("[onclick='getAtsAudit()']", true);
+  setBusy('[data-ui-action="get-ats-audit"]', true);
   try {
     const result = await api("/api/ats-audit", { method: "POST", body: JSON.stringify({ resume_text: text, job_id: state.selectedId }) });
     $("#ats-audit-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#ats-audit-output").textContent = `Ошибка: ${err.message}`;
   } finally {
-    setBusy("[onclick='getAtsAudit()']", false);
+    setBusy('[data-ui-action="get-ats-audit"]', false);
   }
 }
 
 async function getSummary() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getSummary()']", true);
+  setBusy('[data-ui-action="get-summary"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/summarize`, { method: "POST", body: "{}" });
     $("#summary-output").textContent = result.summary;
   } catch (err) {
     $("#summary-output").textContent = `Ошибка: ${err.message}`;
   } finally {
-    setBusy("[onclick='getSummary()']", false);
+    setBusy('[data-ui-action="get-summary"]', false);
   }
 }
 
 async function getAiFit() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getAiFit()']", true);
+  setBusy('[data-ui-action="get-ai-fit"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/ai-fit`, { method: "POST", body: "{}" });
     const badge = $("#ai-fit-score");
@@ -776,33 +776,33 @@ async function getAiFit() {
   } catch (err) {
     $("#ai-fit-reasoning").textContent = `Ошибка: ${err.message}`;
   } finally {
-    setBusy("[onclick='getAiFit()']", false);
+    setBusy('[data-ui-action="get-ai-fit"]', false);
   }
 }
 
 async function getInterviewQuestions() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getInterviewQuestions()']", true);
+  setBusy('[data-ui-action="get-interview-questions"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/interview-questions`, { method: "POST", body: "{}" });
     $("#interview-questions-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#interview-questions-output").textContent = `Ошибка: ${err.message}`;
   } finally {
-    setBusy("[onclick='getInterviewQuestions()']", false);
+    setBusy('[data-ui-action="get-interview-questions"]', false);
   }
 }
 
 async function getExperiencePitch() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getExperiencePitch()']", true);
+  setBusy('[data-ui-action="get-experience-pitch"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/pitch`, { method: "POST", body: "{}" });
     $("#pitch-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#pitch-output").textContent = `Ошибка: ${err.message}`;
   } finally {
-    setBusy("[onclick='getExperiencePitch()']", false);
+    setBusy('[data-ui-action="get-experience-pitch"]', false);
   }
 }
 
@@ -960,7 +960,7 @@ function exportCsv() {
 
 async function fetchFullDescription() {
   if (!state.selectedId) return;
-  setBusy("[onclick='fetchFullDescription()']", true);
+  setBusy('[data-ui-action="fetch-full-description"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/fetch-full`, { method: "POST", body: "{}" });
     if (result.updated) {
@@ -972,7 +972,7 @@ async function fetchFullDescription() {
   } catch (e) {
     $("#summary-line").textContent = `Ошибка: ${e.message}`;
   } finally {
-    setBusy("[onclick='fetchFullDescription()']", false);
+    setBusy('[data-ui-action="fetch-full-description"]', false);
   }
 }
 
@@ -1625,6 +1625,63 @@ function setupResumeBuilderDefaults() {
   if (matrix && !matrix.value.trim()) matrix.value = defaultBatchMatrix();
 }
 
+
+const delegatedUiActions = Object.freeze({
+  "bulk-action": (control) => bulkAction(control.dataset.status),
+  "clear-bulk-selection": () => clearBulkSelection(),
+  "toggle-select-all": (_control, event) => {
+    event.stopPropagation();
+    toggleSelectAll();
+  },
+  "get-resume-tips": () => getResumeTips(),
+  "get-ats-resume": () => getAtsResume(),
+  "get-ats-audit": () => getAtsAudit(),
+  "get-ai-fit": () => getAiFit(),
+  "get-summary": () => getSummary(),
+  "get-experience-pitch": () => getExperiencePitch(),
+  "get-interview-questions": () => getInterviewQuestions(),
+  "prepare-letter": () => prepareLetter(),
+  "prepare-letter-ai": () => prepareLetterAi(),
+  "save-job-note": () => saveJobNote(),
+  "show-event-form": () => showEventForm(),
+  "save-event": () => saveEvent(),
+  "hide-event-form": () => hideEventForm(),
+  "load-agent-digest": () => loadAgentDigest(),
+  "load-agent-approvals": () => loadAgentApprovals(),
+  "load-agent-operations": () => loadAgentOperations(),
+  "show-resume-form": () => showResumeForm(),
+  "save-resume": () => saveResume(),
+  "hide-resume-form": () => hideResumeForm(),
+  "show-search-form": () => showSearchForm(),
+  "save-search": () => saveSearch(),
+  "hide-search-form": () => hideSearchForm(),
+  "load-ghost-jobs": () => loadGhostJobs(),
+  "load-market-trends": () => loadMarketTrends(),
+  "mark-selected": (control) => markSelected(control.dataset.status),
+  "fetch-full-description": () => fetchFullDescription(),
+  "apply-hh": (control) => applyHh(control.dataset.dryRun !== "false"),
+  "share-to-telegram": () => shareToTelegram(),
+  "smart-classify": () => smartClassify(),
+  "parse-job-structure": () => parseJobStructure(),
+  "run-gap-analysis": () => runGapAnalysis(),
+});
+
+
+function handleDelegatedUiAction(event) {
+  const control = event.target instanceof Element
+    ? event.target.closest("[data-ui-action]")
+    : null;
+  if (!control) return;
+  const handler = delegatedUiActions[control.dataset.uiAction];
+  if (!handler) return;
+  try {
+    Promise.resolve(handler(control, event)).catch(reportDynamicActionError);
+  } catch (error) {
+    reportDynamicActionError(error);
+  }
+}
+
+
 async function previewAgentResumeTemplate() {
   const template = $("#agent-resume-template").value;
   let context = {};
@@ -1701,6 +1758,7 @@ function handleDynamicRecordAction(event) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   setupResumeBuilderDefaults();
+  document.addEventListener("click", handleDelegatedUiAction);
   document.addEventListener("click", handleDynamicRecordAction);
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.addEventListener("click", () => activateView(button.dataset.view));
@@ -2094,7 +2152,7 @@ async function loadMarketTrends() {
 
 async function parseJobStructure() {
   if (!state.selectedId) return;
-  setBusy("[onclick='parseJobStructure()']", true);
+  setBusy('[data-ui-action="parse-job-structure"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/parse-structure`, { method: "POST", body: "{}" });
     const output = $("#resume-tips-output");
@@ -2102,7 +2160,7 @@ async function parseJobStructure() {
   } catch (e) {
     alert("Ошибка: " + e.message);
   } finally {
-    setBusy("[onclick='parseJobStructure()']", false);
+    setBusy('[data-ui-action="parse-job-structure"]', false);
   }
 }
 
@@ -2111,7 +2169,7 @@ async function runGapAnalysis() {
   const resumes = await api("/api/resumes");
   const active = resumes.find(r => r.is_active);
   if (!active) { alert("Сначала создай и активируй резюме в настройках."); return; }
-  setBusy("[onclick='runGapAnalysis()']", true);
+  setBusy('[data-ui-action="run-gap-analysis"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/gap-analysis`, {
       method: "POST", body: JSON.stringify({ resume_id: active.id }),
@@ -2120,7 +2178,7 @@ async function runGapAnalysis() {
   } catch (e) {
     alert("Ошибка: " + e.message);
   } finally {
-    setBusy("[onclick='runGapAnalysis()']", false);
+    setBusy('[data-ui-action="run-gap-analysis"]', false);
   }
 }
 

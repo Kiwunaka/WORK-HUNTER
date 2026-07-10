@@ -57,10 +57,10 @@
     <section id="view-inbox" class="view active">
       <div class="bulk-toolbar" id="bulk-toolbar" style="display:none;">
         <span id="bulk-count">Выбрано: 0</span>
-        <button onclick="bulkAction('saved')">Сохранить</button>
-        <button onclick="bulkAction('hidden')">Скрыть</button>
-        <button onclick="bulkAction('applied')">Откликнулся</button>
-        <button onclick="clearBulkSelection()">Снять выбор</button>
+        <button data-ui-action="bulk-action" data-status="saved">Сохранить</button>
+        <button data-ui-action="bulk-action" data-status="hidden">Скрыть</button>
+        <button data-ui-action="bulk-action" data-status="applied">Откликнулся</button>
+        <button data-ui-action="clear-bulk-selection">Снять выбор</button>
       </div>
 
       <div class="filters" style="flex-wrap:wrap;">
@@ -104,7 +104,7 @@
           <table>
             <thead>
               <tr>
-                <th style="width:30px;"><input type="checkbox" id="select-all-checkbox" onclick="event.stopPropagation();toggleSelectAll()"></th>
+                <th style="width:30px;"><input type="checkbox" id="select-all-checkbox" data-ui-action="toggle-select-all"></th>
                 <th>Score</th>
                 <th>Вакансия</th>
                 <th>Источник</th>
@@ -133,43 +133,43 @@
             <div id="ai-panel-resume" class="ai-panel-content active">
               <div class="ai-sub-section">
                 <h4>Советы для резюме</h4>
-                <button onclick="getResumeTips()">Получить советы</button>
+                <button data-ui-action="get-resume-tips">Получить советы</button>
                 <div id="resume-tips-output" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>ATS-резюме</h4>
-                <button onclick="getAtsResume()">Сгенерировать</button>
+                <button data-ui-action="get-ats-resume">Сгенерировать</button>
                 <div id="ats-resume-output" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>ATS-аудит</h4>
                 <textarea id="audit-resume-input" rows="6" placeholder="Вставь своё резюме сюда..." style="width:100%;margin-bottom:4px;"></textarea>
-                <button onclick="getAtsAudit()">Проверить</button>
+                <button data-ui-action="get-ats-audit">Проверить</button>
                 <div id="ats-audit-output" class="ai-output"></div>
               </div>
             </div>
             <div id="ai-panel-analysis" class="ai-panel-content">
               <div class="ai-sub-section">
                 <h4>AI-fit оценка</h4>
-                <button onclick="getAiFit()">Оценить fit</button>
+                <button data-ui-action="get-ai-fit">Оценить fit</button>
                 <div id="ai-fit-score" class="ai-fit-badge" style="display:none;"></div>
                 <div id="ai-fit-reasoning" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>Саммари вакансии</h4>
-                <button onclick="getSummary()">Сделать саммари</button>
+                <button data-ui-action="get-summary">Сделать саммари</button>
                 <div id="summary-output" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>Питч опыта (STAR)</h4>
-                <button onclick="getExperiencePitch()">Сгенерировать питч</button>
+                <button data-ui-action="get-experience-pitch">Сгенерировать питч</button>
                 <div id="pitch-output" class="ai-output"></div>
               </div>
             </div>
             <div id="ai-panel-interview" class="ai-panel-content">
               <div class="ai-sub-section">
                 <h4>Вопросы к собеседованию</h4>
-                <button onclick="getInterviewQuestions()">Сгенерировать вопросы</button>
+                <button data-ui-action="get-interview-questions">Сгенерировать вопросы</button>
                 <div id="interview-questions-output" class="ai-output"></div>
               </div>
             </div>
@@ -178,8 +178,8 @@
                 <h4>Сопроводительное письмо</h4>
                 <textarea id="ai-letter-box" data-letter-box class="letter" spellcheck="true" style="width:100%;min-height:190px;"></textarea>
                 <div style="display:flex;gap:8px;margin-top:8px;">
-                  <button onclick="prepareLetter()">Шаблон</button>
-                  <button onclick="prepareLetterAi()" class="primary">AI письмо</button>
+                  <button data-ui-action="prepare-letter">Шаблон</button>
+                  <button data-ui-action="prepare-letter-ai" class="primary">AI письмо</button>
                 </div>
               </div>
             </div>
@@ -187,7 +187,7 @@
               <div class="ai-sub-section">
                 <h4>Мои заметки</h4>
                 <textarea id="job-notes-input" rows="8" placeholder="Заметки об этой вакансии..." style="width:100%;margin-bottom:4px;"></textarea>
-                <button onclick="saveJobNote()">Сохранить заметки</button>
+                <button data-ui-action="save-job-note">Сохранить заметки</button>
               </div>
             </div>
           </section>
@@ -219,7 +219,7 @@
     <section id="view-calendar" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <h1>Календарь</h1>
-        <button id="add-event-button" class="primary" onclick="showEventForm()">+ Событие</button>
+        <button id="add-event-button" class="primary" data-ui-action="show-event-form">+ Событие</button>
       </div>
       <div id="event-form" class="panel" style="display:none;margin-bottom:14px;">
         <h3 id="event-form-title">Новое событие</h3>
@@ -238,8 +238,8 @@
           <label style="grid-column:1/-1;">Заметки <textarea id="event-notes-input" rows="2" style="width:100%;"></textarea></label>
         </div>
         <div style="margin-top:10px;display:flex;gap:8px;">
-          <button id="save-event-button" class="primary" onclick="saveEvent()">Сохранить</button>
-          <button onclick="hideEventForm()">Отмена</button>
+          <button id="save-event-button" class="primary" data-ui-action="save-event">Сохранить</button>
+          <button data-ui-action="hide-event-form">Отмена</button>
         </div>
       </div>
       <div id="events-list" class="source-list"></div>
@@ -344,7 +344,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Последний digest</h2>
-            <button onclick="loadAgentDigest()">Обновить</button>
+            <button data-ui-action="load-agent-digest">Обновить</button>
           </div>
           <div id="agent-digest-list" class="agent-list"></div>
         </div>
@@ -366,7 +366,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Approval queue</h2>
-            <button onclick="loadAgentApprovals()">Обновить</button>
+            <button data-ui-action="load-agent-approvals">Обновить</button>
           </div>
           <div id="agent-approvals-list" class="agent-list"></div>
         </div>
@@ -397,7 +397,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Runs и логи</h2>
-            <button onclick="loadAgentOperations()">Обновить</button>
+            <button data-ui-action="load-agent-operations">Обновить</button>
           </div>
           <div id="agent-runs-list" class="agent-list"></div>
           <div class="section-title">Логи</div>
@@ -569,14 +569,14 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Мои резюме</h2>
-          <button id="add-resume-button" class="primary" onclick="showResumeForm()">+ Резюме</button>
+          <button id="add-resume-button" class="primary" data-ui-action="show-resume-form">+ Резюме</button>
         </div>
         <div id="resume-form" style="display:none;margin-bottom:10px;">
           <label>Название <input id="resume-name-input" style="width:100%;" placeholder="Python Backend"></label>
           <label>Текст резюме <textarea id="resume-body-input" rows="8" style="width:100%;" placeholder="Вставь текст резюме..."></textarea></label>
           <div style="display:flex;gap:8px;margin-top:8px;">
-            <button id="save-resume-button" class="primary" onclick="saveResume()">Сохранить</button>
-            <button onclick="hideResumeForm()">Отмена</button>
+            <button id="save-resume-button" class="primary" data-ui-action="save-resume">Сохранить</button>
+            <button data-ui-action="hide-resume-form">Отмена</button>
           </div>
         </div>
         <div id="resumes-list" class="source-list"></div>
@@ -646,15 +646,15 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Сохранённые поиски</h2>
-          <button id="add-search-button" onclick="showSearchForm()">+ Поиск</button>
+          <button id="add-search-button" data-ui-action="show-search-form">+ Поиск</button>
         </div>
         <div id="search-form" style="display:none;margin-bottom:10px;">
           <label>Название <input id="search-name-input" style="width:100%;" placeholder="FastAPI удалёнка"></label>
           <label>Поисковый запрос <input id="search-query-input" style="width:100%;" placeholder="python fastapi backend"></label>
           <label><input type="checkbox" id="search-alert-checkbox"> Включить уведомления</label>
           <div style="display:flex;gap:8px;margin-top:8px;">
-            <button id="save-search-button" class="primary" onclick="saveSearch()">Сохранить</button>
-            <button onclick="hideSearchForm()">Отмена</button>
+            <button id="save-search-button" class="primary" data-ui-action="save-search">Сохранить</button>
+            <button data-ui-action="hide-search-form">Отмена</button>
           </div>
         </div>
         <div id="searches-list" class="source-list"></div>
@@ -662,7 +662,7 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Призраки (ghost)</h2>
-          <button id="check-ghost-button" onclick="loadGhostJobs()">Проверить</button>
+          <button id="check-ghost-button" data-ui-action="load-ghost-jobs">Проверить</button>
         </div>
         <p class="meta">Вакансии без ответа 7+ дней после отклика.</p>
         <div id="ghost-jobs-list" class="source-list"></div>
@@ -723,7 +723,7 @@
     <section id="view-trends" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <h1>Тренды рынка</h1>
-        <button id="load-trends-button" class="primary" onclick="loadMarketTrends()">Анализировать</button>
+        <button id="load-trends-button" class="primary" data-ui-action="load-market-trends">Анализировать</button>
       </div>
       <div id="trends-output" class="panel">
         <p class="meta">Нажми «Анализировать» чтобы получить AI-отчёт о трендах рынка на основе последних вакансий.</p>

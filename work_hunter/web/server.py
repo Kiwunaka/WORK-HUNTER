@@ -192,12 +192,12 @@ def make_handler(root: Path):
                     source=_str_arg(query, "source"),
                     format="csv",
                 )
-                payload = csv_data.encode("utf-8")
+                csv_payload = csv_data.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Content-Length", str(len(csv_payload)))
                 self.end_headers()
-                self.wfile.write(payload)
+                self.wfile.write(csv_payload)
                 return
             if path.startswith("/api/jobs/"):
                 if path.endswith("/note"):
@@ -211,10 +211,10 @@ def make_handler(root: Path):
                 if job is None:
                     self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
                     return
-                payload = job.to_dict()
+                job_payload = job.to_dict()
                 letter = app.latest_letter(job_id)
-                payload["latest_letter"] = letter.to_dict() if letter else None
-                self._send_json(payload)
+                job_payload["latest_letter"] = letter.to_dict() if letter else None
+                self._send_json(job_payload)
                 return
             if path == "/api/resumes":
                 app = WorkHunter(root)
@@ -432,13 +432,13 @@ def make_handler(root: Path):
             app = WorkHunter(root)
             try:
                 if path == "/api/sync":
-                    result = app.sync_sources(
+                    sync_result = app.sync_sources(
                         sources=body.get("sources"),
                         limit=body.get("limit"),
                     )
                     if body.get("score", True):
-                        result["scored"] = app.score_jobs()
-                    self._send_json(result)
+                        sync_result["scored"] = app.score_jobs()
+                    self._send_json(sync_result)
                     return
                 if path == "/api/score":
                     self._send_json({"scored": app.score_jobs(limit=body.get("limit", 10000))})
@@ -557,7 +557,7 @@ def make_handler(root: Path):
                             messages=messages,
                             status=str(body.get("status") or "active"),
                             now=str(body.get("now") or "") or None,
-                            limit=None if body.get("limit") is None else int(body.get("limit")),
+                            limit=_optional_int(body.get("limit")),
                         )
                     )
                     return
@@ -666,8 +666,8 @@ def make_handler(root: Path):
                 if path == "/api/chat":
                     messages = body.get("messages", [])
                     job_id = body.get("job_id")
-                    result = app.chat(messages, job_id=job_id)
-                    self._send_json({"content": result})
+                    chat_result = app.chat(messages, job_id=job_id)
+                    self._send_json({"content": chat_result})
                     return
                 if path == "/api/config/secret/clear":
                     self._send_json(
@@ -817,8 +817,8 @@ def make_handler(root: Path):
                     return
                 if path == "/api/resumes/ats-score":
                     resume_text = body.get("resume_text", "")
-                    result = app.ats_score_resume(resume_text)
-                    self._send_json(result)
+                    ats_result = app.ats_score_resume(resume_text)
+                    self._send_json(ats_result)
                     return
                 if path.startswith("/api/resumes/") and path.endswith("/delete"):
                     resume_id = _path_int(path.removesuffix("/delete"), "/api/resumes/")
@@ -873,39 +873,39 @@ def make_handler(root: Path):
                     return
                 if path == "/api/jobs/classify-batch":
                     job_ids = body.get("job_ids", [])
-                    result = app.classify_jobs_batch(job_ids)
-                    self._send_json(result)
+                    batch_result = app.classify_jobs_batch(job_ids)
+                    self._send_json(batch_result)
                     return
                 if path == "/api/market-trends":
                     limit = body.get("limit", 50)
-                    result = app.market_trends(limit)
-                    self._send_json({"content": result})
+                    trend_result = app.market_trends(limit)
+                    self._send_json({"content": trend_result})
                     return
                 if path == "/api/behavior/suggest":
-                    result = app.behavior_suggest()
-                    self._send_json({"content": result})
+                    behavior_result = app.behavior_suggest()
+                    self._send_json({"content": behavior_result})
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/parse-structure"):
                     job_id = _path_int(path.removesuffix("/parse-structure"), "/api/jobs/")
-                    result = app.parse_job_structure(job_id)
-                    self._send_json(result)
+                    structure_result = app.parse_job_structure(job_id)
+                    self._send_json(structure_result)
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/gap-analysis"):
                     job_id = _path_int(path.removesuffix("/gap-analysis"), "/api/jobs/")
                     resume_id = body.get("resume_id", 0)
-                    result = app.gap_analysis(resume_id, job_id)
-                    self._send_json({"content": result})
+                    gap_result = app.gap_analysis(resume_id, job_id)
+                    self._send_json({"content": gap_result})
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/smart-classify"):
                     job_id = _path_int(path.removesuffix("/smart-classify"), "/api/jobs/")
-                    result = app.smart_classify(job_id)
-                    self._send_json(result)
+                    classification_result = app.smart_classify(job_id)
+                    self._send_json(classification_result)
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/interview-prep"):
                     job_id = _path_int(path.removesuffix("/interview-prep"), "/api/jobs/")
                     stage = body.get("stage", "tech")
-                    result = app.interview_stage_prep(job_id, stage)
-                    self._send_json({"content": result})
+                    interview_result = app.interview_stage_prep(job_id, stage)
+                    self._send_json({"content": interview_result})
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/record-event"):
                     job_id = _path_int(path.removesuffix("/record-event"), "/api/jobs/")
@@ -976,9 +976,17 @@ def _int_arg(query: dict[str, list[str]], name: str, default: int) -> int:
     return int(value)
 
 
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def _optional_int_arg(query: dict[str, list[str]], name: str) -> int | None:
-    value = query.get(name, [None])[0]
-    return int(value) if value not in (None, "") else None
+    values = query.get(name)
+    if not values or values[0] == "":
+        return None
+    return int(values[0])
 
 
 def _str_arg(query: dict[str, list[str]], name: str) -> str | None:

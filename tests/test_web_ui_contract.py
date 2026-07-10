@@ -263,12 +263,15 @@ def test_ui_static_assets_have_no_remote_runtime_dependencies():
         assert forbidden not in combined
 
 
-def test_dynamic_actions_validate_data_values_and_avoid_inline_javascript():
+def test_static_and_dynamic_actions_avoid_inline_javascript():
+    index = _read_static("index.html")
     app = _read_static("app.js")
 
     assert 'function requirePositiveInteger(value, fieldName = "id")' in app
     assert "Number.isSafeInteger(parsed)" in app
-    assert re.search(r'onclick="[^"]*\$\{', app) is None
+    assert re.search(r"\bonclick\s*=", f"{index}\n{app}", re.IGNORECASE) is None
+    assert "data-ui-action" in index
+    assert "handleDelegatedUiAction" in app
     assert "data-record-action" in app
     assert "handleDynamicRecordAction" in app
 
@@ -278,8 +281,8 @@ def test_ui_contract_keeps_trends_explicit_and_bulk_selection_stable():
     app = _read_static("app.js")
 
     assert 'id="load-trends-button"' in index
-    assert "loadMarketTrends()" in index
-    assert "addEventListener(\"click\", loadMarketTrends)" not in app
+    assert "loadMarketTrends()" not in index
+    assert '"load-market-trends": () => loadMarketTrends()' in app
     assert 'data-record-action="toggle-job-select"' in app
     assert 'control.matches(".job-checkbox")' in app
     assert "selectedJobIds.has(jobId)" in app

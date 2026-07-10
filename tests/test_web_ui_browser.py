@@ -207,6 +207,31 @@ def test_ui_loads_without_browser_errors(browser_app):
         page.evaluate("window.clearInterval(window.__readinessInterval)")
 
 
+def test_static_and_dynamic_controls_work_without_inline_handlers(browser_app):
+    page, base_url, app = browser_app
+    job = app.storage.list_jobs(limit=1)[0]
+    page.goto(f"{base_url}/calendar", wait_until="domcontentloaded")
+
+    expect(page.locator("[onclick]")).to_have_count(0)
+
+    page.get_by_role("button", name="+ Событие", exact=True).click()
+    expect(page.locator("#event-form")).to_be_visible()
+    page.locator("#event-form").get_by_role("button", name="Отмена", exact=True).click()
+    expect(page.locator("#event-form")).to_be_hidden()
+
+    page.goto(base_url, wait_until="domcontentloaded")
+    page.locator("#jobs-body tr").filter(has_text="Browser Fixture Job").click()
+    expect(page.locator("#job-detail h2")).to_have_text("Browser Fixture Job")
+    expect(page.locator("#job-detail [onclick]")).to_have_count(0)
+    with page.expect_response(
+        lambda response: urlsplit(response.url).path == "/api/jobs"
+    ):
+        page.locator("#job-detail").get_by_role(
+            "button", name="Скрыть", exact=True
+        ).click()
+    assert app.storage.get_job(job.id).status == "hidden"
+
+
 def test_untrusted_api_text_cannot_create_markup_or_handlers(browser_app):
     page, base_url, _ = browser_app
     malicious = '<img id="pwned" src=x onerror="window.__pwned=1">'
