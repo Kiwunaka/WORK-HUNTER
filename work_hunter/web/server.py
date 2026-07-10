@@ -652,10 +652,16 @@ def make_handler(root: Path):
                     result = app.chat(messages, job_id=job_id)
                     self._send_json({"content": result})
                     return
+                if path == "/api/config/secret/clear":
+                    self._send_json(
+                        app.clear_config_secret(
+                            str(body.get("path") or ""),
+                            confirm=body.get("confirm"),
+                        )
+                    )
+                    return
                 if path == "/api/config":
-                    updated = _deep_merge(app.config, body)
-                    app.save_config(updated)
-                    self._send_json(mask_secrets(updated))
+                    self._send_json(app.update_config_from_client(body))
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/status"):
                     job_id = _path_int(path.removesuffix("/status"), "/api/jobs/")
@@ -960,16 +966,6 @@ def _approval_action(path: str) -> tuple[int, str] | None:
     if len(parts) == 5 and parts[:3] == ["api", "agent", "approvals"]:
         return int(parts[3]), parts[4]
     return None
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    result = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
 
 
 def _compute_stats(jobs: list[Any], storage: Any) -> dict[str, Any]:

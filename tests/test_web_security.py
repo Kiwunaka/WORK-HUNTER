@@ -10,6 +10,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from work_hunter.services import WorkHunter
 from work_hunter.web import security as web_security
 from work_hunter.web import server as web_server
 from work_hunter.web.security import ensure_loopback_listener, request_boundary_error
@@ -589,3 +590,157 @@ def test_options_is_rejected_without_cors_authorization_headers(cockpit):
     assert "access-control-allow-methods" not in headers
     assert "access-control-allow-headers" not in headers
     assert headers["allow"] == "GET, POST"
+
+
+def test_masked_config_http_round_trip_never_persists_mask(cockpit, tmp_path):
+    app = WorkHunter(tmp_path)
+    app.config["ai"]["api_key"] = "saved-ai-value"
+    app.config["sources"]["hh"]["access_token"] = "saved-hh-value"
+    app.save_config(app.config)
+    status, _, raw = raw_request(cockpit, "GET", "/api/config", {}, None)
+    masked = json.loads(raw)
+    assert status == 200
+    assert masked["ai"]["api_key"] == "***"
+    assert masked["sources"]["hh"]["access_token"] == "***"
+
+    host = f"127.0.0.1:{cockpit.server_port}"
+    status, _, _ = raw_request(
+        cockpit,
+        "POST",
+        "/api/config",
+        {"Host": host, "Content-Type": "application/json"},
+        json.dumps(masked).encode("utf-8"),
+    )
+
+    assert status == 200
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["ai"]["api_key"] == "saved-ai-value"
+    assert reloaded.config["sources"]["hh"]["access_token"] == "saved-hh-value"
+
+
+def test_config_http_update_cannot_clear_secret_via_parent_replacement(
+    cockpit,
+    tmp_path,
+):
+    app = WorkHunter(tmp_path)
+    app.config["ai"]["api_key"] = "saved-ai-value"
+    app.save_config(app.config)
+    host = f"127.0.0.1:{cockpit.server_port}"
+
+    status, _, _ = raw_request(
+        cockpit,
+        "POST",
+        "/api/config",
+        {"Host": host, "Content-Type": "application/json"},
+        json.dumps({"ai": None}).encode("utf-8"),
+    )
+
+    assert status == 200
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["ai"]["api_key"] == "saved-ai-value"
+
+
+def test_masked_config_http_round_trip_preserves_secrets_inside_lists(
+    cockpit,
+    tmp_path,
+):
+    app = WorkHunter(tmp_path)
+    app.config["custom"] = [
+        {"access_token": "saved-list-value", "label": "custom-item"}
+    ]
+    app.save_config(app.config)
+    status, _, raw = raw_request(cockpit, "GET", "/api/config", {}, None)
+    masked = json.loads(raw)
+    assert status == 200
+    assert masked["custom"][0]["access_token"] == "***"
+    host = f"127.0.0.1:{cockpit.server_port}"
+
+    status, _, _ = raw_request(
+        cockpit,
+        "POST",
+        "/api/config",
+        {"Host": host, "Content-Type": "application/json"},
+        json.dumps(masked).encode("utf-8"),
+    )
+
+    assert status == 200
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["custom"][0]["access_token"] == "saved-list-value"
+
+
+@pytest.mark.parametrize("confirm", [None, False, "true", 1])
+def test_clear_config_secret_requires_literal_true(tmp_path, confirm):
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "saved-access-value"
+
+    result = app.clear_config_secret(
+        "sources.hh.access_token",
+        confirm=confirm,
+    )
+
+    assert result["status"] == "blocked"
+    assert app.config["sources"]["hh"]["access_token"] == "saved-access-value"
+
+
+def test_clear_config_secret_rejects_unknown_path_and_clears_only_selected(tmp_path):
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"].update(
+        {
+            "access_token": "saved-access-value",
+            "refresh_token": "saved-refresh-value",
+        }
+    )
+
+    rejected = app.clear_config_secret("sources.hh.enabled", confirm=True)
+    cleared = app.clear_config_secret("sources.hh.access_token", confirm=True)
+
+    assert rejected["status"] == "blocked"
+    assert cleared == {"status": "ok", "path": "sources.hh.access_token"}
+    assert app.config["sources"]["hh"]["access_token"] == ""
+    assert app.config["sources"]["hh"]["refresh_token"] == "saved-refresh-value"
+
+
+def test_clear_config_secret_http_route_clears_only_with_literal_confirmation(
+    cockpit,
+    tmp_path,
+):
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"].update(
+        {
+            "access_token": "saved-access-value",
+            "refresh_token": "saved-refresh-value",
+        }
+    )
+    app.save_config(app.config)
+    host = f"127.0.0.1:{cockpit.server_port}"
+    headers = {"Host": host, "Content-Type": "application/json"}
+
+    blocked_status, _, blocked_raw = raw_request(
+        cockpit,
+        "POST",
+        "/api/config/secret/clear",
+        headers,
+        json.dumps(
+            {"path": "sources.hh.access_token", "confirm": "true"}
+        ).encode("utf-8"),
+    )
+    clear_status, _, clear_raw = raw_request(
+        cockpit,
+        "POST",
+        "/api/config/secret/clear",
+        headers,
+        json.dumps(
+            {"path": "sources.hh.access_token", "confirm": True}
+        ).encode("utf-8"),
+    )
+
+    assert blocked_status == 200
+    assert json.loads(blocked_raw)["status"] == "blocked"
+    assert clear_status == 200
+    assert json.loads(clear_raw) == {
+        "status": "ok",
+        "path": "sources.hh.access_token",
+    }
+    reloaded = WorkHunter(tmp_path)
+    assert reloaded.config["sources"]["hh"]["access_token"] == ""
+    assert reloaded.config["sources"]["hh"]["refresh_token"] == "saved-refresh-value"

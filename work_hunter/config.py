@@ -13,6 +13,18 @@ DATA_DIRNAME = ".work-hunter"
 MASK = "***"
 SENSITIVE_EXACT = {"token", "password", "secret", "api_key", "key"}
 SENSITIVE_SUFFIXES = ("_token", "_password", "_secret", "_api_key", "_key")
+CONFIG_SECRET_CLEAR_PATHS = frozenset(
+    {
+        ("ai", "api_key"),
+        ("hh_agent", "telegram", "bot_token"),
+        ("sources", "hh", "access_token"),
+        ("sources", "hh", "refresh_token"),
+        ("sources", "hh", "client_secret"),
+    }
+)
+HH_ACCOUNT_SECRET_KEYS = frozenset(
+    {"access_token", "refresh_token", "client_secret"}
+)
 
 
 def _default_profile() -> dict[str, Any]:
@@ -180,6 +192,80 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in SENSITIVE_EXACT or any(
+        lowered.endswith(suffix) for suffix in SENSITIVE_SUFFIXES
+    )
+
+
+def _contains_sensitive_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            is_sensitive_key(key) or _contains_sensitive_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_sensitive_key(item) for item in value)
+    return False
+
+
+def merge_masked_config(
+    stored: dict[str, Any],
+    submitted: dict[str, Any],
+) -> dict[str, Any]:
+    merged = copy.deepcopy(stored)
+    for key, value in submitted.items():
+        current = merged.get(key)
+        if is_sensitive_key(key):
+            if not isinstance(value, str) or value == "" or value == MASK:
+                continue
+        if _contains_sensitive_key(current) and not (
+            isinstance(current, dict) and isinstance(value, dict)
+        ):
+            continue
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = merge_masked_config(current, value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def clear_config_secret_value(
+    config: dict[str, Any],
+    path: str,
+) -> dict[str, Any]:
+    parts = tuple(path.split("."))
+    clear_parts = parts if parts in CONFIG_SECRET_CLEAR_PATHS else ()
+    account_prefix = "hh_account_profiles."
+    if not clear_parts and path.startswith(account_prefix):
+        account_name, separator, secret_key = path[len(account_prefix) :].rpartition(
+            "."
+        )
+        accounts = config.get("hh_account_profiles")
+        if (
+            separator
+            and account_name
+            and isinstance(accounts, dict)
+            and account_name in accounts
+            and isinstance(accounts[account_name], dict)
+            and secret_key in HH_ACCOUNT_SECRET_KEYS
+        ):
+            clear_parts = ("hh_account_profiles", account_name, secret_key)
+    if not clear_parts:
+        raise ValueError(f"Configuration secret path is not allowed: {path}")
+
+    cleared = copy.deepcopy(config)
+    parent: dict[str, Any] = cleared
+    for key in clear_parts[:-1]:
+        child = parent.get(key)
+        if not isinstance(child, dict):
+            raise ValueError(f"Configuration secret path is not allowed: {path}")
+        parent = child
+    parent[clear_parts[-1]] = ""
+    return cleared
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     path = Path(path)
     if not path.exists():
@@ -231,8 +317,7 @@ def mask_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         masked: dict[str, Any] = {}
         for key, item in value.items():
-            lowered = key.lower()
-            if lowered in SENSITIVE_EXACT or any(lowered.endswith(suffix) for suffix in SENSITIVE_SUFFIXES):
+            if is_sensitive_key(key):
                 masked[key] = MASK
             else:
                 masked[key] = mask_secrets(item)

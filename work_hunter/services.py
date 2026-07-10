@@ -17,11 +17,13 @@ from typing import Any
 from .config import (
     active_hh_config,
     active_profile,
+    clear_config_secret_value,
     config_path,
     database_path,
     default_config,
     load_config,
     mask_secrets,
+    merge_masked_config,
     save_config,
 )
 from .letters import chat_completion, draft_cover_letter, draft_cover_letter_ai
@@ -883,6 +885,38 @@ class WorkHunter:
     def save_config(self, config: dict[str, Any]) -> None:
         self.config = config
         save_config(self.config_path, config)
+
+    def update_config_from_client(self, patch: dict[str, Any]) -> dict[str, Any]:
+        updated = merge_masked_config(self.config, patch)
+        self.save_config(updated)
+        return mask_secrets(self.config)
+
+    def clear_config_secret(
+        self,
+        path: str,
+        *,
+        confirm: object = False,
+    ) -> dict[str, Any]:
+        blocked = require_mutation_confirmation(
+            confirm,
+            code="config_secret_clear_requires_confirmation",
+            message="Clearing a configuration secret requires explicit confirmation.",
+            risk_flags=("configuration_secret_clear",),
+            context={"path": path},
+        )
+        if blocked is not None:
+            return blocked
+        try:
+            updated = clear_config_secret_value(self.config, path)
+        except ValueError:
+            return {
+                "status": "blocked",
+                "code": "config_secret_path_not_allowed",
+                "message": "Configuration secret path is not allowlisted.",
+                "path": path,
+            }
+        self.save_config(updated)
+        return {"status": "ok", "path": path}
 
     def reset_config_defaults(self) -> None:
         self.config = default_config()
