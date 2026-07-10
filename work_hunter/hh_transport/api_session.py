@@ -44,8 +44,9 @@ class HHApiSession:
 
     def request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         response = self.request(method, path, **kwargs)
-        payload = _response_json(response)
-        if response.status_code >= 400:
+        success = 200 <= response.status_code < 300
+        payload = _response_json(response, strict=success)
+        if not success:
             raise _error_from_response(response.status_code, payload)
         return payload
 
@@ -61,7 +62,7 @@ class HHApiSession:
         if self.identity.is_access_expired() and self.identity.refresh_token:
             self.refresh_token()
         response = self._send(method, path, **kwargs)
-        if response.status_code in {401, 403} and retry_on_auth and self.identity.refresh_token:
+        if response.status_code == 401 and retry_on_auth and self.identity.refresh_token:
             self.refresh_token()
             return self._request(method, path, retry_on_auth=False, **kwargs)
         return response
@@ -101,8 +102,9 @@ class HHApiSession:
             )
         except requests.RequestException as exc:
             raise _network_error("POST", "/token", exc) from exc
-        payload = _response_json(response)
-        if response.status_code >= 400:
+        success = 200 <= response.status_code < 300
+        payload = _response_json(response, strict=success)
+        if not success:
             raise _error_from_response(response.status_code, payload)
         self.identity.update_from_token_response(payload)
         self.backend.save(self.identity.to_config_patch())
@@ -194,10 +196,22 @@ def _network_error(
     )
 
 
-def _response_json(response: Any) -> dict[str, Any]:
+def _parse_error(response: Any, exc: ValueError) -> HHTransportError:
+    return HHTransportError(
+        f"HH API response contained invalid JSON: {type(exc).__name__}",
+        status_code=response.status_code,
+        code="parse_error",
+    )
+
+
+def _response_json(response: Any, *, strict: bool) -> dict[str, Any]:
     try:
         payload = response.json()
-    except ValueError:
+    except ValueError as exc:
+        content = getattr(response, "content", None)
+        text = getattr(response, "text", None) if content is None else None
+        if strict and bool(content if content is not None else text):
+            raise _parse_error(response, exc) from exc
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -210,7 +224,7 @@ def _hh_error_code(payload: dict[str, Any]) -> str:
 
 
 def _error_from_response(status_code: int, payload: dict[str, Any]) -> HHTransportError:
-    code = _hh_error_code(payload)
+    code = "redirect" if 300 <= status_code < 400 else _hh_error_code(payload)
     message = f"HH API error {status_code}: {code}"
     if status_code == 401:
         return HHAuthError(message, status_code=status_code, code=code, payload=payload)

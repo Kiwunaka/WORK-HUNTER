@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from http.cookiejar import Cookie
 
@@ -288,6 +289,49 @@ def test_api_session_masks_and_wraps_refresh_request_exception(monkeypatch):
     assert str(error.value) == "POST /token failed: Timeout"
     assert "secret" not in str(error.value)
     assert error.value.__cause__ is original
+
+
+def test_api_session_wraps_nonempty_invalid_json_as_parse_error(monkeypatch):
+    original = json.JSONDecodeError("invalid", "not-json-secret", 0)
+
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+        content = b"not-json-secret"
+
+        def json(self):
+            raise original
+
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+
+    with pytest.raises(HHTransportError) as error:
+        HHApiSession({"access_token": "token"}).request_json("GET", "/vacancies")
+
+    assert error.value.code == "parse_error"
+    assert error.value.status_code == 200
+    assert str(error.value) == "HH API response contained invalid JSON: JSONDecodeError"
+    assert "secret" not in str(error.value)
+    assert error.value.__cause__ is original
+
+
+def test_api_session_accepts_empty_no_content_response(monkeypatch):
+    class Response:
+        status_code = 204
+        headers: dict[str, str] = {}
+        content = b""
+
+        def json(self):
+            raise json.JSONDecodeError("empty", "", 0)
+
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+
+    assert HHApiSession({"access_token": "token"}).request_json("GET", "/empty") == {}
 
 
 def test_extract_xsrf_token_prefers_cookie_then_html():
