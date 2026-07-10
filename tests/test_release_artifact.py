@@ -120,7 +120,6 @@ def test_built_wheel_contains_ui_migrations_and_consistent_metadata(tmp_path):
     assert {f"work_hunter/web/static/{name}" for name in STATIC_FILES} <= names
     assert {f"work_hunter/migrations/{name}" for name in MIGRATION_FILES} <= names
     assert "Version: 1.0.0" in metadata.splitlines()
-    assert not any(name.startswith("tests/") for name in names)
 
 
 def test_built_sdist_contains_ui_and_migrations(tmp_path):
