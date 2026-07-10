@@ -206,3 +206,48 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
     installed_module = Path(completed.stdout.strip())
     assert installed_module.is_file()
     assert not installed_module.is_relative_to(ROOT)
+
+
+def test_dockerfile_installs_wheel_with_dependencies_as_non_root():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM python:3.12-slim AS builder" in dockerfile
+    assert "FROM python:3.12-slim AS runtime" in dockerfile
+    assert "python -m build --wheel" in dockerfile
+    assert "pip install /tmp/work_hunter" in dockerfile
+    assert "--no-deps ." not in dockerfile
+    assert "groupadd --gid 10001 workhunter" in dockerfile
+    assert "useradd --uid 10001 --gid 10001" in dockerfile
+    assert "chown -R 10001:10001 /data" in dockerfile
+    assert "USER 10001:10001" in dockerfile
+    assert 'ENTRYPOINT ["/usr/bin/tini", "--", "work-hunter"]' in dockerfile
+    assert 'CMD ["--root", "/data", "hh-auth-status"]' in dockerfile
+
+
+def test_optional_browser_image_path_installs_complete_browser_extra():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG INSTALL_PLAYWRIGHT=false" in dockerfile
+    assert '"beautifulsoup4>=4.12,<5"' in dockerfile
+    assert '"playwright>=1.45,<2"' in dockerfile
+    assert "python -m playwright install --with-deps chromium" in dockerfile
+    assert "chmod -R a+rX /ms-playwright" in dockerfile
+
+
+def test_dockerignore_excludes_private_build_context():
+    patterns = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
+    for required in {
+        ".git",
+        ".research",
+        ".playwright-mcp",
+        ".superpowers",
+        "external",
+        ".env*",
+        "*.har",
+        "*.session",
+        "*.cookies",
+        "cookies.txt",
+        "*cookies*.txt",
+        "*.pem",
+        "*.key",
+        "outputs",
+    }:
+        assert required in patterns
