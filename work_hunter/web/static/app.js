@@ -65,14 +65,44 @@ function requirePositiveInteger(value, label) {
   return parsed;
 }
 
+function setSectionLoading(name, busy) {
+  const section = document.querySelector(`[data-load-section="${name}"]`);
+  if (section) section.setAttribute("aria-busy", String(busy));
+  if (name === "jobs") {
+    const skeleton = $("#jobs-skeleton");
+    if (skeleton) skeleton.style.display = busy ? "block" : "none";
+  }
+}
+
 async function loadJobs() {
-  const source = $("#source-filter").value;
-  const minScore = $("#min-score-filter").value || "0";
-  const params = new URLSearchParams({ limit: "200", min_score: minScore });
-  if (source) params.set("source", source);
-  state.jobs = await api(`/api/jobs?${params.toString()}`);
-  renderJobs();
-  updateSummary();
+  setSectionLoading("jobs", true);
+  try {
+    const source = $("#source-filter").value;
+    const minScore = $("#min-score-filter").value || "0";
+    const params = new URLSearchParams({ limit: "200", min_score: minScore });
+    if (source) params.set("source", source);
+    state.jobs = await api(`/api/jobs?${params.toString()}`);
+    renderJobs();
+    updateSummary();
+  } finally {
+    setSectionLoading("jobs", false);
+  }
+}
+
+function bindJobRowActivation(row, job) {
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `Открыть ${job.title || "вакансию"}`);
+  const activate = () => selectJob(requirePositiveInteger(job.id, "job id"));
+  row.addEventListener("click", (event) => {
+    if (!event.target.closest("input,button,a")) activate();
+  });
+  row.addEventListener("keydown", (event) => {
+    if ((event.key === "Enter" || event.key === " ") && !event.target.closest("input,button,a")) {
+      event.preventDefault();
+      activate();
+    }
+  });
 }
 
 function renderJobs() {
@@ -81,7 +111,7 @@ function renderJobs() {
   for (const job of state.jobs) {
     const tr = document.createElement("tr");
     tr.className = job.id === state.selectedId ? "selected" : "";
-    tr.addEventListener("click", () => selectJob(job.id));
+    bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
     const checked = selectedJobIds.has(Number(job.id)) ? "checked" : "";
@@ -263,13 +293,9 @@ async function applyHh(dryRun = true) {
 }
 
 async function loadProfile() {
-  try {
-    state.profile = await api("/api/profile");
-    renderProfileSwitcher();
-    renderProfileForm();
-  } catch (err) {
-    console.error("Failed to load profile:", err);
-  }
+  state.profile = await api("/api/profile");
+  renderProfileSwitcher();
+  renderProfileForm();
 }
 
 function renderProfileSwitcher() {
@@ -504,11 +530,65 @@ function updateSummary() {
   $("#summary-count").textContent = `${state.jobs.length} вакансий`;
 }
 
-function setBusy(selector, busy) {
-  const button = $(selector);
+const SECTION_LABELS = {
+  jobs: "Вакансии",
+  config: "Настройки",
+  profile: "Профиль",
+  sources: "Источники",
+  "agent-auth": "Проверка HH auth",
+};
+
+function clearSectionError(name) {
+  const container = $("#init-errors");
+  if (!container) return;
+  const existing = Array.from(container.children).find(
+    (item) => item.dataset.sectionError === name,
+  );
+  if (existing) existing.remove();
+  container.hidden = container.childElementCount === 0;
+}
+
+function showSectionError(name, error, retry) {
+  const container = $("#init-errors");
+  if (!container) return;
+  clearSectionError(name);
+  const item = document.createElement("div");
+  item.className = "section-load-error";
+  item.dataset.sectionError = name;
+  const message = document.createElement("span");
+  message.textContent = `${SECTION_LABELS[name] || name}: ${error?.message || error}`;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Повторить";
+  button.addEventListener("click", retry);
+  item.append(message, button);
+  container.appendChild(item);
+  container.hidden = false;
+}
+
+async function runIsolatedLoad(name, loader) {
+  try {
+    clearSectionError(name);
+    await loader();
+  } catch (error) {
+    showSectionError(name, error, () => runIsolatedLoad(name, loader));
+  }
+}
+
+const busyButtonLabels = new WeakMap();
+
+function setBusy(target, busy, busyLabel = "Работаю...") {
+  const button = typeof target === "string" ? document.querySelector(target) : target;
   if (!button) return;
-  button.disabled = busy;
-  button.textContent = busy ? "Работаю..." : button.dataset.label || button.textContent;
+  if (busy) {
+    if (!busyButtonLabels.has(button)) busyButtonLabels.set(button, button.textContent);
+    button.disabled = true;
+    button.textContent = busyLabel;
+  } else {
+    button.disabled = false;
+    button.textContent = busyButtonLabels.get(button) || button.textContent;
+    busyButtonLabels.delete(button);
+  }
 }
 
 function escapeHtml(value) {
@@ -605,8 +685,9 @@ async function getResumeTips() {
     $("#resume-tips-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#resume-tips-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy("[onclick='getResumeTips()']", false);
   }
-  setBusy("[onclick='getResumeTips()']", false);
 }
 
 async function getAtsResume() {
@@ -617,8 +698,9 @@ async function getAtsResume() {
     $("#ats-resume-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#ats-resume-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy("[onclick='getAtsResume()']", false);
   }
-  setBusy("[onclick='getAtsResume()']", false);
 }
 
 async function getAtsAudit() {
@@ -631,8 +713,9 @@ async function getAtsAudit() {
     $("#ats-audit-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#ats-audit-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy("[onclick='getAtsAudit()']", false);
   }
-  setBusy("[onclick='getAtsAudit()']", false);
 }
 
 async function getSummary() {
@@ -643,8 +726,9 @@ async function getSummary() {
     $("#summary-output").textContent = result.summary;
   } catch (err) {
     $("#summary-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy("[onclick='getSummary()']", false);
   }
-  setBusy("[onclick='getSummary()']", false);
 }
 
 async function getAiFit() {
@@ -660,8 +744,9 @@ async function getAiFit() {
     $("#ai-fit-reasoning").textContent = result.reasoning;
   } catch (err) {
     $("#ai-fit-reasoning").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy("[onclick='getAiFit()']", false);
   }
-  setBusy("[onclick='getAiFit()']", false);
 }
 
 async function getInterviewQuestions() {
@@ -672,8 +757,9 @@ async function getInterviewQuestions() {
     $("#interview-questions-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#interview-questions-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy("[onclick='getInterviewQuestions()']", false);
   }
-  setBusy("[onclick='getInterviewQuestions()']", false);
 }
 
 async function getExperiencePitch() {
@@ -684,8 +770,9 @@ async function getExperiencePitch() {
     $("#pitch-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#pitch-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy("[onclick='getExperiencePitch()']", false);
   }
-  setBusy("[onclick='getExperiencePitch()']", false);
 }
 
 async function saveJobNote() {
@@ -709,7 +796,7 @@ async function loadFavorites() {
   body.innerHTML = "";
   for (const job of jobs) {
     const tr = document.createElement("tr");
-    tr.addEventListener("click", () => selectJob(job.id));
+    bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     tr.innerHTML = `
       <td><span class="score">${escapeHtml(String(score))}</span></td>
@@ -840,8 +927,9 @@ async function fetchFullDescription() {
     }
   } catch (e) {
     $("#summary-line").textContent = `Ошибка: ${e.message}`;
+  } finally {
+    setBusy("[onclick='fetchFullDescription()']", false);
   }
-  setBusy("[onclick='fetchFullDescription()']", false);
 }
 
 function switchAiTab(panelName) {
@@ -891,8 +979,11 @@ async function loadAgentPreflight({ liveAuth = false } = {}) {
 
 async function checkAgentLiveAuth() {
   setBusy("#agent-live-auth-button", true);
+  clearSectionError("agent-auth");
   try {
     await loadAgentPreflight({ liveAuth: true });
+  } catch (error) {
+    showSectionError("agent-auth", error, checkAgentLiveAuth);
   } finally {
     setBusy("#agent-live-auth-button", false);
     refreshIcons();
@@ -1532,9 +1623,6 @@ async function buildAgentBatchMatrix() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  for (const button of document.querySelectorAll("button")) {
-    button.dataset.label = button.textContent;
-  }
   setupResumeBuilderDefaults();
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.addEventListener("click", () => activateView(button.dataset.view));
@@ -1595,7 +1683,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js");
   }
-  await Promise.all([loadJobs(), loadConfig(), loadProfile(), loadSources()]);
+  await Promise.allSettled([
+    runIsolatedLoad("jobs", loadJobs),
+    runIsolatedLoad("config", loadConfig),
+    runIsolatedLoad("profile", loadProfile),
+    runIsolatedLoad("sources", loadSources),
+  ]);
   activateView(routeViewFromPath(window.location.pathname), { push: false });
   loadResumes().catch(() => {});
   loadEvents().catch(() => {});
@@ -1822,7 +1915,7 @@ function renderFilteredJobs(jobs) {
   for (const job of jobs) {
     const tr = document.createElement("tr");
     tr.className = job.id === state.selectedId ? "selected" : "";
-    tr.addEventListener("click", () => selectJob(job.id));
+    bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
     const checked = selectedJobIds.has(Number(job.id)) ? "checked" : "";
@@ -1918,8 +2011,11 @@ async function parseJobStructure() {
     const result = await api(`/api/jobs/${state.selectedId}/parse-structure`, { method: "POST", body: "{}" });
     const output = $("#resume-tips-output");
     output.textContent = JSON.stringify(result, null, 2);
-  } catch (e) { alert("Ошибка: " + e.message); }
-  setBusy("[onclick='parseJobStructure()']", false);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  } finally {
+    setBusy("[onclick='parseJobStructure()']", false);
+  }
 }
 
 async function runGapAnalysis() {
@@ -1933,8 +2029,11 @@ async function runGapAnalysis() {
       method: "POST", body: JSON.stringify({ resume_id: active.id }),
     });
     $("#resume-tips-output").innerHTML = renderMarkdown(result.content);
-  } catch (e) { alert("Ошибка: " + e.message); }
-  setBusy("[onclick='runGapAnalysis()']", false);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  } finally {
+    setBusy("[onclick='runGapAnalysis()']", false);
+  }
 }
 
 async function scoreAtsResume() {

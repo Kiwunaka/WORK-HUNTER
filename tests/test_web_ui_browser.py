@@ -211,6 +211,130 @@ def test_ui_loads_without_browser_errors(browser_app):
         page.evaluate("window.clearInterval(window.__readinessInterval)")
 
 
+def test_job_row_opens_with_enter_and_checkbox_space_stays_independent(browser_app):
+    page, base_url, app = browser_app
+    app.storage.upsert_job(
+        Job(source="x", source_id="keyboard", url="https://x/keyboard", title="Python")
+    )
+    page.goto(base_url, wait_until="networkidle")
+    row = page.locator("#jobs-body tr").filter(has_text="Python")
+    row.focus()
+    page.keyboard.press("Enter")
+    expect(page.locator("#job-detail h2")).to_contain_text("Python")
+    page.locator("#job-detail").evaluate("element => element.innerHTML = ''")
+    checkbox = row.locator("input[type=checkbox]")
+    checkbox.focus()
+    page.keyboard.press("Space")
+    expect(page.locator("#job-detail h2")).to_have_count(0)
+
+
+def test_dynamic_busy_button_restores_label_on_success_and_error(browser_app):
+    page, base_url, app = browser_app
+    app.storage.upsert_job(
+        Job(source="x", source_id="busy", url="https://x/busy", title="Busy")
+    )
+    calls = 0
+
+    def result(route):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            route.fulfill(
+                status=200, content_type="application/json", body='{"ok":true}'
+            )
+        else:
+            route.fulfill(status=200, content_type="application/json", body="{invalid")
+
+    page.route("**/parse-structure", result)
+    page.on("dialog", lambda dialog: dialog.dismiss())
+    page.goto(base_url, wait_until="networkidle")
+    page.locator("#jobs-body tr").filter(has_text="Busy").click()
+    button = page.get_by_role("button", name="Структура")
+    original = button.text_content()
+    button.click()
+    expect(button).to_have_text(original)
+    button.click()
+    expect(button).to_have_text(original)
+
+
+def test_initial_source_failure_does_not_abort_jobs(browser_app):
+    page, base_url, app = browser_app
+    app.storage.upsert_job(
+        Job(
+            source="x",
+            source_id="still-loads",
+            url="https://x/job",
+            title="Still loads",
+        )
+    )
+    page.route(
+        "**/api/sources",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body="{invalid",
+        ),
+    )
+    page.goto(base_url, wait_until="networkidle")
+    expect(page.locator("#jobs-body")).to_contain_text("Still loads")
+    expect(page.locator("#init-errors")).to_be_visible()
+    retry = page.locator("#init-errors button")
+    expect(retry).to_be_visible()
+    page.unroute("**/api/sources")
+    retry.click()
+    expect(page.locator("#sources-list")).to_contain_text(
+        "Источники еще не синхронизировались"
+    )
+    expect(page.locator("#init-errors")).to_be_hidden()
+
+
+def test_initial_jobs_loading_exposes_and_restores_busy_state(browser_app):
+    page, base_url, _ = browser_app
+    page.add_init_script(
+        """
+        const nativeFetch = window.fetch.bind(window);
+        let releaseJobs;
+        const jobsGate = new Promise((resolve) => { releaseJobs = resolve; });
+        window.__releaseJobs = releaseJobs;
+        window.fetch = (...args) => {
+          const requestUrl = String(args[0] instanceof Request ? args[0].url : args[0]);
+          if (requestUrl.includes("/api/jobs?")) {
+            return jobsGate.then(() => nativeFetch(...args));
+          }
+          return nativeFetch(...args);
+        };
+        """
+    )
+    page.goto(base_url, wait_until="domcontentloaded")
+    job_list = page.locator("#jobs-body").locator("xpath=ancestor::section[1]")
+    try:
+        expect(job_list).to_have_attribute("aria-busy", "true")
+        expect(page.locator("#jobs-skeleton")).to_be_visible()
+    finally:
+        page.evaluate("window.__releaseJobs()")
+    expect(page.locator("#jobs-body")).to_contain_text("Browser Fixture Job")
+    expect(job_list).to_have_attribute("aria-busy", "false")
+    expect(page.locator("#jobs-skeleton")).to_be_hidden()
+
+
+def test_agent_live_auth_local_failure_is_visible_and_restores_button(browser_app):
+    page, base_url, _ = browser_app
+    page.route(
+        "**/api/agent/preflight?live_auth=true",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body="{invalid",
+        ),
+    )
+    page.goto(f"{base_url}/agent", wait_until="networkidle")
+    button = page.locator("#agent-live-auth-button")
+    original = button.text_content()
+    button.click()
+    expect(button).to_have_text(original)
+    expect(page.locator("#init-errors")).to_contain_text("Проверка HH auth")
+
+
 def test_browser_context_configuration_is_fail_closed():
     assert _browser_context_options("http://127.0.0.1:43123") == {
         "service_workers": "block",

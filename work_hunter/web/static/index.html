@@ -56,6 +56,8 @@
       </div>
     </header>
 
+    <div id="init-errors" role="alert" aria-live="polite" hidden></div>
+
     <section id="view-inbox" class="view active">
       <div class="bulk-toolbar" id="bulk-toolbar" style="display:none;">
         <span id="bulk-count">Выбрано: 0</span>
@@ -102,7 +104,7 @@
       </div>
 
       <div class="workspace">
-        <section class="job-list">
+        <section class="job-list" data-load-section="jobs" aria-busy="false">
           <table>
             <thead>
               <tr>
