@@ -41,8 +41,8 @@ def main(argv: list[str] | None = None) -> None:
     sync.add_argument("--source", action="append", choices=SYNC_SOURCE_CHOICES)
     sync.add_argument("--limit", type=int)
 
-    score = sub.add_parser("score")
-    score.add_argument("--limit", type=int, default=10000)
+    score_parser = sub.add_parser("score")
+    score_parser.add_argument("--limit", type=int, default=10000)
 
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--limit", type=int, default=20)
@@ -51,8 +51,8 @@ def main(argv: list[str] | None = None) -> None:
     list_cmd.add_argument("--min-score", type=int)
     list_cmd.add_argument("--json", action="store_true")
 
-    letter = sub.add_parser("letter")
-    letter.add_argument("job_id", type=int)
+    letter_parser = sub.add_parser("letter")
+    letter_parser.add_argument("job_id", type=int)
 
     status = sub.add_parser("status")
     status.add_argument("job_id", type=int)
@@ -457,8 +457,8 @@ def main(argv: list[str] | None = None) -> None:
             print_json([job.to_dict() for job in jobs])
         else:
             for job in jobs:
-                score = job.score.total_score if job.score else "-"
-                print(f"#{job.id} [{score}] {job.source} {job.title} @ {job.company} - {job.url}")
+                score_value = job.score.total_score if job.score else "-"
+                print(f"#{job.id} [{score_value}] {job.source} {job.title} @ {job.company} - {job.url}")
         return
     if args.command == "letter":
         print(app.prepare_letter(args.job_id).body)
@@ -477,10 +477,10 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.command == "apply-plan":
-        letter = args.letter or None
+        letter_text = args.letter or None
         if args.letter_file:
-            letter = args.letter_file.read_text(encoding="utf-8")
-        print_json(app.prepare_apply_plan(args.job_id, resume_id=args.resume_id, letter=letter))
+            letter_text = args.letter_file.read_text(encoding="utf-8")
+        print_json(app.prepare_apply_plan(args.job_id, resume_id=args.resume_id, letter=letter_text))
         return
     if args.command == "hh-apply-from-file":
         template = args.template
@@ -597,10 +597,10 @@ def main(argv: list[str] | None = None) -> None:
                 print_json(app.confirm_hh_campaign(args.run_id, confirm=args.confirm))
         elif args.hh_command == "apply":
             if args.hh_apply_command == "plan":
-                letter = args.letter or None
+                letter_text = args.letter or None
                 if args.letter_file:
-                    letter = args.letter_file.read_text(encoding="utf-8")
-                print_json(app.prepare_apply_plan(args.job_id, resume_id=args.resume_id, letter=letter))
+                    letter_text = args.letter_file.read_text(encoding="utf-8")
+                print_json(app.prepare_apply_plan(args.job_id, resume_id=args.resume_id, letter=letter_text))
             elif args.hh_apply_command == "confirm":
                 print_json(app.confirm_apply_plan(args.plan_id, confirm=args.confirm))
         elif args.hh_command == "negotiations":

@@ -2049,6 +2049,7 @@ class WorkHunter:
             "resume": resume,
             "submit_requested": submit,
         }
+        result: dict[str, Any]
 
         if form_mode == "off":
             result = {
@@ -2362,6 +2363,7 @@ class WorkHunter:
     def hh_web_search_url(self, search_url: str, *, limit: int = 20) -> dict[str, Any]:
         parsed = urllib.parse.urlparse(search_url)
         params = urllib.parse.parse_qs(parsed.query)
+        salary_values = params.get("salary")
         if not parsed.netloc.endswith("hh.ru"):
             return {
                 "status": "blocked",
@@ -2373,7 +2375,7 @@ class WorkHunter:
             area=params.get("area") or None,
             professional_role=params.get("professional_role") or None,
             industry=params.get("industry") or None,
-            salary=int((params.get("salary") or [0])[0] or 0) or None,
+            salary=_optional_int(salary_values[0] if salary_values else None),
             schedule=(params.get("schedule") or [""])[0] or None,
             experience=(params.get("experience") or [""])[0] or None,
             employment=params.get("employment") or None,
@@ -2787,7 +2789,7 @@ class WorkHunter:
         service = HHChatAgentService(storage=self.storage, client=client)
         result = service.plan_reply(
             negotiation,
-            persona=persona.to_dict() if hasattr(persona, "to_dict") else dict(persona),
+            persona=persona.to_dict(),
             template=template,
             delay_minutes=delay_minutes,
         )
@@ -3055,7 +3057,7 @@ class WorkHunter:
             skipped_by_reason[item.reason] = skipped_by_reason.get(item.reason, 0) + 1
         recommendations: list[str] = []
         if skipped_by_reason:
-            top_reason = max(skipped_by_reason, key=skipped_by_reason.get)
+            top_reason = max(skipped_by_reason, key=lambda reason: skipped_by_reason[reason])
             recommendations.append(
                 f"Review skipped reason '{top_reason}' before the next campaign."
             )
@@ -3280,11 +3282,11 @@ class WorkHunter:
         for message in pending:
             by_status[message.status] = by_status.get(message.status, 0) + 1
         outbox_by_status: dict[str, int] = {}
-        for item in outbox:
-            outbox_by_status[item.status] = outbox_by_status.get(item.status, 0) + 1
+        for outbox_item in outbox:
+            outbox_by_status[outbox_item.status] = outbox_by_status.get(outbox_item.status, 0) + 1
         webhooks_by_status: dict[str, int] = {}
-        for item in webhooks:
-            webhooks_by_status[item.status] = webhooks_by_status.get(item.status, 0) + 1
+        for webhook in webhooks:
+            webhooks_by_status[webhook.status] = webhooks_by_status.get(webhook.status, 0) + 1
         return {
             "status": "ok",
             "summary": self.hh_operator_summary(),
@@ -3541,7 +3543,7 @@ class WorkHunter:
             elif operation == "scan-events":
                 result = self.scan_hh_agent_events(
                     status=str(params.get("status") or "active"),
-                    limit=None if params.get("limit") is None else int(params.get("limit")),
+                    limit=_optional_int(params.get("limit")),
                 )
             elif operation == "refresh-token":
                 result = refresh_result = self.refresh_hh_token()
@@ -3968,7 +3970,7 @@ class WorkHunter:
                 limit=remaining,
             )
             query_results.append(result)
-            count = int(result.get("count") or 0)
+            count = _optional_int(result.get("count")) or 0
             imported_total += count
             remaining -= count
             if result.get("status") not in {"ok", "blocked"} and count == 0:
@@ -4923,16 +4925,17 @@ class WorkHunter:
             writer = csv.writer(buf)
             writer.writerow(["id", "job_id", "status", "applied_at", "title", "company", "source", "url", "notes"])
             for item in rows:
-                job = item.get("job") or {}
+                job_data = item.get("job")
+                job_payload = job_data if isinstance(job_data, dict) else {}
                 writer.writerow([
                     item.get("id"),
                     item.get("job_id"),
                     item.get("status"),
                     item.get("applied_at"),
-                    job.get("title", ""),
-                    job.get("company", ""),
-                    job.get("source", ""),
-                    job.get("url", ""),
+                    job_payload.get("title", ""),
+                    job_payload.get("company", ""),
+                    job_payload.get("source", ""),
+                    job_payload.get("url", ""),
                     item.get("notes", ""),
                 ])
             return buf.getvalue()
@@ -4941,7 +4944,7 @@ class WorkHunter:
         return "\n".join(json.dumps(item, ensure_ascii=False) for item in rows) + ("\n" if rows else "")
 
     def export_report(self, *, since: str = "", format: str = "json") -> str:
-        report = {
+        report: dict[str, Any] = {
             "status": "ok",
             "since": since,
             "daily": self.daily_report(limit=20),
