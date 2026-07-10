@@ -15,7 +15,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     QT_QUICK_BACKEND=software \
-    WORK_HUNTER_ROOT=/data \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
@@ -33,7 +32,8 @@ ARG INSTALL_PLAYWRIGHT=false
 RUN if [ "$INSTALL_PLAYWRIGHT" = "true" ]; then \
         python -m pip install "beautifulsoup4>=4.12,<5" "playwright>=1.45,<2" \
         && python -m playwright install --with-deps chromium \
-        && chmod -R a+rX /ms-playwright; \
+        && chmod -R a+rX /ms-playwright \
+        && rm -rf /var/lib/apt/lists/*; \
     fi
 
 RUN groupadd --gid 10001 workhunter \
@@ -41,7 +41,8 @@ RUN groupadd --gid 10001 workhunter \
     && mkdir -p /data \
     && chown -R 10001:10001 /data
 
+WORKDIR /data
 USER 10001:10001
 VOLUME ["/data"]
-ENTRYPOINT ["/usr/bin/tini", "--", "work-hunter"]
-CMD ["--root", "/data", "hh-auth-status"]
+ENTRYPOINT ["/usr/bin/tini", "--", "work-hunter", "--root", "/data"]
+CMD ["hh-auth-status"]

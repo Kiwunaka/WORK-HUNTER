@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import fnmatch
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,6 +19,60 @@ import work_hunter
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_FILES = {"app.css", "app.js", "index.html", "manifest.json", "sw.js"}
 MIGRATION_FILES = {"0001_backbone.sql"}
+
+
+def _docker_stages(dockerfile: str) -> dict[str, list[str]]:
+    stages: dict[str, list[str]] = {}
+    current_stage: str | None = None
+    continued: list[str] = []
+
+    for raw_line in dockerfile.splitlines():
+        line = raw_line.strip()
+        if not line or (line.startswith("#") and not continued):
+            continue
+        is_continued = line.endswith("\\")
+        continued.append(line[:-1].rstrip() if is_continued else line)
+        if is_continued:
+            continue
+
+        instruction = " ".join(continued)
+        continued.clear()
+        if instruction.upper().startswith("FROM "):
+            parts = instruction.split()
+            assert len(parts) >= 4 and parts[-2].upper() == "AS"
+            current_stage = parts[-1]
+            stages[current_stage] = []
+            continue
+        assert current_stage is not None
+        stages[current_stage].append(instruction)
+
+    assert not continued
+    return stages
+
+
+def _docker_json_instruction(stage: list[str], name: str) -> list[str]:
+    matches = [line for line in stage if line.upper().startswith(f"{name} ")]
+    assert len(matches) == 1
+    value = json.loads(matches[0].split(maxsplit=1)[1])
+    assert isinstance(value, list) and all(isinstance(item, str) for item in value)
+    return value
+
+
+def _dockerignore_includes(patterns: list[str], path: str) -> bool:
+    included = True
+    for raw_pattern in patterns:
+        if not raw_pattern or raw_pattern.startswith("#"):
+            continue
+        negated = raw_pattern.startswith("!")
+        pattern = raw_pattern[1:] if negated else raw_pattern
+        directory_pattern = pattern.endswith("/")
+        pattern = pattern.rstrip("/")
+        matches = fnmatch.fnmatchcase(path, pattern)
+        if directory_pattern:
+            matches = matches or path.startswith(f"{pattern}/")
+        if matches:
+            included = negated
+    return included
 
 
 def _offline_environment() -> dict[str, str]:
@@ -210,44 +267,106 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
 
 def test_dockerfile_installs_wheel_with_dependencies_as_non_root():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    stages = _docker_stages(dockerfile)
     assert "FROM python:3.12-slim AS builder" in dockerfile
     assert "FROM python:3.12-slim AS runtime" in dockerfile
-    assert "python -m build --wheel" in dockerfile
-    assert "pip install /tmp/work_hunter" in dockerfile
-    assert "--no-deps ." not in dockerfile
+    assert any("python -m build --wheel" in line for line in stages["builder"])
+    runtime_wheel_installs = [
+        line
+        for line in stages["runtime"]
+        if line.startswith("RUN ")
+        and "python -m pip install /tmp/work_hunter" in line
+    ]
+    assert len(runtime_wheel_installs) == 1
+    install_tokens = shlex.split(runtime_wheel_installs[0])
+    assert not any(token.startswith("--no-deps") for token in install_tokens)
     assert "groupadd --gid 10001 workhunter" in dockerfile
     assert "useradd --uid 10001 --gid 10001" in dockerfile
     assert "chown -R 10001:10001 /data" in dockerfile
     assert "USER 10001:10001" in dockerfile
-    assert 'ENTRYPOINT ["/usr/bin/tini", "--", "work-hunter"]' in dockerfile
-    assert 'CMD ["--root", "/data", "hh-auth-status"]' in dockerfile
+
+    entrypoint = _docker_json_instruction(stages["runtime"], "ENTRYPOINT")
+    default_command = _docker_json_instruction(stages["runtime"], "CMD")
+    assert entrypoint + default_command == [
+        "/usr/bin/tini",
+        "--",
+        "work-hunter",
+        "--root",
+        "/data",
+        "hh-auth-status",
+    ]
+    assert entrypoint + ["doctor"] == [
+        "/usr/bin/tini",
+        "--",
+        "work-hunter",
+        "--root",
+        "/data",
+        "doctor",
+    ]
+    workdirs = [line for line in stages["runtime"] if line.startswith("WORKDIR ")]
+    assert workdirs[-1] == "WORKDIR /data"
+    assert stages["runtime"].index(workdirs[-1]) > next(
+        index
+        for index, line in enumerate(stages["runtime"])
+        if "chown -R 10001:10001 /data" in line
+    )
+    assert "WORK_HUNTER_ROOT" not in dockerfile
 
 
 def test_optional_browser_image_path_installs_complete_browser_extra():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    runtime = _docker_stages(dockerfile)["runtime"]
     assert "ARG INSTALL_PLAYWRIGHT=false" in dockerfile
     assert '"beautifulsoup4>=4.12,<5"' in dockerfile
     assert '"playwright>=1.45,<2"' in dockerfile
-    assert "python -m playwright install --with-deps chromium" in dockerfile
-    assert "chmod -R a+rX /ms-playwright" in dockerfile
+    browser_installs = [
+        line
+        for line in runtime
+        if line.startswith("RUN if ")
+        and "python -m playwright install --with-deps chromium" in line
+    ]
+    assert len(browser_installs) == 1
+    browser_install = browser_installs[0]
+    assert "chmod -R a+rX /ms-playwright" in browser_install
+    assert "rm -rf /var/lib/apt/lists/*" in browser_install
+    assert browser_install.index("rm -rf /var/lib/apt/lists/*") > browser_install.index(
+        "python -m playwright install --with-deps chromium"
+    )
 
 
-def test_dockerignore_excludes_private_build_context():
-    patterns = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
-    for required in {
-        ".git",
-        ".research",
-        ".playwright-mcp",
-        ".superpowers",
-        "external",
-        ".env*",
-        "*.har",
-        "*.session",
-        "*.cookies",
-        "cookies.txt",
-        "*cookies*.txt",
-        "*.pem",
-        "*.key",
-        "outputs",
+def test_dockerignore_allowlists_only_release_build_inputs():
+    patterns = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert patterns[:5] == [
+        "**",
+        "!pyproject.toml",
+        "!README.md",
+        "!work_hunter/",
+        "!work_hunter/**",
+    ]
+    assert [pattern for pattern in patterns if pattern.startswith("!")] == patterns[1:5]
+
+    for included_path in {
+        "pyproject.toml",
+        "README.md",
+        "work_hunter/cli.py",
+        "work_hunter/web/static/index.html",
+        "work_hunter/migrations/0001_backbone.sql",
     }:
-        assert required in patterns
+        assert _dockerignore_includes(patterns, included_path)
+
+    for private_path in {
+        ".git/config",
+        ".superpowers/sdd/release-task-5-report.md",
+        ".work-hunter/config.json",
+        "external/donor/secrets.json",
+        "outputs/report.json",
+        "work_hunter/nested/.work-hunter/config.json",
+        "work_hunter/nested/.env.production",
+        "work_hunter/nested/session.cookies",
+        "work_hunter/nested/cookies.txt",
+        "work_hunter/nested/cookies-backup.json",
+        "work_hunter/nested/private.pem",
+        "work_hunter/nested/private.key",
+        "work_hunter/nested/state.sqlite3",
+    }:
+        assert not _dockerignore_includes(patterns, private_path)
