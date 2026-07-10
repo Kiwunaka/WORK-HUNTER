@@ -1153,7 +1153,7 @@ class WorkHunter:
         if job_id is not None:
             job = self.storage.get_job(job_id)
             if job:
-                score = self.storage.get_score(job_id, self.config.get("profile", "default"))
+                score = self.storage.get_score(job_id, self.active_profile_id())
                 score_text = ""
                 if score:
                     score_text = (
@@ -4154,11 +4154,13 @@ class WorkHunter:
             }
         )
         imported_jobs: list[Job] = []
+        profile_id = self.active_profile_id()
         for payload in client.search_vacancies(search_params):
             job = _hh_job_from_vacancy_payload(payload)
             if not job.source_id:
                 continue
             job.id = self.storage.upsert_job(job)
+            job.score = self.storage.get_score(job.id, profile_id)
             imported_jobs.append(job)
 
         filters = {

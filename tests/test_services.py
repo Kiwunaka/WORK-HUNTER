@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from work_hunter.models import Job, JobScore
 from work_hunter.services import WorkHunter
 from work_hunter.sources import PUBLIC_BOARD_SOURCE_NAMES
@@ -253,6 +255,41 @@ def test_campaign_eligibility_uses_active_profile_score(monkeypatch, tmp_path):
     assert len(items) == 1
     assert items[0].job_id == job_id
     assert items[0].status == "ready"
+
+
+@pytest.mark.parametrize(
+    "legacy_profile",
+    [
+        pytest.param({"desired_roles": ["python"]}, id="flat-dict"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_chat_uses_default_score_for_legacy_profile(
+    monkeypatch,
+    tmp_path,
+    legacy_profile,
+):
+    app = WorkHunter(tmp_path)
+    app.config["profile"] = legacy_profile
+    job_id = app.storage.upsert_job(
+        Job(
+            source="hh",
+            source_id="chat-legacy",
+            url="https://example.test/chat-legacy",
+            title="Python Chat",
+        )
+    )
+    _save_profile_score(app, job_id, "default", 73)
+    captured_messages: list[list[dict[str, str]]] = []
+
+    def capture_chat(messages, config):
+        captured_messages.append(messages)
+        return "ok"
+
+    monkeypatch.setattr("work_hunter.services.chat_completion", capture_chat)
+
+    assert app.chat([{"role": "user", "content": "fit?"}], job_id=job_id) == "ok"
+    assert "Score: total=73" in captured_messages[0][0]["content"]
 
 
 def test_prepare_letter_for_existing_job(tmp_path):
