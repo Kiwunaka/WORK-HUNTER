@@ -1,10 +1,51 @@
 import json
+from pathlib import Path
 
 import pytest
 
+from work_hunter import __version__
+from work_hunter import services as services_module
 from work_hunter.models import Job, JobScore
-from work_hunter.services import WorkHunter
+from work_hunter.services import WorkHunter, _package_details
 from work_hunter.sources import PUBLIC_BOARD_SOURCE_NAMES
+
+
+class _FakeDistribution:
+    def __init__(
+        self,
+        *,
+        version: str,
+        package_path: Path,
+        direct_url=None,
+        wheel: bool = False,
+        direct_url_error: Exception | None = None,
+    ) -> None:
+        self.version = version
+        self.package_path = package_path
+        self.direct_url = direct_url
+        self.wheel = wheel
+        self.direct_url_error = direct_url_error
+
+    def read_text(self, filename: str):
+        if filename == "direct_url.json":
+            if self.direct_url_error is not None:
+                raise self.direct_url_error
+            return self.direct_url
+        if filename == "WHEEL":
+            return "Wheel-Version: 1.0\n" if self.wheel else None
+        return None
+
+    def locate_file(self, filename: str) -> Path:
+        assert filename == "work_hunter"
+        return self.package_path
+
+
+def _mock_package_distributions(monkeypatch, distributions) -> None:
+    def fake_distributions(*, name: str):
+        assert name == "work-hunter"
+        return iter(distributions)
+
+    monkeypatch.setattr(services_module.importlib.metadata, "distributions", fake_distributions)
 
 
 def test_doctor_reports_version_install_mode_and_runtime_resources(tmp_path):
@@ -13,6 +54,7 @@ def test_doctor_reports_version_install_mode_and_runtime_resources(tmp_path):
     package = doctor["core"]["package"]
     assert package["version"] == "1.0.0"
     assert package["install_mode"] in {"editable", "wheel", "source"}
+    assert package["editable"] is (package["install_mode"] == "editable")
     assert package["static"]["status"] == "ok"
     assert package["migrations"]["status"] == "ok"
     assert "config_missing" in doctor["warnings"]
@@ -29,6 +71,145 @@ def test_doctor_blocks_when_package_resources_are_missing(monkeypatch, tmp_path)
     assert doctor["status"] == "blocked"
     assert "missing_ui_static" in doctor["blocked"]
     assert "missing_migrations" in doctor["blocked"]
+
+
+def test_package_details_skips_local_egg_info_before_matching_editable(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    package_root = project_root / "work_hunter"
+    package_root.mkdir(parents=True)
+    local_egg_info = _FakeDistribution(
+        version="0.0.1",
+        package_path=package_root,
+    )
+    matching_editable = _FakeDistribution(
+        version="9.9.9",
+        package_path=tmp_path / "site-packages" / "work_hunter",
+        direct_url=json.dumps(
+            {"url": project_root.as_uri(), "dir_info": {"editable": True}}
+        ),
+        wheel=True,
+    )
+    _mock_package_distributions(monkeypatch, [local_egg_info, matching_editable])
+
+    package = _package_details(package_root)
+
+    assert package["install_mode"] == "editable"
+    assert package["editable"] is True
+    assert package["version"] == __version__
+
+
+@pytest.mark.parametrize("with_local_egg_info", [False, True])
+def test_package_details_reports_unbound_or_ordinary_source(
+    monkeypatch,
+    tmp_path,
+    with_local_egg_info,
+):
+    package_root = tmp_path / "project" / "work_hunter"
+    package_root.mkdir(parents=True)
+    distributions = []
+    if with_local_egg_info:
+        distributions.append(
+            _FakeDistribution(version="8.8.8", package_path=package_root)
+        )
+    _mock_package_distributions(monkeypatch, distributions)
+
+    package = _package_details(package_root)
+
+    assert package["install_mode"] == "source"
+    assert package["editable"] is False
+    assert package["version"] == __version__
+
+
+def test_package_details_reports_only_matching_installed_wheel(monkeypatch, tmp_path):
+    package_root = tmp_path / "site-packages" / "work_hunter"
+    package_root.mkdir(parents=True)
+    wheel = _FakeDistribution(
+        version="7.8.9",
+        package_path=package_root,
+        wheel=True,
+    )
+    _mock_package_distributions(monkeypatch, [wheel])
+
+    package = _package_details(package_root)
+
+    assert package["install_mode"] == "wheel"
+    assert package["editable"] is False
+    assert package["version"] == "7.8.9"
+
+
+def test_package_details_ignores_unrelated_installed_distribution(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    package_root = project_root / "work_hunter"
+    package_root.mkdir(parents=True)
+    unrelated_root = tmp_path / "unrelated"
+    unrelated = _FakeDistribution(
+        version="6.6.6",
+        package_path=unrelated_root / "work_hunter",
+        direct_url=json.dumps(
+            {"url": unrelated_root.as_uri(), "dir_info": {"editable": True}}
+        ),
+        wheel=True,
+    )
+    _mock_package_distributions(monkeypatch, [unrelated])
+
+    package = _package_details(package_root)
+
+    assert package["install_mode"] == "source"
+    assert package["version"] == __version__
+
+
+@pytest.mark.parametrize(
+    "direct_url_case",
+    [
+        "missing",
+        "invalid_json",
+        "non_object",
+        "url_wrong_type",
+        "dir_info_wrong_type",
+        "editable_wrong_type",
+        "wrong_encoding_type",
+        "decode_error",
+    ],
+)
+def test_package_details_rejects_malformed_editable_metadata(
+    monkeypatch,
+    tmp_path,
+    direct_url_case,
+):
+    project_root = tmp_path / "project"
+    package_root = project_root / "work_hunter"
+    package_root.mkdir(parents=True)
+    direct_url = None
+    direct_url_error = None
+    if direct_url_case == "invalid_json":
+        direct_url = "{"
+    elif direct_url_case == "non_object":
+        direct_url = "[]"
+    elif direct_url_case == "url_wrong_type":
+        direct_url = json.dumps({"url": 42, "dir_info": {"editable": True}})
+    elif direct_url_case == "dir_info_wrong_type":
+        direct_url = json.dumps({"url": project_root.as_uri(), "dir_info": []})
+    elif direct_url_case == "editable_wrong_type":
+        direct_url = json.dumps(
+            {"url": project_root.as_uri(), "dir_info": {"editable": "true"}}
+        )
+    elif direct_url_case == "wrong_encoding_type":
+        direct_url = b"\xff"
+    elif direct_url_case == "decode_error":
+        direct_url_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")
+    distribution = _FakeDistribution(
+        version="5.5.5",
+        package_path=package_root,
+        direct_url=direct_url,
+        direct_url_error=direct_url_error,
+    )
+    _mock_package_distributions(monkeypatch, [distribution])
+
+    package = _package_details(package_root)
+
+    assert package["install_mode"] == "source"
+    assert package["editable"] is False
+    assert package["version"] == __version__
 
 
 def _use_python_profile(app: WorkHunter) -> None:

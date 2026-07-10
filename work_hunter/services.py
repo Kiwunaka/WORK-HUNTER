@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -88,26 +89,110 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 _HH_IDENTITY_WRITE_LOCK = threading.RLock()
 
 
+def _read_distribution_text(
+    distribution: importlib.metadata.Distribution,
+    filename: str,
+) -> str | None:
+    try:
+        text = distribution.read_text(filename)
+    except (OSError, TypeError, UnicodeError, ValueError):
+        return None
+    return text if isinstance(text, str) else None
+
+
+def _same_resolved_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _file_url_path(url: str) -> Path | None:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "file" or parsed.query or parsed.fragment:
+        return None
+
+    url_path = parsed.path
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        url_path = f"//{parsed.netloc}{url_path}"
+    try:
+        return Path(urllib.request.url2pathname(url_path))
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _editable_distribution_matches(
+    distribution: importlib.metadata.Distribution,
+    project_root: Path,
+) -> bool:
+    direct_url_text = _read_distribution_text(distribution, "direct_url.json")
+    if not direct_url_text:
+        return False
+    try:
+        direct_url = json.loads(direct_url_text)
+    except (json.JSONDecodeError, RecursionError, UnicodeError):
+        return False
+    if not isinstance(direct_url, dict):
+        return False
+    directory_info = direct_url.get("dir_info")
+    url = direct_url.get("url")
+    if (
+        not isinstance(directory_info, dict)
+        or directory_info.get("editable") is not True
+        or not isinstance(url, str)
+    ):
+        return False
+    source_path = _file_url_path(url)
+    return source_path is not None and _same_resolved_path(source_path, project_root)
+
+
+def _matching_wheel_version(
+    distribution: importlib.metadata.Distribution,
+    package_root: Path,
+) -> str | None:
+    wheel_text = _read_distribution_text(distribution, "WHEEL")
+    if not wheel_text or not any(
+        line.startswith("Wheel-Version:") for line in wheel_text.splitlines()
+    ):
+        return None
+    try:
+        installed_package = Path(str(distribution.locate_file("work_hunter")))
+        version = distribution.version
+    except (OSError, TypeError, UnicodeError, ValueError):
+        return None
+    if not _same_resolved_path(installed_package, package_root):
+        return None
+    return version if isinstance(version, str) and version else None
+
+
 def _package_details(package_root: Path | None = None) -> dict[str, Any]:
     package_root = package_root or PACKAGE_ROOT
     version = __version__
     install_mode = "source"
     try:
-        distribution = importlib.metadata.distribution("work-hunter")
-        direct_url_text = distribution.read_text("direct_url.json") or ""
-        if direct_url_text:
-            direct_url = json.loads(direct_url_text)
-            directory_info = direct_url.get("dir_info") if isinstance(direct_url, dict) else None
-            if isinstance(directory_info, dict) and bool(directory_info.get("editable")):
-                install_mode = "editable"
-            else:
-                install_mode = "wheel"
-                version = distribution.version
-        else:
-            install_mode = "wheel"
-            version = distribution.version
-    except (importlib.metadata.PackageNotFoundError, json.JSONDecodeError):
-        pass
+        distributions = list(importlib.metadata.distributions(name="work-hunter"))
+    except (
+        importlib.metadata.PackageNotFoundError,
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        distributions = []
+
+    wheel_version: str | None = None
+    for distribution in distributions:
+        if _editable_distribution_matches(distribution, package_root.parent):
+            install_mode = "editable"
+            break
+        if wheel_version is None:
+            wheel_version = _matching_wheel_version(distribution, package_root)
+    if install_mode != "editable" and wheel_version is not None:
+        install_mode = "wheel"
+        version = wheel_version
 
     static_required = ("index.html", "app.js", "app.css", "manifest.json", "sw.js")
     static_dir = package_root / "web" / "static"
