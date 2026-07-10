@@ -4,10 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Work Hunter</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   <link rel="stylesheet" href="/app.css">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111827'/%3E%3Ctext x='32' y='40' font-size='24' text-anchor='middle' fill='white' font-family='Arial'%3EWH%3C/text%3E%3C/svg%3E">
   <link rel="manifest" href="/manifest.json">
@@ -15,25 +11,25 @@
 <body>
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark"><i data-lucide="briefcase"></i></div>
+      <div class="brand-mark" aria-hidden="true">WH</div>
       <div>
         <strong>Work Hunter</strong>
         <span>smart job search</span>
       </div>
     </div>
     <nav>
-      <button class="nav-button active" data-view="inbox"><i data-lucide="inbox"></i>Вакансии</button>
-      <button class="nav-button" data-view="calendar"><i data-lucide="calendar"></i>Календарь</button>
-      <button class="nav-button" data-view="favorites"><i data-lucide="heart"></i>Избранное</button>
-      <button class="nav-button" data-view="chat"><i data-lucide="bot"></i>AI Ассистент</button>
-      <button class="nav-button" data-view="agent"><i data-lucide="radar"></i>HH Агент</button>
-      <button class="nav-button" data-view="settings"><i data-lucide="settings"></i>Настройки</button>
-      <button class="nav-button" data-view="sources"><i data-lucide="database"></i>Источники</button>
-      <button class="nav-button" data-view="stats"><i data-lucide="bar-chart-3"></i>Статистика</button>
-      <button class="nav-button" data-view="trends"><i data-lucide="trending-up"></i>Тренды</button>
+      <button class="nav-button active" data-view="inbox">Вакансии</button>
+      <button class="nav-button" data-view="calendar">Календарь</button>
+      <button class="nav-button" data-view="favorites">Избранное</button>
+      <button class="nav-button" data-view="chat">AI Ассистент</button>
+      <button class="nav-button" data-view="agent">HH Агент</button>
+      <button class="nav-button" data-view="settings">Настройки</button>
+      <button class="nav-button" data-view="sources">Источники</button>
+      <button class="nav-button" data-view="stats">Статистика</button>
+      <button class="nav-button" data-view="trends">Тренды</button>
     </nav>
     <div class="theme-toggle">
-      <button id="theme-toggle-button" title="Переключить тему"><i data-lucide="moon"></i> Тёмная</button>
+      <button id="theme-toggle-button" title="Переключить тему">Тёмная</button>
     </div>
     <div class="profile-switch">
       <span class="meta">Профиль поиска</span>
@@ -286,24 +282,24 @@
           <p id="agent-status-line">Локальная кабина для запусков, approvals, шаблонов и blacklist.</p>
         </div>
         <div class="actions">
-          <button id="agent-refresh-button"><i data-lucide="refresh-cw"></i>Обновить</button>
-          <button id="agent-live-auth-button"><i data-lucide="shield-check"></i>Проверить HH auth</button>
-          <button id="agent-digest-button" class="primary"><i data-lucide="sparkles"></i>Digest</button>
+          <button id="agent-refresh-button">Обновить</button>
+          <button id="agent-live-auth-button">Проверить HH auth</button>
+          <button id="agent-digest-button" class="primary">Digest</button>
         </div>
       </div>
 
       <div class="agent-tabs">
-        <button class="agent-tab active" data-agent-panel="dashboard"><i data-lucide="layout-dashboard"></i>Dashboard</button>
-        <button class="agent-tab" data-agent-panel="inbox"><i data-lucide="inbox"></i>Inbox</button>
-        <button class="agent-tab" data-agent-panel="approvals"><i data-lucide="check-check"></i>Approvals</button>
-        <button class="agent-tab" data-agent-panel="research"><i data-lucide="search-check"></i>Research</button>
-        <button class="agent-tab" data-agent-panel="runs"><i data-lucide="activity"></i>Runs</button>
-        <button class="agent-tab" data-agent-panel="api-lab"><i data-lucide="flask-conical"></i>API Lab</button>
-        <button class="agent-tab" data-agent-panel="templates"><i data-lucide="file-text"></i>Templates</button>
-        <button class="agent-tab" data-agent-panel="resume-builder"><i data-lucide="layers"></i>Resume</button>
-        <button class="agent-tab" data-agent-panel="blacklist"><i data-lucide="shield-x"></i>Blacklist</button>
-        <button class="agent-tab" data-agent-panel="events"><i data-lucide="calendar-clock"></i>Events</button>
-        <button class="agent-tab" data-agent-panel="settings"><i data-lucide="sliders-horizontal"></i>Settings</button>
+        <button class="agent-tab active" data-agent-panel="dashboard">Dashboard</button>
+        <button class="agent-tab" data-agent-panel="inbox">Inbox</button>
+        <button class="agent-tab" data-agent-panel="approvals">Approvals</button>
+        <button class="agent-tab" data-agent-panel="research">Research</button>
+        <button class="agent-tab" data-agent-panel="runs">Runs</button>
+        <button class="agent-tab" data-agent-panel="api-lab">API Lab</button>
+        <button class="agent-tab" data-agent-panel="templates">Templates</button>
+        <button class="agent-tab" data-agent-panel="resume-builder">Resume</button>
+        <button class="agent-tab" data-agent-panel="blacklist">Blacklist</button>
+        <button class="agent-tab" data-agent-panel="events">Events</button>
+        <button class="agent-tab" data-agent-panel="settings">Settings</button>
       </div>
 
       <div id="agent-panel-dashboard" class="agent-panel active">
@@ -336,19 +332,19 @@
             <span class="meta" id="agent-operation-note"></span>
           </div>
           <div class="agent-operation-grid">
-            <button data-agent-operation="preflight"><i data-lucide="shield-check"></i>Preflight</button>
-            <button data-agent-operation="sync-resumes"><i data-lucide="download"></i>Sync resumes</button>
-            <button data-agent-operation="update-resumes"><i data-lucide="upload-cloud"></i>Update resumes</button>
-            <button data-agent-operation="sync-negotiations"><i data-lucide="messages-square"></i>Sync negotiations</button>
-            <button data-agent-operation="clear-skipped"><i data-lucide="eraser"></i>Clear skipped</button>
-            <button data-agent-operation="refresh-token"><i data-lucide="key-round"></i>Refresh token</button>
+            <button data-agent-operation="preflight">Preflight</button>
+            <button data-agent-operation="sync-resumes">Sync resumes</button>
+            <button data-agent-operation="update-resumes">Update resumes</button>
+            <button data-agent-operation="sync-negotiations">Sync negotiations</button>
+            <button data-agent-operation="clear-skipped">Clear skipped</button>
+            <button data-agent-operation="refresh-token">Refresh token</button>
           </div>
         </div>
 
         <div class="panel">
           <div class="panel-head">
             <h2>Последний digest</h2>
-            <button onclick="loadAgentDigest()"><i data-lucide="refresh-cw"></i>Обновить</button>
+            <button onclick="loadAgentDigest()">Обновить</button>
           </div>
           <div id="agent-digest-list" class="agent-list"></div>
         </div>
@@ -370,7 +366,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Approval queue</h2>
-            <button onclick="loadAgentApprovals()"><i data-lucide="refresh-cw"></i>Обновить</button>
+            <button onclick="loadAgentApprovals()">Обновить</button>
           </div>
           <div id="agent-approvals-list" class="agent-list"></div>
         </div>
@@ -384,8 +380,8 @@
               <p class="meta">HH search analysis with local dry-run apply planning.</p>
             </div>
             <div class="actions">
-              <button id="agent-research-run-button"><i data-lucide="search-check"></i>Analyze</button>
-              <button id="agent-research-plan-button" class="primary"><i data-lucide="send"></i>Plan apply</button>
+              <button id="agent-research-run-button">Analyze</button>
+              <button id="agent-research-plan-button" class="primary">Plan apply</button>
             </div>
           </div>
           <div class="hh-lab-editor">
@@ -401,7 +397,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Runs и логи</h2>
-            <button onclick="loadAgentOperations()"><i data-lucide="refresh-cw"></i>Обновить</button>
+            <button onclick="loadAgentOperations()">Обновить</button>
           </div>
           <div id="agent-runs-list" class="agent-list"></div>
           <div class="section-title">Логи</div>
@@ -414,8 +410,8 @@
           <div class="panel-head">
             <h2>HH API Lab</h2>
             <div class="actions">
-              <button id="hh-lab-run-button" class="primary"><i data-lucide="play"></i>Run</button>
-              <button id="hh-lab-save-snippet-button"><i data-lucide="save"></i>Save snippet</button>
+              <button id="hh-lab-run-button" class="primary">Run</button>
+              <button id="hh-lab-save-snippet-button">Save snippet</button>
             </div>
           </div>
           <div id="hh-lab-quick-calls" class="agent-operation-grid"></div>
@@ -445,7 +441,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Letter templates</h2>
-            <button id="agent-save-template-button" class="primary"><i data-lucide="save"></i>Сохранить</button>
+            <button id="agent-save-template-button" class="primary">Сохранить</button>
           </div>
           <div class="agent-form-grid">
             <label>Название <input id="agent-template-name" placeholder="warm_reply"></label>
@@ -462,7 +458,7 @@
               <h2>Resume template preview</h2>
               <p>Markdown template + active profile/about -> HH payload draft.</p>
             </div>
-            <button id="agent-resume-preview-button" class="primary"><i data-lucide="eye"></i>Preview</button>
+            <button id="agent-resume-preview-button" class="primary">Preview</button>
           </div>
           <div class="agent-form-grid">
             <label style="grid-column:1/-1;">Markdown template
@@ -480,7 +476,7 @@
               <h2>Batch preset matrix</h2>
               <p>resumes x search presets x letters x limits, with secrets and local scripts stripped.</p>
             </div>
-            <button id="agent-batch-matrix-button"><i data-lucide="grid-3x3"></i>Build</button>
+            <button id="agent-batch-matrix-button">Build</button>
           </div>
           <label>Matrix JSON
             <textarea id="agent-batch-matrix-input" rows="10" spellcheck="false"></textarea>
@@ -493,7 +489,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Employer blacklist</h2>
-            <button id="agent-save-blacklist-button" class="primary"><i data-lucide="save"></i>Сохранить</button>
+            <button id="agent-save-blacklist-button" class="primary">Сохранить</button>
           </div>
           <div class="agent-form-grid three">
             <label>Employer ID <input id="agent-blacklist-id" placeholder="123456"></label>

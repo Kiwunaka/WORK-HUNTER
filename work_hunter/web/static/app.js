@@ -57,12 +57,30 @@ async function api(path, options = {}) {
   return data;
 }
 
-function requirePositiveInteger(value, label) {
+function requirePositiveInteger(value, fieldName = "id") {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error(`${label} must be a positive integer`);
+    throw new Error(`Invalid ${fieldName}`);
   }
   return parsed;
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(String(value ?? ""), window.location.origin);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "#";
+  } catch (_error) {
+    return "#";
+  }
+}
+
+function numericRecordAction(action, value, fieldName) {
+  const id = requirePositiveInteger(value, fieldName);
+  return `data-record-action="${escapeAttr(action)}" data-record-id="${id}"`;
+}
+
+function keyedRecordAction(action, value) {
+  return `data-record-action="${escapeAttr(action)}" data-record-key="${escapeAttr(value)}"`;
 }
 
 const sectionLoadingCounts = new WeakMap();
@@ -120,14 +138,15 @@ function renderJobs() {
   const body = $("#jobs-body");
   body.innerHTML = "";
   for (const job of state.jobs) {
+    const jobId = requirePositiveInteger(job.id, "job id");
     const tr = document.createElement("tr");
-    tr.className = job.id === state.selectedId ? "selected" : "";
+    tr.className = jobId === state.selectedId ? "selected" : "";
     bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
-    const checked = selectedJobIds.has(Number(job.id)) ? "checked" : "";
+    const checked = selectedJobIds.has(jobId) ? "checked" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)" ${checked}></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${jobId}" data-record-action="toggle-job-select" data-record-id="${jobId}" ${checked}></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
@@ -160,7 +179,7 @@ function renderDetail(job) {
   $("#job-detail").className = "detail";
   $("#job-detail").innerHTML = `
     <h2>${escapeHtml(job.title)}</h2>
-    <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(job.url)}" target="_blank" rel="noreferrer">открыть</a></p>
+    <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(safeExternalUrl(job.url))}" target="_blank" rel="noreferrer">открыть</a></p>
     <div class="detail-actions">
       <button onclick="markSelected('saved')">Сохранить</button>
       <button onclick="markSelected('hidden')">Скрыть</button>
@@ -624,16 +643,7 @@ function escapeHtml(value) {
 }
 
 function escapeAttr(value) {
-  return escapeHtml(value || "#");
-}
-
-function escapeJsString(value) {
-  return String(value ?? "")
-    .replaceAll("\\", "\\\\")
-    .replaceAll("'", "\\'")
-    .replaceAll("\n", "\\n")
-    .replaceAll("\r", "\\r")
-    .replaceAll("<", "\\u003c");
+  return escapeHtml(value);
 }
 
 function letterBoxes() {
@@ -678,15 +688,13 @@ function activateView(view, options = {}) {
   if (routeView === "favorites") loadFavorites().catch(console.error);
   if (routeView === "stats") loadStats().catch(console.error);
   if (routeView === "agent") loadAgentCockpit().catch(console.error);
-  refreshIcons();
 }
 
 function toggleTheme() {
   state.darkTheme = !state.darkTheme;
   document.documentElement.setAttribute("data-theme", state.darkTheme ? "dark" : "light");
-  $("#theme-toggle-button").innerHTML = state.darkTheme ? '<i data-lucide="sun"></i> Светлая' : '<i data-lucide="moon"></i> Тёмная';
+  $("#theme-toggle-button").textContent = state.darkTheme ? "Светлая" : "Тёмная";
   localStorage.setItem("work-hunter-theme", state.darkTheme ? "dark" : "light");
-  if (window.lucide) lucide.createIcons();
 }
 
 function loadTheme() {
@@ -695,7 +703,7 @@ function loadTheme() {
     state.darkTheme = true;
     document.documentElement.setAttribute("data-theme", "dark");
     if ($("#theme-toggle-button")) {
-      $("#theme-toggle-button").innerHTML = '<i data-lucide="sun"></i> Светлая';
+      $("#theme-toggle-button").textContent = "Светлая";
     }
   }
 }
@@ -835,8 +843,12 @@ async function loadFavorites() {
 }
 
 function funnelWidth(count, total) {
-  if (!total) return 0;
-  return Math.min(100, Math.max(0, (Number(count) / Number(total)) * 100));
+  const numericCount = Number(count);
+  const numericTotal = Number(total);
+  if (!Number.isFinite(numericCount) || !Number.isFinite(numericTotal) || numericTotal <= 0) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, (numericCount / numericTotal) * 100));
 }
 
 async function loadStats() {
@@ -851,7 +863,11 @@ async function loadStats() {
     sourceDiv.innerHTML = "";
     if (stats.by_source) {
       for (const [source, count] of Object.entries(stats.by_source)) {
-        sourceDiv.innerHTML += `<div class="stat-bar"><span>${source}</span><div class="bar"><div class="fill" style="width:${Math.min(count/10, 100)}%"></div></div><span>${count}</span></div>`;
+        const numericCount = Number(count);
+        const width = Number.isFinite(numericCount)
+          ? Math.min(100, Math.max(0, numericCount / 10))
+          : 0;
+        sourceDiv.innerHTML += `<div class="stat-bar"><span>${escapeHtml(source)}</span><div class="bar"><div class="fill" style="width:${width}%"></div></div><span>${escapeHtml(String(count))}</span></div>`;
       }
     }
 
@@ -859,7 +875,11 @@ async function loadStats() {
     distDiv.innerHTML = "";
     if (stats.score_distribution) {
       for (const [bucket, count] of Object.entries(stats.score_distribution)) {
-        distDiv.innerHTML += `<div class="stat-bar"><span>${bucket}</span><div class="bar"><div class="fill" style="width:${Math.min(count/5, 100)}%"></div></div><span>${count}</span></div>`;
+        const numericCount = Number(count);
+        const width = Number.isFinite(numericCount)
+          ? Math.min(100, Math.max(0, numericCount / 5))
+          : 0;
+        distDiv.innerHTML += `<div class="stat-bar"><span>${escapeHtml(bucket)}</span><div class="bar"><div class="fill" style="width:${width}%"></div></div><span>${escapeHtml(String(count))}</span></div>`;
       }
     }
 
@@ -868,9 +888,10 @@ async function loadStats() {
     if (stats.application_funnel) {
       const total = stats.total_applications || 0;
       for (const item of stats.application_funnel) {
-        const count = Number(item.count) || 0;
+        const count = Number(item.count);
+        const safeCount = Number.isFinite(count) ? count : 0;
         const status = String(item.status || "");
-        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${funnelWidth(count, total)}%;min-width:40px;"><span>${escapeHtml(status)}</span><strong>${count}</strong></div>`;
+        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${funnelWidth(safeCount, total)}%;min-width:40px;"><span>${escapeHtml(status)}</span><strong>${escapeHtml(String(item.count))}</strong></div>`;
       }
     }
   } catch (e) {
@@ -962,10 +983,6 @@ function switchAiTab(panelName) {
   document.querySelector(`#ai-panel-${panelName}`).classList.add("active");
 }
 
-function refreshIcons() {
-  if (window.lucide) lucide.createIcons();
-}
-
 function switchAgentPanel(panelName) {
   document.querySelectorAll(".agent-tab").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".agent-panel").forEach(p => p.classList.remove("active"));
@@ -989,7 +1006,6 @@ async function loadAgentCockpit({ liveAuth = false } = {}) {
   ]);
   renderAgentResearch();
   $("#agent-status-line").textContent = "Готово";
-  refreshIcons();
 }
 
 async function loadAgentPreflight({ liveAuth = false } = {}) {
@@ -1009,7 +1025,6 @@ async function checkAgentLiveAuth() {
     showSectionError("agent-auth", error, checkAgentLiveAuth);
   } finally {
     setBusy("#agent-live-auth-button", false);
-    refreshIcons();
   }
 }
 
@@ -1103,14 +1118,13 @@ function renderAgentDigest() {
     </div>
     <div class="agent-row">
       <div class="agent-row-head"><strong>Recent approvals</strong><span class="agent-badge">${approvals.length}</span></div>
-      ${approvals.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.action_type)} · ${escapeHtml(item.status)} · ${escapeHtml(item.reason || "")}</div>`).join("") || '<p class="meta">Нет approvals.</p>'}
+      ${approvals.map((item) => `<div class="meta">#${escapeHtml(String(item.id))} ${escapeHtml(item.action_type)} · ${escapeHtml(item.status)} · ${escapeHtml(item.reason || "")}</div>`).join("") || '<p class="meta">Нет approvals.</p>'}
     </div>
     <div class="agent-row">
       <div class="agent-row-head"><strong>Recent runs</strong><span class="agent-badge">${runs.length}</span></div>
-      ${runs.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.tool_name)} · ${escapeHtml(item.status)}</div>`).join("") || '<p class="meta">Нет запусков.</p>'}
+      ${runs.map((item) => `<div class="meta">#${escapeHtml(String(item.id))} ${escapeHtml(item.tool_name)} · ${escapeHtml(item.status)}</div>`).join("") || '<p class="meta">Нет запусков.</p>'}
     </div>
   `;
-  refreshIcons();
 }
 
 function renderAgentApprovals() {
@@ -1121,24 +1135,26 @@ function renderAgentApprovals() {
     box.innerHTML = '<p class="meta">Очередь пустая.</p>';
     return;
   }
-  box.innerHTML = approvals.map((item) => `
-    <div class="agent-row">
-      <div class="agent-row-head">
-        <strong>#${item.id} ${escapeHtml(item.action_type)}</strong>
-        <span class="agent-badge ${escapeAttr(item.status)}">${escapeHtml(item.status)}</span>
+  box.innerHTML = approvals.map((item) => {
+    const approvalId = requirePositiveInteger(item.id, "approval id");
+    return `
+      <div class="agent-row">
+        <div class="agent-row-head">
+          <strong>#${approvalId} ${escapeHtml(item.action_type)}</strong>
+          <span class="agent-badge ${escapeAttr(item.status)}">${escapeHtml(item.status)}</span>
+        </div>
+        <div class="meta">confidence: ${escapeHtml(String(item.confidence))} · ${escapeHtml(item.reason || "")}</div>
+        <pre class="agent-json">${escapeHtml(JSON.stringify(item.payload || {}, null, 2))}</pre>
+        <textarea id="agent-modify-${approvalId}" class="agent-modify" rows="2" placeholder="Что изменить в payload/сообщении"></textarea>
+        <div class="agent-row-actions">
+          <button ${numericRecordAction("approve-agent-approval", approvalId, "approval id")}>Approve</button>
+          <button ${numericRecordAction("reject-agent-approval", approvalId, "approval id")}>Reject</button>
+          <button ${numericRecordAction("modify-agent-approval", approvalId, "approval id")}>Modify</button>
+          <button ${numericRecordAction("flag-agent-approval", approvalId, "approval id")}>Flag</button>
+        </div>
       </div>
-      <div class="meta">confidence: ${escapeHtml(String(item.confidence))} · ${escapeHtml(item.reason || "")}</div>
-      <pre class="agent-json">${escapeHtml(JSON.stringify(item.payload || {}, null, 2))}</pre>
-      <textarea id="agent-modify-${item.id}" class="agent-modify" rows="2" placeholder="Что изменить в payload/сообщении"></textarea>
-      <div class="agent-row-actions">
-        <button onclick="approveAgentApproval(${item.id})"><i data-lucide="check"></i>Approve</button>
-        <button onclick="rejectAgentApproval(${item.id})"><i data-lucide="x"></i>Reject</button>
-        <button onclick="modifyAgentApproval(${item.id})"><i data-lucide="pencil"></i>Modify</button>
-        <button onclick="flagAgentApproval(${item.id})"><i data-lucide="flag"></i>Flag</button>
-      </div>
-    </div>
-  `).join("");
-  refreshIcons();
+    `;
+  }).join("");
 }
 
 function renderAgentOperations() {
@@ -1149,12 +1165,12 @@ function renderAgentOperations() {
   box.innerHTML = operations.runs.length ? operations.runs.map((run) => `
     <div class="agent-row">
       <div class="agent-row-head">
-        <strong>#${run.id} ${escapeHtml(run.tool_name)}</strong>
+        <strong>#${escapeHtml(String(run.id))} ${escapeHtml(run.tool_name)}</strong>
         <span class="agent-badge ${escapeAttr(run.status)}">${escapeHtml(run.status)}</span>
       </div>
       <div class="meta">${escapeHtml(run.started_at || "")} ${run.finished_at ? "→ " + escapeHtml(run.finished_at) : ""}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify(run.output || run.input || {}, null, 2))}</pre>
-      ${run.status === "running" ? `<button onclick="cancelAgentOperation(${run.id})"><i data-lucide="ban"></i>Cancel</button>` : ""}
+      ${run.status === "running" ? `<button ${numericRecordAction("cancel-agent-operation", run.id, "operation id")}>Cancel</button>` : ""}
     </div>
   `).join("") : '<p class="meta">Запусков пока нет.</p>';
   logBox.innerHTML = operations.logs.length ? operations.logs.map((log) => `
@@ -1164,7 +1180,6 @@ function renderAgentOperations() {
       <span>${escapeHtml(log.message || "")}</span>
     </div>
   `).join("") : '<p class="meta">Логов пока нет.</p>';
-  refreshIcons();
 }
 
 function renderAgentInbox() {
@@ -1249,12 +1264,11 @@ function renderAgentTemplates() {
     <div class="agent-row">
       <div class="agent-row-head">
         <strong>${escapeHtml(item.name)}</strong>
-        <button onclick="deleteAgentTemplate('${escapeJsString(item.name)}')"><i data-lucide="trash-2"></i>Удалить</button>
+        <button ${keyedRecordAction("delete-agent-template", item.name)}>Удалить</button>
       </div>
       <pre class="agent-json">${escapeHtml(item.body || "")}</pre>
     </div>
   `).join("") : '<p class="meta">Шаблонов пока нет.</p>';
-  refreshIcons();
 }
 
 function renderAgentBlacklist() {
@@ -1265,12 +1279,11 @@ function renderAgentBlacklist() {
     <div class="agent-row">
       <div class="agent-row-head">
         <strong>${escapeHtml(item.employer_name || item.employer_id)}</strong>
-        <button onclick="deleteAgentBlacklist('${escapeJsString(item.employer_id)}')"><i data-lucide="trash-2"></i>Удалить</button>
+        <button ${keyedRecordAction("delete-agent-blacklist", item.employer_id)}>Удалить</button>
       </div>
       <div class="meta">${escapeHtml(item.employer_id)} · ${escapeHtml(item.reason || "")}</div>
     </div>
   `).join("") : '<p class="meta">Blacklist пустой.</p>';
-  refreshIcons();
 }
 
 function renderHhLabQuickCalls() {
@@ -1278,11 +1291,8 @@ function renderHhLabQuickCalls() {
   if (!box) return;
   const calls = state.agent.labQuickCalls || [];
   box.innerHTML = calls.map((item) => `
-    <button onclick="runHhLabQuick('${escapeJsString(item.id)}')">
-      <i data-lucide="zap"></i>${escapeHtml(item.label || item.path)}
-    </button>
+    <button ${keyedRecordAction("run-hh-lab-quick", item.id)}>${escapeHtml(item.label || item.path)}</button>
   `).join("");
-  refreshIcons();
 }
 
 function renderHhLabSnippets() {
@@ -1302,13 +1312,12 @@ function renderHhLabSnippets() {
       <div class="meta">${escapeHtml(item.path)}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify({ params: item.params || {}, body: item.body || {} }, null, 2))}</pre>
       <div class="agent-row-actions">
-        <button onclick="fillHhLabRequestByName('${escapeJsString(item.name)}')"><i data-lucide="copy"></i>Load</button>
-        <button onclick="runHhLabSnippet('${escapeJsString(item.name)}')"><i data-lucide="play"></i>Run</button>
-        <button onclick="deleteHhLabSnippet('${escapeJsString(item.name)}')"><i data-lucide="trash-2"></i>Delete</button>
+        <button ${keyedRecordAction("fill-hh-lab-snippet", item.name)}>Load</button>
+        <button ${keyedRecordAction("run-hh-lab-snippet", item.name)}>Run</button>
+        <button ${keyedRecordAction("delete-hh-lab-snippet", item.name)}>Delete</button>
       </div>
     </div>
   `).join("");
-  refreshIcons();
 }
 
 function fillHhLabRequest(request) {
@@ -1429,7 +1438,6 @@ async function runAgentOperation(operation, button = null) {
     $("#agent-operation-note").textContent = `${operation}: ${err.message}`;
   } finally {
     if (button) button.disabled = false;
-    refreshIcons();
   }
 }
 
@@ -1467,7 +1475,6 @@ async function runAgentResearch(planApply = false) {
   } finally {
     if (runButton) runButton.disabled = false;
     if (planButton) planButton.disabled = false;
-    refreshIcons();
   }
 }
 
@@ -1508,27 +1515,30 @@ function renderAgentResearch() {
     </div>
   `).join("");
   box.innerHTML = header + (cards || '<p class="meta">No items returned.</p>');
-  refreshIcons();
 }
 
 async function cancelAgentOperation(id) {
-  await api(`/api/cancel/${id}`, { method: "POST", body: JSON.stringify({ reason: "cancelled_from_ui" }) });
+  const operationId = requirePositiveInteger(id, "operation id");
+  await api(`/api/cancel/${operationId}`, { method: "POST", body: JSON.stringify({ reason: "cancelled_from_ui" }) });
   await loadAgentOperations();
 }
 
 async function approveAgentApproval(id) {
-  await api(`/api/approvals/${id}/approve`, { method: "POST", body: JSON.stringify({ reason: "approved_from_ui" }) });
+  const approvalId = requirePositiveInteger(id, "approval id");
+  await api(`/api/approvals/${approvalId}/approve`, { method: "POST", body: JSON.stringify({ reason: "approved_from_ui" }) });
   await Promise.all([loadAgentApprovals(), loadAgentDigest()]);
 }
 
 async function rejectAgentApproval(id) {
-  await api(`/api/approvals/${id}/reject`, { method: "POST", body: JSON.stringify({ reason: "rejected_from_ui" }) });
+  const approvalId = requirePositiveInteger(id, "approval id");
+  await api(`/api/approvals/${approvalId}/reject`, { method: "POST", body: JSON.stringify({ reason: "rejected_from_ui" }) });
   await Promise.all([loadAgentApprovals(), loadAgentDigest()]);
 }
 
 async function modifyAgentApproval(id) {
-  const instruction = $(`#agent-modify-${id}`)?.value.trim() || "modified_from_ui";
-  await api(`/api/approvals/${id}/modify`, {
+  const approvalId = requirePositiveInteger(id, "approval id");
+  const instruction = $(`#agent-modify-${approvalId}`)?.value.trim() || "modified_from_ui";
+  await api(`/api/approvals/${approvalId}/modify`, {
     method: "POST",
     body: JSON.stringify({ instruction, payload_patch: {} }),
   });
@@ -1536,7 +1546,8 @@ async function modifyAgentApproval(id) {
 }
 
 async function flagAgentApproval(id) {
-  await api(`/api/approvals/${id}/flag`, { method: "POST", body: JSON.stringify({ reason: "flagged_from_ui" }) });
+  const approvalId = requirePositiveInteger(id, "approval id");
+  await api(`/api/approvals/${approvalId}/flag`, { method: "POST", body: JSON.stringify({ reason: "flagged_from_ui" }) });
   await Promise.all([loadAgentApprovals(), loadAgentDigest()]);
 }
 
@@ -1645,8 +1656,52 @@ async function buildAgentBatchMatrix() {
   $("#agent-batch-matrix-output").textContent = JSON.stringify(result, null, 2);
 }
 
+const dynamicRecordActions = Object.freeze({
+  "toggle-job-select": (control) => toggleJobSelect(
+    requirePositiveInteger(control.dataset.recordId, "job id"),
+    control.checked,
+  ),
+  "approve-agent-approval": (control) => approveAgentApproval(control.dataset.recordId),
+  "reject-agent-approval": (control) => rejectAgentApproval(control.dataset.recordId),
+  "modify-agent-approval": (control) => modifyAgentApproval(control.dataset.recordId),
+  "flag-agent-approval": (control) => flagAgentApproval(control.dataset.recordId),
+  "cancel-agent-operation": (control) => cancelAgentOperation(control.dataset.recordId),
+  "delete-agent-template": (control) => deleteAgentTemplate(control.dataset.recordKey),
+  "delete-agent-blacklist": (control) => deleteAgentBlacklist(control.dataset.recordKey),
+  "run-hh-lab-quick": (control) => runHhLabQuick(control.dataset.recordKey),
+  "fill-hh-lab-snippet": (control) => fillHhLabRequestByName(control.dataset.recordKey),
+  "run-hh-lab-snippet": (control) => runHhLabSnippet(control.dataset.recordKey),
+  "delete-hh-lab-snippet": (control) => deleteHhLabSnippet(control.dataset.recordKey),
+  "activate-resume": (control) => activateResume(control.dataset.recordId),
+  "edit-resume": (control) => showResumeForm(control.dataset.recordId),
+  "delete-resume": (control) => deleteResume(control.dataset.recordId),
+  "delete-event": (control) => deleteEvent(control.dataset.recordId),
+  "delete-search": (control) => deleteSearch(control.dataset.recordId),
+  "mark-ghost-job": (control) => markGhostJob(control.dataset.recordId),
+});
+
+function reportDynamicActionError(error) {
+  window.alert(`Ошибка: ${error?.message || error}`);
+}
+
+function handleDynamicRecordAction(event) {
+  const control = event.target instanceof Element
+    ? event.target.closest("[data-record-action]")
+    : null;
+  if (!control) return;
+  const handler = dynamicRecordActions[control.dataset.recordAction];
+  if (!handler) return;
+  if (control.matches(".job-checkbox")) event.stopPropagation();
+  try {
+    Promise.resolve(handler(control)).catch(reportDynamicActionError);
+  } catch (error) {
+    reportDynamicActionError(error);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   setupResumeBuilderDefaults();
+  document.addEventListener("click", handleDynamicRecordAction);
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.addEventListener("click", () => activateView(button.dataset.view));
   });
@@ -1702,7 +1757,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("popstate", () => activateView(routeViewFromPath(window.location.pathname), { push: false }));
 
   loadTheme();
-  refreshIcons();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js");
   }
@@ -1728,7 +1782,7 @@ function resetResumeForm() {
 }
 
 function showResumeForm(id = 0) {
-  editingResumeId = Number(id) || 0;
+  editingResumeId = id ? requirePositiveInteger(id, "resume id") : 0;
   const resume = state.resumes.find((item) => Number(item.id) === editingResumeId);
   $("#resume-name-input").value = resume?.name || "";
   $("#resume-body-input").value = resume?.body || "";
@@ -1770,13 +1824,14 @@ async function loadResumes() {
     const list = $("#resumes-list");
     list.innerHTML = "";
     for (const r of resumes) {
+      const resumeId = requirePositiveInteger(r.id, "resume id");
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(r.name)}</strong>
-        <div class="meta">${r.is_active ? "★ Активное" : ""} · ATS: ${r.ats_score ?? "—"}</div>
+        <div class="meta">${r.is_active ? "★ Активное" : ""} · ATS: ${escapeHtml(String(r.ats_score ?? "—"))}</div>
         <div style="margin-top:6px;display:flex;gap:6px;">
-          <button aria-label="Активировать резюме ${escapeAttr(r.name)}" onclick="activateResume(${r.id})">Активировать</button>
-          <button aria-label="Редактировать резюме ${escapeAttr(r.name)}" onclick="showResumeForm(${r.id})">Ред.</button>
-          <button aria-label="Удалить резюме ${escapeAttr(r.name)}" onclick="deleteResume(${r.id})">Удалить</button>
+          <button aria-label="Активировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("activate-resume", resumeId, "resume id")}>Активировать</button>
+          <button aria-label="Редактировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("edit-resume", resumeId, "resume id")}>Ред.</button>
+          <button aria-label="Удалить резюме ${escapeAttr(r.name)}" ${numericRecordAction("delete-resume", resumeId, "resume id")}>Удалить</button>
         </div>
       </div>`;
     }
@@ -1784,13 +1839,15 @@ async function loadResumes() {
 }
 
 async function activateResume(id) {
-  await api(`/api/resumes/${id}/activate`, { method: "POST", body: "{}" });
+  const resumeId = requirePositiveInteger(id, "resume id");
+  await api(`/api/resumes/${resumeId}/activate`, { method: "POST", body: "{}" });
   await loadResumes();
 }
 
 async function deleteResume(id) {
   if (!confirm("Удалить резюме?")) return;
-  await api(`/api/resumes/${id}/delete`, { method: "POST", body: "{}" });
+  const resumeId = requirePositiveInteger(id, "resume id");
+  await api(`/api/resumes/${resumeId}/delete`, { method: "POST", body: "{}" });
   await loadResumes();
 }
 
@@ -1839,19 +1896,21 @@ async function loadEvents() {
       return;
     }
     for (const ev of events) {
+      const eventId = requirePositiveInteger(ev.id, "event id");
       const date = ev.event_date ? new Date(ev.event_date).toLocaleString("ru-RU") : "—";
       list.innerHTML += `<div class="source-row">
-        <strong>${escapeHtml(ev.title)} — ${date}</strong>
-        <div class="meta">${escapeHtml(ev.event_type)} · Job #${ev.job_id || "—"}</div>
+        <strong>${escapeHtml(ev.title)} — ${escapeHtml(date)}</strong>
+        <div class="meta">${escapeHtml(ev.event_type)} · Job #${escapeHtml(String(ev.job_id || "—"))}</div>
         <div class="meta">${escapeHtml(ev.notes || "")}</div>
-        <button onclick="deleteEvent(${ev.id})" style="margin-top:4px;">Удалить</button>
+        <button ${numericRecordAction("delete-event", eventId, "event id")} style="margin-top:4px;">Удалить</button>
       </div>`;
     }
   } catch (e) { console.error(e); }
 }
 
 async function deleteEvent(id) {
-  await api(`/api/events/${id}/delete`, { method: "POST", body: "{}" });
+  const eventId = requirePositiveInteger(id, "event id");
+  await api(`/api/events/${eventId}/delete`, { method: "POST", body: "{}" });
   await loadEvents();
 }
 
@@ -1862,14 +1921,15 @@ function toggleSelectAll() {
   selectedJobIds.clear();
   document.querySelectorAll(".job-checkbox").forEach(cb => {
     cb.checked = checked;
-    if (checked) selectedJobIds.add(parseInt(cb.dataset.jobId));
+    if (checked) selectedJobIds.add(requirePositiveInteger(cb.dataset.jobId, "job id"));
   });
   updateBulkToolbar();
 }
 
 function toggleJobSelect(jobId, checked) {
-  if (checked) selectedJobIds.add(jobId);
-  else selectedJobIds.delete(jobId);
+  const id = requirePositiveInteger(jobId, "job id");
+  if (checked) selectedJobIds.add(id);
+  else selectedJobIds.delete(id);
   updateBulkToolbar();
 }
 
@@ -1882,7 +1942,7 @@ function updateBulkToolbar() {
 function syncBulkCheckboxes() {
   const boxes = Array.from(document.querySelectorAll(".job-checkbox"));
   for (const cb of boxes) {
-    cb.checked = selectedJobIds.has(Number(cb.dataset.jobId));
+    cb.checked = selectedJobIds.has(requirePositiveInteger(cb.dataset.jobId, "job id"));
   }
   const selectAll = $("#select-all-checkbox");
   if (selectAll) {
@@ -1936,14 +1996,15 @@ function renderFilteredJobs(jobs) {
   const body = $("#jobs-body");
   body.innerHTML = "";
   for (const job of jobs) {
+    const jobId = requirePositiveInteger(job.id, "job id");
     const tr = document.createElement("tr");
-    tr.className = job.id === state.selectedId ? "selected" : "";
+    tr.className = jobId === state.selectedId ? "selected" : "";
     bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
-    const checked = selectedJobIds.has(Number(job.id)) ? "checked" : "";
+    const checked = selectedJobIds.has(jobId) ? "checked" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)" ${checked}></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${jobId}" data-record-action="toggle-job-select" data-record-id="${jobId}" ${checked}></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
@@ -1992,17 +2053,19 @@ async function loadSearches() {
     list.innerHTML = "";
     if (!searches.length) { list.innerHTML = '<p class="meta">Нет сохранённых поисков.</p>'; return; }
     for (const s of searches) {
+      const searchId = requirePositiveInteger(s.id, "search id");
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(s.name)}</strong>
         <div class="meta">${escapeHtml(s.query)} · alert: ${s.alert_enabled ? "on" : "off"}</div>
-        <button onclick="deleteSearch(${s.id})" style="margin-top:4px;">Удалить</button>
+        <button ${numericRecordAction("delete-search", searchId, "search id")} style="margin-top:4px;">Удалить</button>
       </div>`;
     }
   } catch (e) { console.error(e); }
 }
 
 async function deleteSearch(id) {
-  await api(`/api/saved-searches/${id}/delete`, { method: "POST", body: "{}" });
+  const searchId = requirePositiveInteger(id, "search id");
+  await api(`/api/saved-searches/${searchId}/delete`, { method: "POST", body: "{}" });
   await loadSearches();
 }
 
@@ -2023,7 +2086,9 @@ async function loadMarketTrends() {
     const result = await api("/api/market-trends", { method: "POST", body: JSON.stringify({ limit: 50 }) });
     $("#trends-output").innerHTML = renderMarkdown(result.content);
   } catch (e) {
-    $("#trends-output").innerHTML = `<p class="error">Ошибка: ${e.message}</p>`;
+    const output = $("#trends-output");
+    output.classList.add("error");
+    output.textContent = `Ошибка: ${e.message}`;
   }
 }
 
@@ -2101,10 +2166,11 @@ async function loadGhostJobs() {
     list.innerHTML = "";
     if (!jobs.length) { list.innerHTML = '<p class="meta">Призраков нет!</p>'; return; }
     for (const j of jobs) {
+      const jobId = requirePositiveInteger(j.id, "job id");
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(j.title)}</strong>
         <div class="meta">${escapeHtml(j.company || "?")} · ${escapeHtml(j.source)}</div>
-        <button aria-label="Отметить ghosted: ${escapeAttr(j.title)}" onclick="markGhostJob(${j.id})" style="margin-top:4px;">Отметить ghosted</button>
+        <button aria-label="Отметить ghosted: ${escapeAttr(j.title)}" data-record-action="mark-ghost-job" data-record-id="${jobId}" data-job-id="${jobId}" style="margin-top:4px;">Отметить ghosted</button>
       </div>`;
     }
   } catch (e) { console.error(e); }

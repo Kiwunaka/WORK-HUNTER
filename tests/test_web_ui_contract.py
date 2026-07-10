@@ -248,6 +248,31 @@ def test_ui_static_contract_has_routes_and_no_duplicate_ids():
     assert "window.addEventListener(\"popstate\"" in app
 
 
+def test_ui_static_assets_have_no_remote_runtime_dependencies():
+    combined = "\n".join(
+        _read_static(name) for name in ("index.html", "app.js", "app.css")
+    )
+    for forbidden in (
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
+        "unpkg.com",
+        "@latest",
+        "data-lucide",
+        "refreshIcons",
+    ):
+        assert forbidden not in combined
+
+
+def test_dynamic_actions_validate_data_values_and_avoid_inline_javascript():
+    app = _read_static("app.js")
+
+    assert 'function requirePositiveInteger(value, fieldName = "id")' in app
+    assert "Number.isSafeInteger(parsed)" in app
+    assert re.search(r'onclick="[^"]*\$\{', app) is None
+    assert "data-record-action" in app
+    assert "handleDynamicRecordAction" in app
+
+
 def test_ui_contract_keeps_trends_explicit_and_bulk_selection_stable():
     index = _read_static("index.html")
     app = _read_static("app.js")
@@ -255,8 +280,9 @@ def test_ui_contract_keeps_trends_explicit_and_bulk_selection_stable():
     assert 'id="load-trends-button"' in index
     assert "loadMarketTrends()" in index
     assert "addEventListener(\"click\", loadMarketTrends)" not in app
-    assert "event.stopPropagation();toggleJobSelect" in app
-    assert "selectedJobIds.has(Number(job.id))" in app
+    assert 'data-record-action="toggle-job-select"' in app
+    assert 'control.matches(".job-checkbox")' in app
+    assert "selectedJobIds.has(jobId)" in app
     assert "syncBulkCheckboxes()" in app
     assert "research-and-apply" in app
     assert 'id="agent-research-output"' in index
@@ -297,7 +323,7 @@ def test_resume_edit_and_ghost_actions_keep_explicit_record_identity():
     assert "await api(`/api/jobs/${id}/apply`" in app
     assert "await api(`/api/jobs/${id}/record-event`" in app
     assert "async function markGhostJob(jobId)" in app
-    assert 'onclick="markGhostJob(${j.id})"' in app
+    assert 'data-record-action="mark-ghost-job"' in app
     assert 'aria-label="Редактировать резюме ${escapeAttr(r.name)}"' in app
     assert 'aria-label="Отметить ghosted: ${escapeAttr(j.title)}"' in app
     assert '$("#save-resume-button").textContent = editingResumeId' in app

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ipaddress
+import json
+import re
 import socket
 import struct
 import threading
@@ -13,12 +15,6 @@ from playwright.sync_api import expect, sync_playwright
 from work_hunter.models import Job, Resume
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
-
-
-REMOTE_ASSET_STUBS = {
-    "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap": "text/css",
-    "https://unpkg.com/lucide@latest/dist/umd/lucide.js": "application/javascript",
-}
 
 
 class BrowserTestHTTPServer(ThreadingHTTPServer):
@@ -110,6 +106,7 @@ def browser_app(tmp_path):
     page_errors: list[str] = []
     console_errors: list[str] = []
     expected_console_errors: list[str] = []
+    request_urls: list[str] = []
     proxy_guard: socket.socket | None = None
     try:
         proxy_guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -125,13 +122,6 @@ def browser_app(tmp_path):
 
                 def keep_browser_requests_local(route):
                     url = route.request.url
-                    if url in REMOTE_ASSET_STUBS:
-                        route.fulfill(
-                            status=200,
-                            content_type=REMOTE_ASSET_STUBS[url],
-                            body="",
-                        )
-                        return
                     hostname = urlsplit(url).hostname
                     if hostname in {
                         "127.0.0.1",
@@ -143,6 +133,7 @@ def browser_app(tmp_path):
                     route.abort("blockedbyclient")
 
                 context.route("**/*", keep_browser_requests_local)
+                context.on("request", lambda request: request_urls.append(request.url))
                 page = context.new_page()
                 setattr(
                     page,
@@ -183,6 +174,11 @@ def browser_app(tmp_path):
     assert page_errors == []
     assert console_errors == []
     assert expected_console_errors == []
+    assert all(
+        urlsplit(url).hostname in {None, "127.0.0.1", "localhost", "::1"}
+        or url.startswith("data:")
+        for url in request_urls
+    ), request_urls
 
 
 def test_ui_loads_without_browser_errors(browser_app):
@@ -209,6 +205,160 @@ def test_ui_loads_without_browser_errors(browser_app):
         expect(page.locator("body")).not_to_have_attribute("aria-busy", "true")
     finally:
         page.evaluate("window.clearInterval(window.__readinessInterval)")
+
+
+def test_untrusted_api_text_cannot_create_markup_or_handlers(browser_app):
+    page, base_url, _ = browser_app
+    malicious = '<img id="pwned" src=x onerror="window.__pwned=1">'
+    page.route(
+        "**/api/jobs?*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                [
+                    {
+                        "id": 1,
+                        "title": "Safe title",
+                        "company": "Company",
+                        "source": malicious,
+                        "status": "new",
+                        "score": None,
+                    }
+                ]
+            ),
+        ),
+    )
+    page.goto(base_url, wait_until="networkidle")
+    expect(page.locator("#jobs-body")).to_contain_text(malicious)
+    expect(page.locator("#pwned")).to_have_count(0)
+    assert page.evaluate("window.__pwned") is None
+
+
+def test_untrusted_stats_values_cannot_create_markup_or_handlers(browser_app):
+    page, base_url, _ = browser_app
+    malicious = '<img id="pwned" src=x onerror="window.__pwned=1">'
+    page.route(
+        "**/api/stats",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "total_jobs": 1,
+                    "avg_score": 10,
+                    "high_score": 0,
+                    "total_applications": 0,
+                    "by_source": {malicious: malicious},
+                    "score_distribution": {malicious: malicious},
+                    "application_funnel": [{"status": malicious, "count": malicious}],
+                }
+            ),
+        ),
+    )
+    page.goto(f"{base_url}/stats", wait_until="networkidle")
+    expect(page.locator("#view-stats")).to_contain_text(malicious)
+    expect(page.locator("#pwned")).to_have_count(0)
+    assert page.evaluate("window.__pwned") is None
+
+
+def test_untrusted_record_id_cannot_create_markup_or_handlers(browser_app):
+    page, base_url, _ = browser_app
+    malicious_id = '1"><img id="pwned" src=x onerror="window.__pwned=1">'
+    page.route(
+        "**/api/jobs?*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                [
+                    {
+                        "id": malicious_id,
+                        "title": "Unsafe identifier",
+                        "company": "Company",
+                        "source": "source",
+                        "status": "new",
+                        "score": None,
+                    }
+                ]
+            ),
+        ),
+    )
+    page.goto(base_url, wait_until="networkidle")
+    expect(page.locator("#pwned")).to_have_count(0)
+    assert page.evaluate("window.__pwned") is None
+
+
+def test_untrusted_action_key_cannot_create_inline_handlers(browser_app):
+    page, base_url, _ = browser_app
+    malicious = 'safe" onmouseover="window.__pwned=1" data-x="'
+    page.route(
+        "**/api/templates",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([{"name": malicious, "body": "Template body"}]),
+        ),
+    )
+    page.goto(f"{base_url}/agent", wait_until="networkidle")
+    expect(page.locator("#agent-templates-list")).to_contain_text(malicious)
+    expect(page.locator("#agent-templates-list [onmouseover]")).to_have_count(0)
+    assert page.evaluate("window.__pwned") is None
+
+
+def test_untrusted_job_url_is_not_an_executable_link(browser_app):
+    page, base_url, _ = browser_app
+    payload = {
+        "id": 1,
+        "title": "Unsafe URL",
+        "company": "Company",
+        "source": "source",
+        "status": "new",
+        "score": None,
+        "url": "javascript:window.__pwned=1",
+    }
+    page.route(
+        "**/api/jobs?*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([payload]),
+        ),
+    )
+    page.route(
+        "**/api/jobs/1",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        ),
+    )
+    page.goto(base_url, wait_until="networkidle")
+    page.locator("#jobs-body tr").click()
+    link = page.locator("#job-detail a")
+    expect(link).not_to_have_attribute("href", re.compile(r"^javascript:", re.I))
+    assert page.evaluate("window.__pwned") is None
+
+
+def test_untrusted_api_error_is_rendered_as_text(browser_app):
+    page, base_url, _ = browser_app
+    malicious = '<img id="pwned" src=x onerror="window.__pwned=1">'
+    page.route(
+        "**/api/market-trends",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": malicious}),
+        ),
+    )
+    page.goto(f"{base_url}/trends", wait_until="networkidle")
+    page.expect_console_error(
+        "Failed to load resource: the server responded with a status of 400 (Bad Request)"
+    )
+    page.locator("#load-trends-button").click()
+    expect(page.locator("#trends-output")).to_contain_text(malicious)
+    expect(page.locator("#pwned")).to_have_count(0)
+    assert page.evaluate("window.__pwned") is None
 
 
 def test_job_row_opens_with_enter_and_checkbox_space_stays_independent(browser_app):
