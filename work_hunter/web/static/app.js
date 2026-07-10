@@ -184,12 +184,25 @@ async function updateJobStatus(jobId, status) {
     method: "POST",
     body: JSON.stringify({ status }),
   });
+  if (status === "applied") {
+    await api(`/api/jobs/${id}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ status: "applied" }),
+    });
+  }
+  await api(`/api/jobs/${id}/record-event`, {
+    method: "POST",
+    body: JSON.stringify({ action: status }),
+  });
+  return id;
 }
 
 async function markSelected(status) {
   if (!state.selectedId) return;
-  await updateJobStatus(state.selectedId, status);
+  const id = requirePositiveInteger(state.selectedId, "job id");
+  await updateJobStatus(id, status);
   await loadJobs();
+  await selectJob(id);
 }
 
 async function prepareLetter() {
@@ -1586,6 +1599,7 @@ function showResumeForm(id = 0) {
   const resume = state.resumes.find((item) => Number(item.id) === editingResumeId);
   $("#resume-name-input").value = resume?.name || "";
   $("#resume-body-input").value = resume?.body || "";
+  $("#save-resume-button").textContent = editingResumeId ? "Обновить" : "Сохранить";
   $("#resume-form").style.display = "block";
   $("#resume-name-input").focus();
 }
@@ -1627,9 +1641,9 @@ async function loadResumes() {
         <strong>${escapeHtml(r.name)}</strong>
         <div class="meta">${r.is_active ? "★ Активное" : ""} · ATS: ${r.ats_score ?? "—"}</div>
         <div style="margin-top:6px;display:flex;gap:6px;">
-          <button onclick="activateResume(${r.id})">Активировать</button>
-          <button onclick="showResumeForm(${r.id})">Ред.</button>
-          <button onclick="deleteResume(${r.id})">Удалить</button>
+          <button aria-label="Активировать резюме ${escapeAttr(r.name)}" onclick="activateResume(${r.id})">Активировать</button>
+          <button aria-label="Редактировать резюме ${escapeAttr(r.name)}" onclick="showResumeForm(${r.id})">Ред.</button>
+          <button aria-label="Удалить резюме ${escapeAttr(r.name)}" onclick="deleteResume(${r.id})">Удалить</button>
         </div>
       </div>`;
     }
@@ -1951,14 +1965,18 @@ async function loadGhostJobs() {
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(j.title)}</strong>
         <div class="meta">${escapeHtml(j.company || "?")} · ${escapeHtml(j.source)}</div>
-        <button onclick="markGhostJob(${j.id})" style="margin-top:4px;">Отметить ghosted</button>
+        <button aria-label="Отметить ghosted: ${escapeAttr(j.title)}" onclick="markGhostJob(${j.id})" style="margin-top:4px;">Отметить ghosted</button>
       </div>`;
     }
   } catch (e) { console.error(e); }
 }
 
 async function markGhostJob(jobId) {
-  await updateJobStatus(jobId, "ghosted");
+  const id = await updateJobStatus(jobId, "ghosted");
+  await loadJobs();
+  if (Number(state.selectedId) === id) {
+    await selectJob(id);
+  }
   await loadGhostJobs();
 }
 

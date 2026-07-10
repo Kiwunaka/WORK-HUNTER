@@ -779,14 +779,31 @@ def make_handler(root: Path):
                     })
                     return
                 if path == "/api/resumes":
+                    ats_score = body.get("ats_score")
+                    if ats_score is not None and (
+                        isinstance(ats_score, bool)
+                        or not isinstance(ats_score, int)
+                        or not 0 <= ats_score <= 100
+                    ):
+                        raise ValueError(
+                            "ats_score must be an integer between 0 and 100 or null"
+                        )
                     resume = Resume(
                         name=body.get("name", ""),
                         body=body.get("body", ""),
                         profile_id=body.get("profile_id", "default"),
                         is_active=body.get("is_active", False),
+                        ats_score=ats_score,
                     )
                     if body.get("id"):
-                        resume.id = body["id"]
+                        resume.id = int(body["id"])
+                        if resume.id <= 0:
+                            raise ValueError("resume id must be a positive integer")
+                        if app.storage.get_resume(resume.id) is None:
+                            self._send_json(
+                                {"error": "not_found"}, HTTPStatus.NOT_FOUND
+                            )
+                            return
                     saved_id = app.storage.save_resume(resume)
                     self._send_json({"id": saved_id})
                     return

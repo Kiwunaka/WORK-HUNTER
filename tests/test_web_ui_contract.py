@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +35,20 @@ def _read_static(name: str) -> str:
 def _get_text(base: str, path: str) -> tuple[int, str, str]:
     with urllib.request.urlopen(f"{base}{path}", timeout=5) as response:
         return response.status, response.headers.get("Content-Type", ""), response.read().decode("utf-8")
+
+
+def _post_json(base: str, path: str, body: dict) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def test_ui_deep_links_and_static_assets_are_served(tmp_path):
@@ -135,6 +150,61 @@ def test_ghost_jobs_route_serializes_active_profile_score(tmp_path):
         server.server_close()
 
 
+def test_resume_api_rejects_invalid_ats_score(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        for ats_score in (True, "87", -1, 101, 87.5):
+            status, body = _post_json(
+                base,
+                "/api/resumes",
+                {
+                    "name": "Invalid ATS",
+                    "body": "Body",
+                    "profile_id": "default",
+                    "is_active": False,
+                    "ats_score": ats_score,
+                },
+            )
+            assert status == 400
+            assert body == {
+                "error": "ats_score must be an integer between 0 and 100 or null"
+            }
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_resume_api_rejects_missing_update_target(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        status, body = _post_json(
+            base,
+            "/api/resumes",
+            {
+                "id": 999,
+                "name": "Stale CV",
+                "body": "Unsaved draft",
+                "profile_id": "default",
+                "is_active": True,
+                "ats_score": 64,
+            },
+        )
+
+        assert status == 404
+        assert body == {"error": "not_found"}
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 def test_ui_static_contract_has_routes_and_no_duplicate_ids():
     index = _read_static("index.html")
     app = _read_static("app.js")
@@ -195,7 +265,13 @@ def test_resume_edit_and_ghost_actions_keep_explicit_record_identity():
     assert "const original = state.resumes.find" in app
     assert "profile_id: original?.profile_id" in app
     assert "is_active: original?.is_active === true" in app
+    assert "ats_score: original?.ats_score ?? null" in app
     assert "state.resumes = resumes;" in app
     assert "async function updateJobStatus(jobId, status)" in app
+    assert "await api(`/api/jobs/${id}/apply`" in app
+    assert "await api(`/api/jobs/${id}/record-event`" in app
     assert "async function markGhostJob(jobId)" in app
     assert 'onclick="markGhostJob(${j.id})"' in app
+    assert 'aria-label="Редактировать резюме ${escapeAttr(r.name)}"' in app
+    assert 'aria-label="Отметить ghosted: ${escapeAttr(j.title)}"' in app
+    assert '$("#save-resume-button").textContent = editingResumeId' in app
