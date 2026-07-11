@@ -9,8 +9,9 @@ import subprocess
 import urllib.parse
 from typing import Any
 
-import requests
-
+from ..hh_transport import HHApiSession
+from ..hh_transport.backends import ConfigBackend
+from ..hh_transport.errors import HHNetworkError, HHParseError
 from ..models import Job
 from .common import USER_AGENT, absolute_url, clean_text, fetch_url
 
@@ -21,14 +22,20 @@ HH_SEARCH_URL = "https://hh.ru/search/vacancy"
 
 
 class HHSource:
-    def __init__(self, config: dict[str, Any]):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        backend: ConfigBackend | None = None,
+    ):
         self.config = config
+        self.backend = backend
 
     def collect(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
-        if self._access_token():
+        if self._api_ready():
             try:
                 return self._collect_api(profile, limit)
-            except RuntimeError:
+            except (HHNetworkError, HHParseError, json.JSONDecodeError):
                 if not self.config.get("web_fallback", True):
                     raise
         return self._collect_web(profile, limit)
@@ -36,7 +43,18 @@ class HHSource:
     def _access_token(self) -> str:
         return str(os.environ.get("HH_ACCESS_TOKEN") or self.config.get("access_token") or "")
 
+    def _api_ready(self) -> bool:
+        return bool(self._access_token() or str(self.config.get("refresh_token") or ""))
+
+    def _api_config(self) -> dict[str, Any]:
+        config = dict(self.config)
+        env_access_token = str(os.environ.get("HH_ACCESS_TOKEN") or "")
+        if env_access_token:
+            config["access_token"] = env_access_token
+        return config
+
     def _collect_api(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
+        session = HHApiSession(self._api_config(), backend=self.backend)
         queries = profile.get("queries") or profile.get("desired_roles") or [""]
         per_page = min(int(self.config.get("per_page", 25)), 100)
         pages = max(1, int(self.config.get("pages", 1)))
@@ -54,23 +72,7 @@ class HHSource:
                 }
                 if profile.get("salary_min"):
                     params["salary"] = int(profile["salary_min"])
-                url = f"{HH_API_URL}?{urllib.parse.urlencode(params)}"
-                user_agent = str(self.config.get("hh_user_agent") or USER_AGENT)
-                token = self._access_token()
-                headers = {
-                    "Accept": "application/json",
-                    "HH-User-Agent": user_agent,
-                    "User-Agent": user_agent,
-                }
-                if token:
-                    headers["Authorization"] = f"Bearer {token}"
-                payload = json.loads(
-                    fetch_url(
-                        url,
-                        headers=headers,
-                    )
-                )
-                for item in payload.get("items", []):
+                for item in session.search_vacancies(params):
                     job = _job_from_item(item)
                     if job.source_id not in seen:
                         jobs.append(job)
@@ -306,60 +308,40 @@ def _clean_process_output(value: bytes) -> str:
 
 
 class HHApplyClient:
-    def __init__(self, config: dict[str, Any]):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        backend: ConfigBackend | None = None,
+    ):
         self.config = config
         self.base_url = str(config.get("api_base_url") or HH_API_BASE).rstrip("/")
+        self.session = HHApiSession(config, backend=backend, base_url=self.base_url)
 
     def has_token(self) -> bool:
-        return bool(self._access_token())
+        return self.session.identity.has_access_token() or bool(self.session.identity.refresh_token)
 
     def whoami(self) -> dict[str, Any]:
-        return self._request_json("GET", "/me")
+        return self.session.whoami()
 
     def refresh_token(self) -> dict[str, Any]:
-        refresh_token = str(self.config.get("refresh_token") or "")
-        if not refresh_token:
-            raise RuntimeError("HH refresh token is required")
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-        if self.config.get("client_id"):
-            data["client_id"] = str(self.config.get("client_id"))
-        if self.config.get("client_secret"):
-            data["client_secret"] = str(self.config.get("client_secret"))
-        response = requests.request(
-            "POST",
-            f"{self.base_url}/token",
-            headers={
-                "Accept": "application/json",
-                "User-Agent": str(self.config.get("hh_user_agent") or USER_AGENT),
-            },
-            data=data,
-            timeout=int(self.config.get("timeout", 30)),
-        )
-        raw = _response_json(response)
-        if response.status_code >= 400:
-            raise RuntimeError(f"HH API error {response.status_code}: {_hh_error_code(raw)}")
-        return raw
+        return self.session.refresh_token()
 
     def get_vacancy(self, vacancy_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/vacancies/{vacancy_id}")
+        return self.session.get_vacancy(vacancy_id)
 
     def search_vacancies(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        data = self._request_json("GET", "/vacancies", params=params)
-        return list(data.get("items") or [])
+        return self.session.search_vacancies(params)
 
     def get_similar_vacancies(self, vacancy_id: str) -> list[dict[str, Any]]:
         data = self._request_json("GET", f"/vacancies/{vacancy_id}/similar_vacancies")
         return list(data.get("items") or [])
 
     def list_resumes(self) -> list[dict[str, Any]]:
-        data = self._request_json("GET", "/resumes/mine")
-        return list(data.get("items") or [])
+        return self.session.list_resumes()
 
     def get_resume(self, resume_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/resumes/{resume_id}")
+        return self.session.get_resume(resume_id)
 
     def create_resume(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request_json("POST", "/resumes", json=payload)
@@ -371,16 +353,10 @@ class HHApplyClient:
         return self.publish_resume(resume_id)
 
     def list_negotiations(self, status: str = "active") -> list[dict[str, Any]]:
-        data = self._request_json("GET", "/negotiations", params={"status": status})
-        return list(data.get("items") or [])
+        return self.session.list_negotiations(status=status)
 
     def list_negotiation_messages(self, negotiation_id: str) -> list[dict[str, Any]]:
-        data = self._request_json("GET", f"/negotiations/{negotiation_id}/messages")
-        if isinstance(data.get("items"), list):
-            return list(data["items"])
-        if isinstance(data.get("messages"), list):
-            return list(data["messages"])
-        return []
+        return self.session.list_negotiation_messages(negotiation_id)
 
     def send_negotiation_message(
         self,
@@ -388,17 +364,7 @@ class HHApplyClient:
         message: str,
         chat_id: str | None = None,
     ) -> dict[str, Any]:
-        if chat_id:
-            return self._request_json(
-                "POST",
-                f"/common/chats/{chat_id}/messages",
-                json={"text": message},
-            )
-        return self._request_json(
-            "POST",
-            f"/negotiations/{negotiation_id}/messages",
-            data={"message": message},
-        )
+        return self.session.send_negotiation_message(negotiation_id, message, chat_id=chat_id)
 
     def cancel_negotiation(self, negotiation_id: str, message: str = "") -> dict[str, Any]:
         return self._request_json(
@@ -411,19 +377,10 @@ class HHApplyClient:
         return self._request_json("PUT", f"/employers/blacklisted/{employer_id}")
 
     def suitable_resumes(self, vacancy_id: str) -> list[dict[str, Any]]:
-        data = self._request_json("GET", f"/vacancies/{vacancy_id}/suitable_resumes")
-        return list(data.get("items") or [])
+        return self.session.suitable_resumes(vacancy_id)
 
     def apply(self, vacancy_id: str, resume_id: str, message: str) -> dict[str, Any]:
-        response = self._request(
-            "POST",
-            "/negotiations",
-            data={
-                "resume_id": resume_id,
-                "vacancy_id": vacancy_id,
-                "message": message or "",
-            },
-        )
+        response = self.session.apply(vacancy_id, resume_id, message)
         location = response.headers.get("Location", "")
         raw = _response_json(response)
         if response.status_code == 201:
@@ -474,24 +431,10 @@ class HHApplyClient:
         return self._request_json(method.upper(), path, **kwargs)
 
     def _request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        response = self._request(method, path, **kwargs)
-        raw = _response_json(response)
-        if response.status_code >= 400:
-            raise RuntimeError(f"HH API error {response.status_code}: {_hh_error_code(raw)}")
-        return raw
+        return self.session.request_json(method, path, **kwargs)
 
     def _request(self, method: str, path: str, **kwargs: Any):
-        token = self._access_token()
-        if not token:
-            raise RuntimeError("HH access token is required")
-        return requests.request(
-            method,
-            f"{self.base_url}{path}",
-            headers=self._headers(token),
-            timeout=int(self.config.get("timeout", 30)),
-            allow_redirects=False,
-            **kwargs,
-        )
+        return self.session.request(method, path, **kwargs)
 
     def _headers(self, token: str) -> dict[str, str]:
         user_agent = str(self.config.get("hh_user_agent") or USER_AGENT)

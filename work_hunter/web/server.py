@@ -2,24 +2,51 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import socket
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 from ..config import mask_secrets
 from ..models import CalendarEvent, Resume, SavedSearch
+from ..safety import is_literal_confirmation
 from ..services import WorkHunter
+from .security import SECURITY_HEADERS, ensure_loopback_listener, request_boundary_error
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+REJECTED_BODY_DRAIN_LIMIT = 1024 * 1024
+REJECTED_BODY_DRAIN_SECONDS = 0.25
+UI_ROUTES = {
+    "/jobs",
+    "/calendar",
+    "/favorites",
+    "/chat",
+    "/agent",
+    "/settings",
+    "/sources",
+    "/stats",
+    "/trends",
+}
+APPLICATION_FUNNEL_STAGES = (
+    "applied",
+    "response",
+    "phone_screen",
+    "interview",
+    "offer",
+    "rejected",
+)
 
 
 def run_server(root: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
+    ensure_loopback_listener(host)
+    bind_host = "127.0.0.1" if host.casefold() == "localhost" else host
     handler = make_handler(Path(root) if root is not None else Path.cwd())
-    server = ThreadingHTTPServer((host, port), handler)
-    print(f"Work Hunter UI: http://{host}:{port}")
+    server = ThreadingHTTPServer((bind_host, port), handler)
+    print(f"Work Hunter UI: http://{bind_host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -32,10 +59,118 @@ def make_handler(root: Path):
     class WorkHunterHandler(BaseHTTPRequestHandler):
         server_version = "WorkHunterHTTP/0.1"
 
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            host_values = self.headers.get_all("Host", [])
+            origin_values = self.headers.get_all("Origin", [])
+            boundary_error: tuple[HTTPStatus, str, str] | None
+            if len(host_values) != 1:
+                boundary_error = (
+                    HTTPStatus.FORBIDDEN,
+                    "host_not_loopback",
+                    "Loopback Host header required.",
+                )
+            elif len(origin_values) > 1:
+                boundary_error = (
+                    HTTPStatus.FORBIDDEN,
+                    "cross_origin_request",
+                    "Cross-origin requests are blocked.",
+                )
+            else:
+                server = cast(ThreadingHTTPServer, self.server)
+                boundary_error = request_boundary_error(
+                    method=self.command,
+                    host_header=host_values[0],
+                    origin_header=origin_values[0] if origin_values else None,
+                    content_type=self.headers.get("Content-Type"),
+                    listener_host=str(server.server_address[0]),
+                    listener_port=server.server_port,
+                )
+            if boundary_error is None:
+                return True
+            status, error, message = boundary_error
+            self._send_boundary_error(status, error, message)
+            return False
+
+        def _send_boundary_error(self, status: HTTPStatus, error: str, message: str) -> None:
+            payload = json.dumps(
+                {"error": error, "message": message},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.close_connection = True
+            self.send_response(status)
+            self.send_header("Connection", "close")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            self._discard_rejected_body()
+
+        def _discard_rejected_body(self) -> None:
+            content_lengths = self.headers.get_all("Content-Length", [])
+            transfer_encodings = self.headers.get_all("Transfer-Encoding", [])
+            target = 0
+            if transfer_encodings or len(content_lengths) > 1:
+                target = REJECTED_BODY_DRAIN_LIMIT
+            elif content_lengths:
+                raw_length = content_lengths[0]
+                if (
+                    raw_length.isascii()
+                    and raw_length.isdigit()
+                    and len(raw_length) <= len(str(REJECTED_BODY_DRAIN_LIMIT))
+                ):
+                    target = min(int(raw_length), REJECTED_BODY_DRAIN_LIMIT)
+                else:
+                    target = REJECTED_BODY_DRAIN_LIMIT
+            if target <= 0:
+                return
+
+            deadline = time.monotonic() + REJECTED_BODY_DRAIN_SECONDS
+            previous_timeout = self.connection.gettimeout()
+            try:
+                remaining = target
+                while remaining > 0:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    self.connection.settimeout(timeout)
+                    try:
+                        chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                    except (OSError, TimeoutError):
+                        break
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            finally:
+                try:
+                    self.connection.settimeout(previous_timeout)
+                except OSError:
+                    pass
+
+        def end_headers(self) -> None:
+            for name, value in SECURITY_HEADERS.items():
+                self.send_header(name, value)
+            super().end_headers()
+
+        def do_OPTIONS(self) -> None:
+            payload = json.dumps({"error": "method_not_allowed"}).encode("utf-8")
+            self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+            self.send_header("Allow", "GET, POST")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "/":
+            if path == "/" or path in UI_ROUTES:
                 self._send_static("index.html")
                 return
             if path == "/api/jobs":
@@ -47,7 +182,7 @@ def make_handler(root: Path):
                     status=_str_arg(query, "status"),
                     min_score=_optional_int_arg(query, "min_score"),
                 )
-                self._send_json([job.to_dict() for job in jobs])
+                self._send_json([_job_json(job, app.storage) for job in jobs])
                 return
             if path == "/api/jobs/export":
                 query = parse_qs(parsed.query)
@@ -57,12 +192,12 @@ def make_handler(root: Path):
                     source=_str_arg(query, "source"),
                     format="csv",
                 )
-                payload = csv_data.encode("utf-8")
+                csv_payload = csv_data.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Content-Length", str(len(csv_payload)))
                 self.end_headers()
-                self.wfile.write(payload)
+                self.wfile.write(csv_payload)
                 return
             if path.startswith("/api/jobs/"):
                 if path.endswith("/note"):
@@ -76,10 +211,10 @@ def make_handler(root: Path):
                 if job is None:
                     self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
                     return
-                payload = job.to_dict()
+                job_payload = job.to_dict()
                 letter = app.latest_letter(job_id)
-                payload["latest_letter"] = letter.to_dict() if letter else None
-                self._send_json(payload)
+                job_payload["latest_letter"] = letter.to_dict() if letter else None
+                self._send_json(job_payload)
                 return
             if path == "/api/resumes":
                 app = WorkHunter(root)
@@ -97,6 +232,10 @@ def make_handler(root: Path):
             if path == "/api/hh/auth/status":
                 app = WorkHunter(root)
                 self._send_json(app.hh_auth_status())
+                return
+            if path == "/api/hh/web/status":
+                app = WorkHunter(root)
+                self._send_json(app.hh_web_status())
                 return
             if path == "/api/hh/negotiations":
                 app = WorkHunter(root)
@@ -214,7 +353,10 @@ def make_handler(root: Path):
                 query = parse_qs(parsed.query)
                 app = WorkHunter(root)
                 days = _int_arg(query, "days", 7)
-                jobs = app.storage.get_ghost_jobs(days=days)
+                jobs = app.storage.get_ghost_jobs(
+                    days=days,
+                    profile_id=app.active_profile_id(),
+                )
                 self._send_json([j.to_dict() for j in jobs])
                 return
             if path == "/api/behavior-stats":
@@ -226,9 +368,39 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 self._send_json(app.daily_report())
                 return
+            if path == "/api/strategies":
+                app = WorkHunter(root)
+                self._send_json(app.list_strategies())
+                return
+            if path == "/api/strategy/report":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                self._send_json(app.strategy_report(_str_arg(query, "name") or "active-profile"))
+                return
+            if path == "/api/applications/export":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                payload_text = app.export_applications(format=_str_arg(query, "format") or "jsonl")
+                self._send_text(payload_text, content_type="application/json; charset=utf-8")
+                return
+            if path == "/api/report/export":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                fmt = _str_arg(query, "format") or "json"
+                content_type = "text/markdown; charset=utf-8" if fmt == "md" else "application/json; charset=utf-8"
+                self._send_text(app.export_report(since=_str_arg(query, "since") or "", format=fmt), content_type=content_type)
+                return
             if path == "/api/sources":
                 app = WorkHunter(root)
                 self._send_json(app.storage.list_sources())
+                return
+            if path == "/api/source-capabilities":
+                app = WorkHunter(root)
+                self._send_json(app.source_capabilities())
+                return
+            if path == "/api/doctor":
+                app = WorkHunter(root)
+                self._send_json(app.doctor())
                 return
             if path == "/api/config":
                 app = WorkHunter(root)
@@ -244,7 +416,7 @@ def make_handler(root: Path):
                 return
             if path == "/api/stats":
                 app = WorkHunter(root)
-                jobs = app.storage.list_jobs(limit=1000000)
+                jobs = app.list_jobs(limit=1000000)
                 stats = _compute_stats(jobs, app.storage)
                 self._send_json(stats)
                 return
@@ -260,13 +432,13 @@ def make_handler(root: Path):
             app = WorkHunter(root)
             try:
                 if path == "/api/sync":
-                    result = app.sync_sources(
+                    sync_result = app.sync_sources(
                         sources=body.get("sources"),
                         limit=body.get("limit"),
                     )
                     if body.get("score", True):
-                        result["scored"] = app.score_jobs()
-                    self._send_json(result)
+                        sync_result["scored"] = app.score_jobs()
+                    self._send_json(sync_result)
                     return
                 if path == "/api/score":
                     self._send_json({"scored": app.score_jobs(limit=body.get("limit", 10000))})
@@ -278,7 +450,11 @@ def make_handler(root: Path):
                     self._send_json(mask_secrets(app.refresh_hh_token()))
                     return
                 if path == "/api/hh/resumes/update":
-                    self._send_json(app.update_hh_resumes())
+                    self._send_json(
+                        app.update_hh_resumes(
+                            confirm=is_literal_confirmation(body.get("confirm")),
+                        )
+                    )
                     return
                 if path == "/api/hh/resume-template/preview":
                     self._send_json(
@@ -294,8 +470,40 @@ def make_handler(root: Path):
                 if path == "/api/hh/negotiations/sync":
                     self._send_json(app.sync_hh_negotiations(status=str(body.get("status") or "active")))
                     return
+                if path == "/api/hh/reply/plan":
+                    self._send_json(
+                        app.plan_hh_reply(
+                            negotiation_id=str(body.get("negotiation_id") or ""),
+                            template=str(body.get("template") or ""),
+                            status=str(body.get("status") or "active"),
+                            delay_minutes=int(body.get("delay_minutes") or 0),
+                        )
+                    )
+                    return
+                if path == "/api/hh/reply/confirm":
+                    self._send_json(
+                        app.confirm_hh_reply(
+                            int(body.get("plan_id") or 0),
+                            confirm=is_literal_confirmation(body.get("confirm")),
+                        )
+                    )
+                    return
                 if path == "/api/hh/skipped/clear":
                     self._send_json(app.clear_hh_skipped_vacancies())
+                    return
+                if path == "/api/strategy/run":
+                    self._send_json(
+                        app.run_strategy(
+                            str(body.get("name") or "active-profile"),
+                            dry_run=bool(body.get("dry_run", True))
+                            or not is_literal_confirmation(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
+                            resume_id=str(body.get("resume_id") or "") or None,
+                        )
+                    )
+                    return
+                if path == "/api/import/jobs":
+                    self._send_json(app.import_jobs_file(str(body.get("path") or "")))
                     return
                 if path == "/api/hh/call":
                     self._send_json(
@@ -303,6 +511,7 @@ def make_handler(root: Path):
                             str(body.get("method") or "GET"),
                             str(body.get("path") or "/"),
                             data=body.get("data"),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
@@ -314,6 +523,7 @@ def make_handler(root: Path):
                             params=body.get("params"),
                             body=body.get("body"),
                             quick=str(body.get("quick") or ""),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
@@ -347,7 +557,7 @@ def make_handler(root: Path):
                             messages=messages,
                             status=str(body.get("status") or "active"),
                             now=str(body.get("now") or "") or None,
-                            limit=None if body.get("limit") is None else int(body.get("limit")),
+                            limit=_optional_int(body.get("limit")),
                         )
                     )
                     return
@@ -449,20 +659,26 @@ def make_handler(root: Path):
                     self._send_json(
                         app.confirm_hh_campaign(
                             run_id,
-                            confirm=bool(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
                 if path == "/api/chat":
                     messages = body.get("messages", [])
                     job_id = body.get("job_id")
-                    result = app.chat(messages, job_id=job_id)
-                    self._send_json({"content": result})
+                    chat_result = app.chat(messages, job_id=job_id)
+                    self._send_json({"content": chat_result})
+                    return
+                if path == "/api/config/secret/clear":
+                    self._send_json(
+                        app.clear_config_secret(
+                            str(body.get("path") or ""),
+                            confirm=body.get("confirm"),
+                        )
+                    )
                     return
                 if path == "/api/config":
-                    updated = _deep_merge(app.config, body)
-                    app.save_config(updated)
-                    self._send_json(mask_secrets(updated))
+                    self._send_json(app.update_config_from_client(body))
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/status"):
                     job_id = _path_int(path.removesuffix("/status"), "/api/jobs/")
@@ -513,7 +729,7 @@ def make_handler(root: Path):
                             job_id,
                             resume_id=body.get("resume_id"),
                             letter=body.get("letter"),
-                            confirm=bool(body.get("confirm")),
+                            confirm=is_literal_confirmation(body.get("confirm")),
                         )
                     )
                     return
@@ -571,21 +787,38 @@ def make_handler(root: Path):
                     })
                     return
                 if path == "/api/resumes":
+                    ats_score = body.get("ats_score")
+                    if ats_score is not None and (
+                        isinstance(ats_score, bool)
+                        or not isinstance(ats_score, int)
+                        or not 0 <= ats_score <= 100
+                    ):
+                        raise ValueError(
+                            "ats_score must be an integer between 0 and 100 or null"
+                        )
                     resume = Resume(
                         name=body.get("name", ""),
                         body=body.get("body", ""),
                         profile_id=body.get("profile_id", "default"),
                         is_active=body.get("is_active", False),
+                        ats_score=ats_score,
                     )
                     if body.get("id"):
-                        resume.id = body["id"]
+                        resume.id = int(body["id"])
+                        if resume.id <= 0:
+                            raise ValueError("resume id must be a positive integer")
+                        if app.storage.get_resume(resume.id) is None:
+                            self._send_json(
+                                {"error": "not_found"}, HTTPStatus.NOT_FOUND
+                            )
+                            return
                     saved_id = app.storage.save_resume(resume)
                     self._send_json({"id": saved_id})
                     return
                 if path == "/api/resumes/ats-score":
                     resume_text = body.get("resume_text", "")
-                    result = app.ats_score_resume(resume_text)
-                    self._send_json(result)
+                    ats_result = app.ats_score_resume(resume_text)
+                    self._send_json(ats_result)
                     return
                 if path.startswith("/api/resumes/") and path.endswith("/delete"):
                     resume_id = _path_int(path.removesuffix("/delete"), "/api/resumes/")
@@ -640,39 +873,39 @@ def make_handler(root: Path):
                     return
                 if path == "/api/jobs/classify-batch":
                     job_ids = body.get("job_ids", [])
-                    result = app.classify_jobs_batch(job_ids)
-                    self._send_json(result)
+                    batch_result = app.classify_jobs_batch(job_ids)
+                    self._send_json(batch_result)
                     return
                 if path == "/api/market-trends":
                     limit = body.get("limit", 50)
-                    result = app.market_trends(limit)
-                    self._send_json({"content": result})
+                    trend_result = app.market_trends(limit)
+                    self._send_json({"content": trend_result})
                     return
                 if path == "/api/behavior/suggest":
-                    result = app.behavior_suggest()
-                    self._send_json({"content": result})
+                    behavior_result = app.behavior_suggest()
+                    self._send_json({"content": behavior_result})
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/parse-structure"):
                     job_id = _path_int(path.removesuffix("/parse-structure"), "/api/jobs/")
-                    result = app.parse_job_structure(job_id)
-                    self._send_json(result)
+                    structure_result = app.parse_job_structure(job_id)
+                    self._send_json(structure_result)
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/gap-analysis"):
                     job_id = _path_int(path.removesuffix("/gap-analysis"), "/api/jobs/")
                     resume_id = body.get("resume_id", 0)
-                    result = app.gap_analysis(resume_id, job_id)
-                    self._send_json({"content": result})
+                    gap_result = app.gap_analysis(resume_id, job_id)
+                    self._send_json({"content": gap_result})
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/smart-classify"):
                     job_id = _path_int(path.removesuffix("/smart-classify"), "/api/jobs/")
-                    result = app.smart_classify(job_id)
-                    self._send_json(result)
+                    classification_result = app.smart_classify(job_id)
+                    self._send_json(classification_result)
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/interview-prep"):
                     job_id = _path_int(path.removesuffix("/interview-prep"), "/api/jobs/")
                     stage = body.get("stage", "tech")
-                    result = app.interview_stage_prep(job_id, stage)
-                    self._send_json({"content": result})
+                    interview_result = app.interview_stage_prep(job_id, stage)
+                    self._send_json({"content": interview_result})
                     return
                 if path.startswith("/api/jobs/") and path.endswith("/record-event"):
                     job_id = _path_int(path.removesuffix("/record-event"), "/api/jobs/")
@@ -743,9 +976,17 @@ def _int_arg(query: dict[str, list[str]], name: str, default: int) -> int:
     return int(value)
 
 
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def _optional_int_arg(query: dict[str, list[str]], name: str) -> int | None:
-    value = query.get(name, [None])[0]
-    return int(value) if value not in (None, "") else None
+    values = query.get(name)
+    if not values or values[0] == "":
+        return None
+    return int(values[0])
 
 
 def _str_arg(query: dict[str, list[str]], name: str) -> str | None:
@@ -769,14 +1010,19 @@ def _approval_action(path: str) -> tuple[int, str] | None:
     return None
 
 
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    result = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
+def _job_json(job: Any, storage: Any, *, note_preview_chars: int = 120) -> dict[str, Any]:
+    payload = job.to_dict()
+    note = storage.get_note(int(job.id or 0))
+    payload["note_preview"] = note[:note_preview_chars]
+    return payload
+
+
+def _application_stats(by_status: dict[str, int]) -> tuple[int, list[dict[str, object]]]:
+    funnel = [
+        {"status": status, "count": by_status.get(status, 0)}
+        for status in APPLICATION_FUNNEL_STAGES
+    ]
+    return sum(cast(int, item["count"]) for item in funnel), funnel
 
 
 def _compute_stats(jobs: list[Any], storage: Any) -> dict[str, Any]:
@@ -801,22 +1047,12 @@ def _compute_stats(jobs: list[Any], storage: Any) -> dict[str, Any]:
             score_buckets["61-80"] += 1
         else:
             score_buckets["81-100"] += 1
-    applied = by_status.get("applied", 0)
-    funnel: dict[str, int] = {
-        "new": by_status.get("new", 0),
-        "saved": by_status.get("saved", 0),
-        "applied": by_status.get("applied", 0),
-        "phone_screen": by_status.get("phone_screen", 0),
-        "interview": by_status.get("interview", 0),
-        "offer": by_status.get("offer", 0),
-        "rejected": by_status.get("rejected", 0),
-        "not_interested": by_status.get("not_interested", 0),
-    }
+    total_applications, application_funnel = _application_stats(by_status)
     return {
         "total_jobs": total,
         "by_source": by_source,
         "by_status": by_status,
         "score_distribution": score_buckets,
-        "total_applications": applied,
-        "applications_by_status": funnel,
+        "total_applications": total_applications,
+        "application_funnel": application_funnel,
     }

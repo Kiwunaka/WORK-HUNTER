@@ -10,6 +10,7 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from .hh_agent.mcp_handlers import HHMCPToolHandlers
+from .safety import is_literal_confirmation
 from .services import WorkHunter
 from .sources import PUBLIC_BOARD_SOURCE_NAMES
 
@@ -24,6 +25,48 @@ _root: Path = Path.cwd()
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
+        Tool(
+            name="doctor",
+            description="Report local installation, auth, source, UI, and MCP readiness.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="source_capabilities",
+            description="List source capabilities, auth requirements, and enabled state.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="hh_auth_status",
+            description="Check HH API auth status through the guarded local service.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="list_strategies",
+            description="List stored and generated search strategies.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="run_strategy",
+            description="Dry-run a search strategy by default. Live search import requires confirm=true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "confirm": {"type": "boolean", "default": False},
+                    "resume_id": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="strategy_report",
+            description="Report last strategy run and top matching local jobs.",
+            inputSchema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        ),
         Tool(
             name="search_jobs",
             description="Collect fresh jobs from enabled sources and store them locally.",
@@ -137,6 +180,26 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         hh_handlers = HHMCPToolHandlers(service)
         if hh_handlers.can_handle(name):
             return _json(hh_handlers.handle(name, args))
+        if name == "doctor":
+            return _json(service.doctor())
+        if name == "source_capabilities":
+            return _json(service.source_capabilities())
+        if name == "hh_auth_status":
+            return _json(service.hh_auth_status())
+        if name == "list_strategies":
+            return _json(service.list_strategies())
+        if name == "run_strategy":
+            confirm = is_literal_confirmation(args.get("confirm"))
+            return _json(
+                service.run_strategy(
+                    str(args.get("name") or "active-profile"),
+                    dry_run=not confirm,
+                    confirm=confirm,
+                    resume_id=args.get("resume_id"),
+                )
+            )
+        if name == "strategy_report":
+            return _json(service.strategy_report(str(args.get("name") or "active-profile")))
         if name == "search_jobs":
             result = service.sync_sources(
                 sources=args.get("sources"),

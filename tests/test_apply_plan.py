@@ -5,8 +5,6 @@ import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-import pytest
-
 from work_hunter.models import Job
 from work_hunter.services import WorkHunter
 from work_hunter.cli import main as cli_main
@@ -16,8 +14,9 @@ from work_hunter.web.server import make_handler
 class FakeHHClient:
     apply_calls: list[tuple[str, str, str]] = []
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True

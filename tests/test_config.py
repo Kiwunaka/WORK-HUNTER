@@ -1,3 +1,13 @@
+import errno
+import json
+import os
+import shutil
+import stat
+from pathlib import Path
+
+import pytest
+
+import work_hunter.config as config_module
 from work_hunter.config import active_profile, default_config, load_config, mask_secrets, save_config
 
 
@@ -12,6 +22,199 @@ def test_save_and_load_config(tmp_path):
     profile = active_profile(loaded)
     assert profile["queries"] == ["python backend"]
     assert loaded["sources"]["hh"]["enabled"] is True
+
+
+def test_save_config_replaces_complete_temp_file(monkeypatch, tmp_path):
+    path = tmp_path / "nested" / "config.json"
+    config = {"profile": "тест", "nested": {"enabled": True}}
+    replacements: list[dict[str, object]] = []
+    original_replace = os.replace
+
+    def inspect_replace(source, destination):
+        temporary = Path(source)
+        replacements.append(
+            {
+                "source": temporary,
+                "destination": Path(destination),
+                "payload": json.loads(temporary.read_text(encoding="utf-8")),
+            }
+        )
+        original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", inspect_replace)
+
+    save_config(path, config)
+
+    assert len(replacements) == 1
+    assert replacements[0]["source"].parent == path.parent
+    assert replacements[0]["source"] != path
+    assert replacements[0]["destination"] == path
+    assert replacements[0]["payload"] == config
+    assert json.loads(path.read_text(encoding="utf-8")) == config
+
+
+def test_save_config_replace_failure_preserves_old_file_and_cleans_temp(
+    monkeypatch,
+    tmp_path,
+):
+    path = tmp_path / "config.json"
+    path.write_text('{"version": "old"}\n', encoding="utf-8")
+    copied_modes: list[tuple[Path, Path]] = []
+    replacement_sources: list[Path] = []
+    directory_syncs: list[Path] = []
+    original_copymode = shutil.copymode
+
+    def record_copymode(source, destination, *args, **kwargs):
+        copied_modes.append((Path(source), Path(destination)))
+        return original_copymode(source, destination, *args, **kwargs)
+
+    def fail_replace(source, destination):
+        replacement_sources.append(Path(source))
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(shutil, "copymode", record_copymode)
+    monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(
+        config_module,
+        "_fsync_directory",
+        lambda directory: directory_syncs.append(Path(directory)),
+        raising=False,
+    )
+
+    with pytest.raises(OSError, match="replace failed"):
+        save_config(path, {"version": "new"})
+
+    assert path.read_text(encoding="utf-8") == '{"version": "old"}\n'
+    assert len(copied_modes) == 1
+    assert copied_modes[0][0] == path
+    assert replacement_sources == [copied_modes[0][1]]
+    assert not replacement_sources[0].exists()
+    assert directory_syncs == []
+
+
+def test_save_config_serialization_failure_preserves_old_file_and_cleans_temp(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"version": "old"}\n', encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        save_config(path, {"unsupported": object()})
+
+    assert path.read_text(encoding="utf-8") == '{"version": "old"}\n'
+    assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []
+
+    save_config(path, {"version": "after-error"})
+
+    assert load_config(path)["version"] == "after-error"
+
+
+def test_save_config_fsyncs_parent_directory_after_replace(monkeypatch, tmp_path):
+    path = tmp_path / "nested" / "config.json"
+    directory_syncs: list[Path] = []
+    monkeypatch.setattr(
+        config_module,
+        "_fsync_directory",
+        lambda directory: directory_syncs.append(Path(directory)),
+        raising=False,
+    )
+
+    save_config(path, {"status": "ok"})
+
+    assert directory_syncs == [path.parent]
+
+
+def test_fsync_directory_uses_and_closes_directory_descriptor(monkeypatch, tmp_path):
+    sync_directory = getattr(config_module, "_fsync_directory", None)
+    assert callable(sync_directory)
+    opened: list[Path] = []
+    synced: list[int] = []
+    closed: list[int] = []
+
+    def open_directory(path, flags):
+        opened.append(Path(path))
+        return 91
+
+    monkeypatch.setattr(config_module.os, "open", open_directory)
+    monkeypatch.setattr(config_module.os, "fsync", lambda fd: synced.append(fd))
+    monkeypatch.setattr(config_module.os, "close", lambda fd: closed.append(fd))
+
+    sync_directory(tmp_path)
+
+    assert opened == [tmp_path]
+    assert synced == [91]
+    assert closed == [91]
+
+
+def test_fsync_directory_ignores_unsupported_platform(monkeypatch, tmp_path):
+    sync_directory = getattr(config_module, "_fsync_directory", None)
+    assert callable(sync_directory)
+    monkeypatch.setattr(
+        config_module.os,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unsupported")),
+    )
+
+    sync_directory(tmp_path)
+
+
+def test_windows_config_lock_retries_until_contention_clears(monkeypatch):
+    lock_windows = getattr(config_module, "_lock_windows_config_fd", None)
+    assert callable(lock_windows)
+    attempts: list[tuple[int, int, int]] = []
+    sleeps: list[float] = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+
+        @staticmethod
+        def locking(fd, mode, length):
+            attempts.append((fd, mode, length))
+            if len(attempts) < 3:
+                raise OSError(errno.EACCES, "locked")
+
+    monkeypatch.setattr(
+        config_module.importlib,
+        "import_module",
+        lambda name: FakeMsvcrt,
+    )
+    monkeypatch.setattr(config_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    lock_windows(91)
+
+    assert attempts == [(91, FakeMsvcrt.LK_NBLCK, 1)] * 3
+    assert sleeps == [0.05, 0.05]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not portable to Windows")
+def test_save_config_preserves_existing_posix_mode(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text("{}\n", encoding="utf-8")
+    path.chmod(0o640)
+
+    save_config(path, {"status": "ok"})
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize(
+    ("baseline_value", "desired_value", "fresh_value"),
+    [
+        (True, 1, False),
+        ([True], [1], ["fresh"]),
+    ],
+)
+def test_three_way_config_merge_distinguishes_json_value_types(
+    baseline_value,
+    desired_value,
+    fresh_value,
+):
+    merged = config_module.merge_config_snapshot_changes(
+        {"value": baseline_value},
+        {"value": desired_value},
+        {"value": fresh_value},
+    )
+
+    assert merged == {"value": desired_value}
+    assert type(merged["value"]) is type(desired_value)
 
 
 def test_mask_secrets():
@@ -41,3 +244,136 @@ def test_default_config_includes_hh_transport_defaults():
     assert hh_config["hh_cookie_file"] == ""
     assert hh_config["challenge_mode"] == "manual"
     assert hh_config["form_mode"] == "manual"
+
+
+def test_sensitive_key_predicate_matches_masking_rules():
+    assert config_module.is_sensitive_key("API_KEY") is True
+    assert config_module.is_sensitive_key("client_secret") is True
+    assert config_module.is_sensitive_key("max_tokens") is False
+
+
+def test_merge_masked_config_preserves_nested_secrets_for_mask_empty_and_none():
+    stored = {
+        "ai": {"api_key": "saved-ai-value", "model": "model-a"},
+        "sources": {
+            "hh": {
+                "access_token": "saved-hh-value",
+                "refresh_token": "saved-refresh-value",
+            }
+        },
+    }
+    submitted = {
+        "ai": {"api_key": "***", "model": "model-b"},
+        "sources": {"hh": {"access_token": "", "refresh_token": None}},
+    }
+
+    merged = config_module.merge_masked_config(stored, submitted)
+
+    assert merged["ai"] == {"api_key": "saved-ai-value", "model": "model-b"}
+    assert merged["sources"]["hh"] == {
+        "access_token": "saved-hh-value",
+        "refresh_token": "saved-refresh-value",
+    }
+
+
+@pytest.mark.parametrize(
+    ("submitted", "preserves_list_secret"),
+    [
+        ({"ai": None}, True),
+        ({"ai": {"api_key": []}}, True),
+        ({"sources": {"hh": None}}, True),
+        ({"hh_account_profiles": {"work": None}}, True),
+        ({"custom": None}, True),
+        ({"custom": [{"access_token": "***"}]}, False),
+    ],
+)
+def test_merge_masked_config_rejects_structural_secret_clear_bypasses(
+    submitted,
+    preserves_list_secret,
+):
+    stored = {
+        "ai": {"api_key": "saved-ai-value", "model": "model-a"},
+        "sources": {"hh": {"access_token": "saved-hh-value"}},
+        "hh_account_profiles": {
+            "work": {"refresh_token": "saved-profile-value"}
+        },
+        "custom": [{"access_token": "saved-list-value"}],
+    }
+
+    merged = config_module.merge_masked_config(stored, submitted)
+
+    assert merged["ai"]["api_key"] == "saved-ai-value"
+    assert merged["sources"]["hh"]["access_token"] == "saved-hh-value"
+    assert (
+        merged["hh_account_profiles"]["work"]["refresh_token"]
+        == "saved-profile-value"
+    )
+    if preserves_list_secret:
+        assert merged["custom"][0]["access_token"] == "saved-list-value"
+    else:
+        assert "access_token" not in merged["custom"][0]
+
+
+def test_clear_config_secret_value_copies_and_clears_only_allowlisted_path():
+    stored = {
+        "sources": {
+            "hh": {
+                "access_token": "saved-access-value",
+                "refresh_token": "saved-refresh-value",
+            }
+        }
+    }
+
+    cleared = config_module.clear_config_secret_value(
+        stored,
+        "sources.hh.access_token",
+    )
+
+    assert cleared["sources"]["hh"] == {
+        "access_token": "",
+        "refresh_token": "saved-refresh-value",
+    }
+    assert stored["sources"]["hh"]["access_token"] == "saved-access-value"
+    with pytest.raises(ValueError, match="not allowed"):
+        config_module.clear_config_secret_value(stored, "sources.hh.enabled")
+
+
+def test_clear_config_secret_value_allows_only_existing_hh_account_profiles():
+    stored = {
+        "hh_account_profiles": {
+            "primary": {
+                "access_token": "saved-account-value",
+                "refresh_token": "saved-refresh-value",
+            }
+        }
+    }
+
+    cleared = config_module.clear_config_secret_value(
+        stored,
+        "hh_account_profiles.primary.refresh_token",
+    )
+
+    assert cleared["hh_account_profiles"]["primary"] == {
+        "access_token": "saved-account-value",
+        "refresh_token": "",
+    }
+    with pytest.raises(ValueError, match="not allowed"):
+        config_module.clear_config_secret_value(
+            stored,
+            "hh_account_profiles.missing.refresh_token",
+        )
+
+
+def test_clear_config_secret_value_supports_existing_profile_names_with_dots():
+    stored = {
+        "hh_account_profiles": {
+            "work.prod": {"client_secret": "saved-profile-value"},
+        }
+    }
+
+    cleared = config_module.clear_config_secret_value(
+        stored,
+        "hh_account_profiles.work.prod.client_secret",
+    )
+
+    assert cleared["hh_account_profiles"]["work.prod"]["client_secret"] == ""

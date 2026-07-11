@@ -6,6 +6,27 @@ from pathlib import Path
 from work_hunter.hh_agent.notifications import MemoryNotificationSink
 from work_hunter.cli import main as cli_main
 from work_hunter.scheduler import SafeTaskRunner
+from work_hunter.services import WorkHunter
+
+
+class FakeSchedulerHHClient:
+    constructed = 0
+    updated_resumes: list[str] = []
+
+    def __init__(self, config, *, backend=None):
+        type(self).constructed += 1
+        self.config = config
+        self.backend = backend
+
+    def has_token(self):
+        return bool(self.config.get("access_token"))
+
+    def list_resumes(self):
+        return [{"id": "resume-1", "title": "Backend", "status": {"id": "published"}}]
+
+    def update_resume(self, resume_id: str):
+        self.updated_resumes.append(resume_id)
+        return {"status": "updated", "resume_id": resume_id}
 
 
 class FakeApp:
@@ -25,8 +46,8 @@ class FakeApp:
         self.calls.append(("hh-refresh-token", {}))
         return {"status": "ok"}
 
-    def update_hh_resumes(self):
-        self.calls.append(("hh-update-resumes", {}))
+    def update_hh_resumes(self, *, confirm=False):
+        self.calls.append(("hh-update-resumes", {"confirm": confirm}))
         return {"status": "ok", "count": 1}
 
     def plan_hh_campaign(self, **kwargs):
@@ -109,7 +130,72 @@ def test_safe_task_runner_plans_mutating_resume_update_by_default(tmp_path):
         "message": "Scheduled hh-update-resumes requires confirm=true or real=true.",
     }
     assert confirmed["items"][0]["result"] == {"status": "ok", "count": 1}
-    assert app.calls == [("hh-update-resumes", {})]
+    assert app.calls == [("hh-update-resumes", {"confirm": True})]
+
+
+def test_safe_task_runner_forwards_confirmation_to_real_work_hunter(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeSchedulerHHClient)
+    FakeSchedulerHHClient.constructed = 0
+    FakeSchedulerHHClient.updated_resumes = []
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+
+    report = SafeTaskRunner(app, root=tmp_path).run(
+        [{"task": "hh-update-resumes", "confirm": True}]
+    )
+
+    assert report["status"] == "completed"
+    assert report["counts"] == {"completed": 1, "failed": 0, "blocked": 0}
+    assert report["items"][0]["result"] == {
+        "status": "ok",
+        "count": 1,
+        "updated": ["resume-1"],
+    }
+    assert FakeSchedulerHHClient.updated_resumes == ["resume-1"]
+
+
+def test_safe_task_runner_classifies_real_work_hunter_block_as_blocked(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeSchedulerHHClient)
+    FakeSchedulerHHClient.constructed = 0
+    FakeSchedulerHHClient.updated_resumes = []
+    app = WorkHunter(tmp_path)
+    sink = MemoryNotificationSink()
+
+    report = SafeTaskRunner(app, root=tmp_path, notification_sinks=[sink]).run(
+        [{"task": "hh-update-resumes", "confirm": True}]
+    )
+
+    assert report["status"] == "blocked"
+    assert report["counts"] == {"completed": 0, "failed": 0, "blocked": 1}
+    assert report["items"][0]["status"] == "blocked"
+    assert report["items"][0]["result"]["status"] == "blocked"
+    assert report["command_log"][0]["status"] == "blocked"
+    assert sink.events[0].payload["status"] == "blocked"
+    assert FakeSchedulerHHClient.updated_resumes == []
+
+
+def test_safe_task_runner_reports_mixed_completed_and_blocked_results_as_partial(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeSchedulerHHClient)
+    app = WorkHunter(tmp_path)
+    sink = MemoryNotificationSink()
+
+    report = SafeTaskRunner(app, root=tmp_path, notification_sinks=[sink]).run(
+        [
+            {"task": "score"},
+            {"task": "hh-update-resumes", "confirm": True},
+        ]
+    )
+
+    assert report["status"] == "partial"
+    assert report["counts"] == {"completed": 1, "failed": 0, "blocked": 1}
+    assert [item["status"] for item in report["items"]] == ["completed", "blocked"]
+    assert sink.events[0].payload["status"] == "partial"
 
 
 def test_safe_task_runner_masks_sensitive_task_results_in_memory_and_saved_report(tmp_path):

@@ -1,5 +1,6 @@
 const state = {
   jobs: [],
+  resumes: [],
   selectedId: null,
   config: null,
   chatMessages: [],
@@ -11,6 +12,7 @@ const state = {
   agent: {
     preflight: null,
     digest: null,
+    research: null,
     operations: null,
     approvals: [],
     templates: [],
@@ -24,6 +26,25 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 
+const ROUTES = {
+  inbox: { path: "/jobs", title: "Jobs", summary: "Sync sources, then sort by score.", actions: true },
+  calendar: { path: "/calendar", title: "Calendar", summary: "Interviews, follow-ups, and reminders.", actions: false },
+  favorites: { path: "/favorites", title: "Favorites", summary: "Saved vacancies and notes.", actions: false },
+  chat: { path: "/chat", title: "AI Assistant", summary: "Chat with optional selected-job context.", actions: false },
+  agent: { path: "/agent", title: "HH Agent", summary: "Local HH runs, approvals, research, and dry-run apply plans.", actions: false },
+  settings: { path: "/settings", title: "Settings", summary: "Profiles, HH auth, AI backend, resumes, and config.", actions: false },
+  sources: { path: "/sources", title: "Sources", summary: "Source health and last sync state.", actions: false },
+  stats: { path: "/stats", title: "Stats", summary: "Pipeline and score distribution.", actions: false },
+  trends: { path: "/trends", title: "Trends", summary: "Run market trend analysis explicitly from this page.", actions: false },
+};
+
+const PATH_TO_VIEW = Object.fromEntries(Object.entries(ROUTES).map(([view, route]) => [route.path, view]));
+PATH_TO_VIEW["/"] = "inbox";
+
+function routeViewFromPath(pathname) {
+  return PATH_TO_VIEW[pathname] || "inbox";
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -36,27 +57,96 @@ async function api(path, options = {}) {
   return data;
 }
 
+function requirePositiveInteger(value, fieldName = "id") {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${fieldName}`);
+  }
+  return parsed;
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(String(value ?? ""), window.location.origin);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "#";
+  } catch (_error) {
+    return "#";
+  }
+}
+
+function numericRecordAction(action, value, fieldName) {
+  const id = requirePositiveInteger(value, fieldName);
+  return `data-record-action="${escapeAttr(action)}" data-record-id="${id}"`;
+}
+
+function keyedRecordAction(action, value) {
+  return `data-record-action="${escapeAttr(action)}" data-record-key="${escapeAttr(value)}"`;
+}
+
+const sectionLoadingCounts = new WeakMap();
+
+function setSectionLoading(name, busy) {
+  const section = document.querySelector(`[data-load-section="${name}"]`);
+  if (!section) return;
+  const activeCount = sectionLoadingCounts.get(section) || 0;
+  const nextCount = busy ? activeCount + 1 : Math.max(0, activeCount - 1);
+  if (nextCount > 0) {
+    sectionLoadingCounts.set(section, nextCount);
+  } else {
+    sectionLoadingCounts.delete(section);
+  }
+  const isBusy = nextCount > 0;
+  section.setAttribute("aria-busy", String(isBusy));
+  if (name === "jobs") {
+    const skeleton = $("#jobs-skeleton");
+    if (skeleton) skeleton.style.display = isBusy ? "block" : "none";
+  }
+}
+
 async function loadJobs() {
-  const source = $("#source-filter").value;
-  const minScore = $("#min-score-filter").value || "0";
-  const params = new URLSearchParams({ limit: "200", min_score: minScore });
-  if (source) params.set("source", source);
-  state.jobs = await api(`/api/jobs?${params.toString()}`);
-  renderJobs();
-  updateSummary();
+  setSectionLoading("jobs", true);
+  try {
+    const source = $("#source-filter").value;
+    const minScore = $("#min-score-filter").value || "0";
+    const params = new URLSearchParams({ limit: "200", min_score: minScore });
+    if (source) params.set("source", source);
+    state.jobs = await api(`/api/jobs?${params.toString()}`);
+    renderJobs();
+    updateSummary();
+  } finally {
+    setSectionLoading("jobs", false);
+  }
+}
+
+function bindJobRowActivation(row, job) {
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `Открыть ${job.title || "вакансию"}`);
+  const activate = () => selectJob(requirePositiveInteger(job.id, "job id"));
+  row.addEventListener("click", (event) => {
+    if (!event.target.closest("input,button,a")) activate();
+  });
+  row.addEventListener("keydown", (event) => {
+    if ((event.key === "Enter" || event.key === " ") && !event.target.closest("input,button,a")) {
+      event.preventDefault();
+      activate();
+    }
+  });
 }
 
 function renderJobs() {
   const body = $("#jobs-body");
   body.innerHTML = "";
   for (const job of state.jobs) {
+    const jobId = requirePositiveInteger(job.id, "job id");
     const tr = document.createElement("tr");
-    tr.className = job.id === state.selectedId ? "selected" : "";
-    tr.addEventListener("click", () => selectJob(job.id));
+    tr.className = jobId === state.selectedId ? "selected" : "";
+    bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
+    const checked = selectedJobIds.has(jobId) ? "checked" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="toggleJobSelect(${job.id}, this.checked)"></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${jobId}" data-record-action="toggle-job-select" data-record-id="${jobId}" ${checked}></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
@@ -68,6 +158,7 @@ function renderJobs() {
     `;
     body.appendChild(tr);
   }
+  syncBulkCheckboxes();
 }
 
 async function selectJob(id) {
@@ -88,20 +179,20 @@ function renderDetail(job) {
   $("#job-detail").className = "detail";
   $("#job-detail").innerHTML = `
     <h2>${escapeHtml(job.title)}</h2>
-    <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(job.url)}" target="_blank" rel="noreferrer">открыть</a></p>
+    <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(safeExternalUrl(job.url))}" target="_blank" rel="noreferrer">открыть</a></p>
     <div class="detail-actions">
-      <button onclick="markSelected('saved')">Сохранить</button>
-      <button onclick="markSelected('hidden')">Скрыть</button>
-      <button onclick="markSelected('applied')">Откликнулся</button>
-      <button onclick="prepareLetter()">Подготовить письмо</button>
-      <button onclick="prepareLetterAi()">AI письмо</button>
-      <button onclick="fetchFullDescription()">Полное описание</button>
-      <button onclick="applyHh(true)">HH apply plan</button>
-      <button onclick="applyHh(false)" class="primary">Confirm HH apply</button>
-      <button onclick="shareToTelegram()">📤 Telegram</button>
-      <button onclick="smartClassify()">AI классификация</button>
-      <button onclick="parseJobStructure()">Структура</button>
-      <button onclick="runGapAnalysis()">Gap-анализ</button>
+      <button data-ui-action="mark-selected" data-status="saved">Сохранить</button>
+      <button data-ui-action="mark-selected" data-status="hidden">Скрыть</button>
+      <button data-ui-action="mark-selected" data-status="applied">Откликнулся</button>
+      <button data-ui-action="prepare-letter">Подготовить письмо</button>
+      <button data-ui-action="prepare-letter-ai">AI письмо</button>
+      <button data-ui-action="fetch-full-description">Полное описание</button>
+      <button data-ui-action="apply-hh" data-dry-run="true">HH apply plan</button>
+      <button data-ui-action="apply-hh" data-dry-run="false" class="primary">Confirm HH apply</button>
+      <button data-ui-action="share-to-telegram">📤 Telegram</button>
+      <button data-ui-action="smart-classify">AI классификация</button>
+      <button data-ui-action="parse-job-structure">Структура</button>
+      <button data-ui-action="run-gap-analysis">Gap-анализ</button>
     </div>
     <div class="section-title">Score</div>
     <div class="chips">
@@ -118,9 +209,10 @@ function renderDetail(job) {
     <div class="section-title">Описание</div>
     <p>${escapeHtml(job.description || "Описание не загружено.")}</p>
     <div class="section-title">Письмо</div>
-    <textarea id="letter-box" class="letter" spellcheck="true">${escapeHtml(letter)}</textarea>
+    <textarea id="detail-letter-box" data-letter-box class="letter" spellcheck="true">${escapeHtml(letter)}</textarea>
     <div id="action-output" class="meta"></div>
   `;
+  setLetterValue(letter);
 }
 
 async function syncJobs() {
@@ -146,45 +238,56 @@ async function scoreJobs() {
   }
 }
 
-async function markSelected(status) {
-  if (!state.selectedId) return;
-  await api(`/api/jobs/${state.selectedId}/status`, {
+async function updateJobStatus(jobId, status) {
+  const id = requirePositiveInteger(jobId, "job id");
+  await api(`/api/jobs/${id}/status`, {
     method: "POST",
     body: JSON.stringify({ status }),
   });
   if (status === "applied") {
-    try {
-      await api(`/api/jobs/${state.selectedId}/apply`, { method: "POST", body: JSON.stringify({ status: "applied" }) });
-    } catch (e) { /* ignore if endpoint missing */ }
+    await api(`/api/jobs/${id}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ status: "applied" }),
+    });
   }
-  try { await api(`/api/jobs/${state.selectedId}/record-event`, { method: "POST", body: JSON.stringify({ action: status }) }); } catch (e) {}
+  await api(`/api/jobs/${id}/record-event`, {
+    method: "POST",
+    body: JSON.stringify({ action: status }),
+  });
+  return id;
+}
+
+async function markSelected(status) {
+  if (!state.selectedId) return;
+  const id = requirePositiveInteger(state.selectedId, "job id");
+  await updateJobStatus(id, status);
   await loadJobs();
-  await selectJob(state.selectedId);
+  await selectJob(id);
 }
 
 async function prepareLetter() {
   if (!state.selectedId) return;
   const draft = await api(`/api/jobs/${state.selectedId}/letter`, { method: "POST", body: "{}" });
-  $("#letter-box").value = draft.body;
+  setLetterValue(draft.body);
 }
 
 async function prepareLetterAi() {
   if (!state.selectedId) return;
-  setBusy("[onclick='prepareLetterAi()']", true);
+  setBusy('[data-ui-action="prepare-letter-ai"]', true);
   try {
     const draft = await api(`/api/jobs/${state.selectedId}/letter-ai`, { method: "POST", body: "{}" });
-    $("#letter-box").value = draft.body;
+    setLetterValue(draft.body);
   } catch (err) {
     $("#action-output").textContent = `Ошибка AI: ${err.message}. Проверь API-ключ в настройках.`;
   } finally {
-    setBusy("[onclick='prepareLetterAi()']", false);
+    setBusy('[data-ui-action="prepare-letter-ai"]', false);
   }
 }
 
 async function applyHh(dryRun = true) {
   if (!state.selectedId) return;
 
-  const letter = $("#letter-box")?.value || "";
+  const letter = getLetterValue();
   if (dryRun) {
     const result = await api(`/api/jobs/${state.selectedId}/apply-plan`, {
       method: "POST",
@@ -220,13 +323,9 @@ async function applyHh(dryRun = true) {
 }
 
 async function loadProfile() {
-  try {
-    state.profile = await api("/api/profile");
-    renderProfileSwitcher();
-    renderProfileForm();
-  } catch (err) {
-    console.error("Failed to load profile:", err);
-  }
+  state.profile = await api("/api/profile");
+  renderProfileSwitcher();
+  renderProfileForm();
 }
 
 function renderProfileSwitcher() {
@@ -461,11 +560,77 @@ function updateSummary() {
   $("#summary-count").textContent = `${state.jobs.length} вакансий`;
 }
 
-function setBusy(selector, busy) {
-  const button = $(selector);
+const SECTION_LABELS = {
+  jobs: "Вакансии",
+  config: "Настройки",
+  profile: "Профиль",
+  sources: "Источники",
+  "agent-auth": "Проверка HH auth",
+};
+
+function clearSectionError(name) {
+  const container = $("#init-errors");
+  if (!container) return;
+  const existing = Array.from(container.children).find(
+    (item) => item.dataset.sectionError === name,
+  );
+  if (existing) existing.remove();
+  container.hidden = container.childElementCount === 0;
+}
+
+function showSectionError(name, error, retry) {
+  const container = $("#init-errors");
+  if (!container) return;
+  clearSectionError(name);
+  const item = document.createElement("div");
+  item.className = "section-load-error";
+  item.dataset.sectionError = name;
+  const message = document.createElement("span");
+  message.textContent = `${SECTION_LABELS[name] || name}: ${error?.message || error}`;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Повторить";
+  button.addEventListener("click", retry);
+  item.append(message, button);
+  container.appendChild(item);
+  container.hidden = false;
+}
+
+async function runIsolatedLoad(name, loader) {
+  try {
+    clearSectionError(name);
+    await loader();
+  } catch (error) {
+    showSectionError(name, error, () => runIsolatedLoad(name, loader));
+  }
+}
+
+const busyButtonStates = new WeakMap();
+
+function setBusy(target, busy, busyLabel = "Работаю...") {
+  const button = typeof target === "string" ? document.querySelector(target) : target;
   if (!button) return;
-  button.disabled = busy;
-  button.textContent = busy ? "Работаю..." : button.dataset.label || button.textContent;
+  if (busy) {
+    const state = busyButtonStates.get(button);
+    if (state) {
+      state.activeCount += 1;
+    } else {
+      busyButtonStates.set(button, {
+        activeCount: 1,
+        originalLabel: button.textContent,
+      });
+    }
+    button.disabled = true;
+    button.textContent = busyLabel;
+  } else {
+    const state = busyButtonStates.get(button);
+    if (!state) return;
+    state.activeCount -= 1;
+    if (state.activeCount > 0) return;
+    button.disabled = false;
+    button.textContent = state.originalLabel;
+    busyButtonStates.delete(button);
+  }
 }
 
 function escapeHtml(value) {
@@ -478,24 +643,58 @@ function escapeHtml(value) {
 }
 
 function escapeAttr(value) {
-  return escapeHtml(value || "#");
+  return escapeHtml(value);
 }
 
-function escapeJsString(value) {
-  return String(value ?? "")
-    .replaceAll("\\", "\\\\")
-    .replaceAll("'", "\\'")
-    .replaceAll("\n", "\\n")
-    .replaceAll("\r", "\\r")
-    .replaceAll("<", "\\u003c");
+function letterBoxes() {
+  return Array.from(document.querySelectorAll("[data-letter-box]"));
+}
+
+function setLetterValue(value) {
+  for (const box of letterBoxes()) {
+    box.value = value || "";
+  }
+}
+
+function getLetterValue() {
+  const detailValue = $("#detail-letter-box")?.value;
+  if (detailValue !== undefined) return detailValue;
+  return $("#ai-letter-box")?.value || "";
+}
+
+function activateView(view, options = {}) {
+  const route = ROUTES[view] || ROUTES.inbox;
+  const routeView = ROUTES[view] ? view : "inbox";
+  const routePath = route.path;
+
+  document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
+  document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
+
+  document.querySelector(`.nav-button[data-view="${routeView}"]`)?.classList.add("active");
+  const viewEl = $(`#view-${routeView}`);
+  if (viewEl) viewEl.classList.add("active");
+
+  const title = $("#route-topbar h1");
+  if (title) title.textContent = route.title;
+  const summary = $("#summary-line");
+  if (summary) summary.textContent = route.summary;
+  const actions = $("#route-actions");
+  if (actions) actions.style.display = route.actions ? "flex" : "none";
+
+  if (options.push !== false && window.location.pathname !== routePath) {
+    window.history.pushState({ view: routeView }, "", routePath);
+  }
+
+  if (routeView === "favorites") loadFavorites().catch(console.error);
+  if (routeView === "stats") loadStats().catch(console.error);
+  if (routeView === "agent") loadAgentCockpit().catch(console.error);
 }
 
 function toggleTheme() {
   state.darkTheme = !state.darkTheme;
   document.documentElement.setAttribute("data-theme", state.darkTheme ? "dark" : "light");
-  $("#theme-toggle-button").innerHTML = state.darkTheme ? '<i data-lucide="sun"></i> Светлая' : '<i data-lucide="moon"></i> Тёмная';
+  $("#theme-toggle-button").textContent = state.darkTheme ? "Светлая" : "Тёмная";
   localStorage.setItem("work-hunter-theme", state.darkTheme ? "dark" : "light");
-  if (window.lucide) lucide.createIcons();
 }
 
 function loadTheme() {
@@ -504,64 +703,68 @@ function loadTheme() {
     state.darkTheme = true;
     document.documentElement.setAttribute("data-theme", "dark");
     if ($("#theme-toggle-button")) {
-      $("#theme-toggle-button").innerHTML = '<i data-lucide="sun"></i> Светлая';
+      $("#theme-toggle-button").textContent = "Светлая";
     }
   }
 }
 
 async function getResumeTips() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getResumeTips()']", true);
+  setBusy('[data-ui-action="get-resume-tips"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/resume-tips`, { method: "POST", body: "{}" });
     $("#resume-tips-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#resume-tips-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy('[data-ui-action="get-resume-tips"]', false);
   }
-  setBusy("[onclick='getResumeTips()']", false);
 }
 
 async function getAtsResume() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getAtsResume()']", true);
+  setBusy('[data-ui-action="get-ats-resume"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/ats-resume`, { method: "POST", body: "{}" });
     $("#ats-resume-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#ats-resume-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy('[data-ui-action="get-ats-resume"]', false);
   }
-  setBusy("[onclick='getAtsResume()']", false);
 }
 
 async function getAtsAudit() {
   if (!state.selectedId) return;
   const text = $("#audit-resume-input").value.trim();
   if (!text) { $("#ats-audit-output").textContent = "Вставь текст резюме выше"; return; }
-  setBusy("[onclick='getAtsAudit()']", true);
+  setBusy('[data-ui-action="get-ats-audit"]', true);
   try {
     const result = await api("/api/ats-audit", { method: "POST", body: JSON.stringify({ resume_text: text, job_id: state.selectedId }) });
     $("#ats-audit-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#ats-audit-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy('[data-ui-action="get-ats-audit"]', false);
   }
-  setBusy("[onclick='getAtsAudit()']", false);
 }
 
 async function getSummary() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getSummary()']", true);
+  setBusy('[data-ui-action="get-summary"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/summarize`, { method: "POST", body: "{}" });
     $("#summary-output").textContent = result.summary;
   } catch (err) {
     $("#summary-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy('[data-ui-action="get-summary"]', false);
   }
-  setBusy("[onclick='getSummary()']", false);
 }
 
 async function getAiFit() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getAiFit()']", true);
+  setBusy('[data-ui-action="get-ai-fit"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/ai-fit`, { method: "POST", body: "{}" });
     const badge = $("#ai-fit-score");
@@ -572,32 +775,35 @@ async function getAiFit() {
     $("#ai-fit-reasoning").textContent = result.reasoning;
   } catch (err) {
     $("#ai-fit-reasoning").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy('[data-ui-action="get-ai-fit"]', false);
   }
-  setBusy("[onclick='getAiFit()']", false);
 }
 
 async function getInterviewQuestions() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getInterviewQuestions()']", true);
+  setBusy('[data-ui-action="get-interview-questions"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/interview-questions`, { method: "POST", body: "{}" });
     $("#interview-questions-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#interview-questions-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy('[data-ui-action="get-interview-questions"]', false);
   }
-  setBusy("[onclick='getInterviewQuestions()']", false);
 }
 
 async function getExperiencePitch() {
   if (!state.selectedId) return;
-  setBusy("[onclick='getExperiencePitch()']", true);
+  setBusy('[data-ui-action="get-experience-pitch"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/pitch`, { method: "POST", body: "{}" });
     $("#pitch-output").innerHTML = renderMarkdown(result.content);
   } catch (err) {
     $("#pitch-output").textContent = `Ошибка: ${err.message}`;
+  } finally {
+    setBusy('[data-ui-action="get-experience-pitch"]', false);
   }
-  setBusy("[onclick='getExperiencePitch()']", false);
 }
 
 async function saveJobNote() {
@@ -621,7 +827,7 @@ async function loadFavorites() {
   body.innerHTML = "";
   for (const job of jobs) {
     const tr = document.createElement("tr");
-    tr.addEventListener("click", () => selectJob(job.id));
+    bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     tr.innerHTML = `
       <td><span class="score">${escapeHtml(String(score))}</span></td>
@@ -630,10 +836,19 @@ async function loadFavorites() {
         <div class="meta">${escapeHtml(job.company || "?" )} · ${escapeHtml(job.source)}</div>
       </td>
       <td>${escapeHtml(job.source)}</td>
-      <td class="meta">${escapeHtml((job.note_short || "").substring(0, 60))}</td>
+      <td class="meta">${escapeHtml((job.note_preview || "").substring(0, 60))}</td>
     `;
     body.appendChild(tr);
   }
+}
+
+function funnelWidth(count, total) {
+  const numericCount = Number(count);
+  const numericTotal = Number(total);
+  if (!Number.isFinite(numericCount) || !Number.isFinite(numericTotal) || numericTotal <= 0) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, (numericCount / numericTotal) * 100));
 }
 
 async function loadStats() {
@@ -648,7 +863,11 @@ async function loadStats() {
     sourceDiv.innerHTML = "";
     if (stats.by_source) {
       for (const [source, count] of Object.entries(stats.by_source)) {
-        sourceDiv.innerHTML += `<div class="stat-bar"><span>${source}</span><div class="bar"><div class="fill" style="width:${Math.min(count/10, 100)}%"></div></div><span>${count}</span></div>`;
+        const numericCount = Number(count);
+        const width = Number.isFinite(numericCount)
+          ? Math.min(100, Math.max(0, numericCount / 10))
+          : 0;
+        sourceDiv.innerHTML += `<div class="stat-bar"><span>${escapeHtml(source)}</span><div class="bar"><div class="fill" style="width:${width}%"></div></div><span>${escapeHtml(String(count))}</span></div>`;
       }
     }
 
@@ -656,20 +875,23 @@ async function loadStats() {
     distDiv.innerHTML = "";
     if (stats.score_distribution) {
       for (const [bucket, count] of Object.entries(stats.score_distribution)) {
-        distDiv.innerHTML += `<div class="stat-bar"><span>${bucket}</span><div class="bar"><div class="fill" style="width:${Math.min(count/5, 100)}%"></div></div><span>${count}</span></div>`;
+        const numericCount = Number(count);
+        const width = Number.isFinite(numericCount)
+          ? Math.min(100, Math.max(0, numericCount / 5))
+          : 0;
+        distDiv.innerHTML += `<div class="stat-bar"><span>${escapeHtml(bucket)}</span><div class="bar"><div class="fill" style="width:${width}%"></div></div><span>${escapeHtml(String(count))}</span></div>`;
       }
     }
 
     const funnelDiv = $("#stats-funnel");
     funnelDiv.innerHTML = "";
-    if (stats.applications_by_status) {
-      const funnel = stats.applications_by_status;
-      const total = stats.total_applications || 1;
-      const stages = ["applied", "viewed", "response", "phone_screen", "interview", "offer"];
-      for (const stage of stages) {
-        const count = funnel[stage] || 0;
-        const pct = Math.round((count / total) * 100);
-        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${Math.max(pct, 2)}%;min-width:40px;"><span>${stage}</span><strong>${count}</strong></div>`;
+    if (stats.application_funnel) {
+      const total = stats.total_applications || 0;
+      for (const item of stats.application_funnel) {
+        const count = Number(item.count);
+        const safeCount = Number.isFinite(count) ? count : 0;
+        const status = String(item.status || "");
+        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${funnelWidth(safeCount, total)}%;min-width:40px;"><span>${escapeHtml(status)}</span><strong>${escapeHtml(String(item.count))}</strong></div>`;
       }
     }
   } catch (e) {
@@ -738,7 +960,7 @@ function exportCsv() {
 
 async function fetchFullDescription() {
   if (!state.selectedId) return;
-  setBusy("[onclick='fetchFullDescription()']", true);
+  setBusy('[data-ui-action="fetch-full-description"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/fetch-full`, { method: "POST", body: "{}" });
     if (result.updated) {
@@ -749,8 +971,9 @@ async function fetchFullDescription() {
     }
   } catch (e) {
     $("#summary-line").textContent = `Ошибка: ${e.message}`;
+  } finally {
+    setBusy('[data-ui-action="fetch-full-description"]', false);
   }
-  setBusy("[onclick='fetchFullDescription()']", false);
 }
 
 function switchAiTab(panelName) {
@@ -760,10 +983,6 @@ function switchAiTab(panelName) {
   document.querySelector(`#ai-panel-${panelName}`).classList.add("active");
 }
 
-function refreshIcons() {
-  if (window.lucide) lucide.createIcons();
-}
-
 function switchAgentPanel(panelName) {
   document.querySelectorAll(".agent-tab").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".agent-panel").forEach(p => p.classList.remove("active"));
@@ -771,10 +990,10 @@ function switchAgentPanel(panelName) {
   $(`#agent-panel-${panelName}`)?.classList.add("active");
 }
 
-async function loadAgentCockpit() {
+async function loadAgentCockpit({ liveAuth = false } = {}) {
   $("#agent-status-line").textContent = "Загружаю статус агента...";
   await Promise.all([
-    loadAgentPreflight(),
+    loadAgentPreflight({ liveAuth }),
     loadAgentDigest(),
     loadAgentOperations(),
     loadAgentApprovals(),
@@ -785,13 +1004,28 @@ async function loadAgentCockpit() {
     loadAgentEvents(),
     loadAgentTasks(),
   ]);
+  renderAgentResearch();
   $("#agent-status-line").textContent = "Готово";
-  refreshIcons();
 }
 
-async function loadAgentPreflight() {
-  state.agent.preflight = await api("/api/agent/preflight");
+async function loadAgentPreflight({ liveAuth = false } = {}) {
+  const url = liveAuth
+    ? "/api/agent/preflight?live_auth=true"
+    : "/api/agent/preflight";
+  state.agent.preflight = await api(url);
   renderAgentDashboard();
+}
+
+async function checkAgentLiveAuth() {
+  setBusy("#agent-live-auth-button", true);
+  clearSectionError("agent-auth");
+  try {
+    await loadAgentPreflight({ liveAuth: true });
+  } catch (error) {
+    showSectionError("agent-auth", error, checkAgentLiveAuth);
+  } finally {
+    setBusy("#agent-live-auth-button", false);
+  }
 }
 
 async function loadAgentDigest() {
@@ -849,7 +1083,7 @@ function renderAgentDashboard() {
   const approvals = Array.isArray(state.agent.approvals) ? state.agent.approvals : [];
   const livePending = approvals.filter((item) => item.status === "pending").length;
   $("#agent-auth-status").textContent = auth.status || preflight.status || "—";
-  $("#agent-auth-note").textContent = (preflight.actions || auth.actions || []).slice(0, 2).join(" · ") || "ready";
+  $("#agent-auth-note").textContent = (auth.actions || preflight.actions || []).slice(0, 2).join(" · ") || auth.error || "ready";
   $("#agent-pending-count").textContent = String(livePending ?? counts.pending_approvals ?? digest.approvals?.by_status?.pending ?? 0);
   $("#agent-runs-count").textContent = String(counts.mcp_runs ?? digest.runs?.total ?? 0);
   $("#agent-decisions-count").textContent = String(counts.ai_decisions ?? digest.ai_decisions?.total ?? 0);
@@ -884,14 +1118,13 @@ function renderAgentDigest() {
     </div>
     <div class="agent-row">
       <div class="agent-row-head"><strong>Recent approvals</strong><span class="agent-badge">${approvals.length}</span></div>
-      ${approvals.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.action_type)} · ${escapeHtml(item.status)} · ${escapeHtml(item.reason || "")}</div>`).join("") || '<p class="meta">Нет approvals.</p>'}
+      ${approvals.map((item) => `<div class="meta">#${escapeHtml(String(item.id))} ${escapeHtml(item.action_type)} · ${escapeHtml(item.status)} · ${escapeHtml(item.reason || "")}</div>`).join("") || '<p class="meta">Нет approvals.</p>'}
     </div>
     <div class="agent-row">
       <div class="agent-row-head"><strong>Recent runs</strong><span class="agent-badge">${runs.length}</span></div>
-      ${runs.map((item) => `<div class="meta">#${item.id} ${escapeHtml(item.tool_name)} · ${escapeHtml(item.status)}</div>`).join("") || '<p class="meta">Нет запусков.</p>'}
+      ${runs.map((item) => `<div class="meta">#${escapeHtml(String(item.id))} ${escapeHtml(item.tool_name)} · ${escapeHtml(item.status)}</div>`).join("") || '<p class="meta">Нет запусков.</p>'}
     </div>
   `;
-  refreshIcons();
 }
 
 function renderAgentApprovals() {
@@ -902,24 +1135,26 @@ function renderAgentApprovals() {
     box.innerHTML = '<p class="meta">Очередь пустая.</p>';
     return;
   }
-  box.innerHTML = approvals.map((item) => `
-    <div class="agent-row">
-      <div class="agent-row-head">
-        <strong>#${item.id} ${escapeHtml(item.action_type)}</strong>
-        <span class="agent-badge ${escapeAttr(item.status)}">${escapeHtml(item.status)}</span>
+  box.innerHTML = approvals.map((item) => {
+    const approvalId = requirePositiveInteger(item.id, "approval id");
+    return `
+      <div class="agent-row">
+        <div class="agent-row-head">
+          <strong>#${approvalId} ${escapeHtml(item.action_type)}</strong>
+          <span class="agent-badge ${escapeAttr(item.status)}">${escapeHtml(item.status)}</span>
+        </div>
+        <div class="meta">confidence: ${escapeHtml(String(item.confidence))} · ${escapeHtml(item.reason || "")}</div>
+        <pre class="agent-json">${escapeHtml(JSON.stringify(item.payload || {}, null, 2))}</pre>
+        <textarea id="agent-modify-${approvalId}" class="agent-modify" rows="2" placeholder="Что изменить в payload/сообщении"></textarea>
+        <div class="agent-row-actions">
+          <button ${numericRecordAction("approve-agent-approval", approvalId, "approval id")}>Approve</button>
+          <button ${numericRecordAction("reject-agent-approval", approvalId, "approval id")}>Reject</button>
+          <button ${numericRecordAction("modify-agent-approval", approvalId, "approval id")}>Modify</button>
+          <button ${numericRecordAction("flag-agent-approval", approvalId, "approval id")}>Flag</button>
+        </div>
       </div>
-      <div class="meta">confidence: ${escapeHtml(String(item.confidence))} · ${escapeHtml(item.reason || "")}</div>
-      <pre class="agent-json">${escapeHtml(JSON.stringify(item.payload || {}, null, 2))}</pre>
-      <textarea id="agent-modify-${item.id}" class="agent-modify" rows="2" placeholder="Что изменить в payload/сообщении"></textarea>
-      <div class="agent-row-actions">
-        <button onclick="approveAgentApproval(${item.id})"><i data-lucide="check"></i>Approve</button>
-        <button onclick="rejectAgentApproval(${item.id})"><i data-lucide="x"></i>Reject</button>
-        <button onclick="modifyAgentApproval(${item.id})"><i data-lucide="pencil"></i>Modify</button>
-        <button onclick="flagAgentApproval(${item.id})"><i data-lucide="flag"></i>Flag</button>
-      </div>
-    </div>
-  `).join("");
-  refreshIcons();
+    `;
+  }).join("");
 }
 
 function renderAgentOperations() {
@@ -930,12 +1165,12 @@ function renderAgentOperations() {
   box.innerHTML = operations.runs.length ? operations.runs.map((run) => `
     <div class="agent-row">
       <div class="agent-row-head">
-        <strong>#${run.id} ${escapeHtml(run.tool_name)}</strong>
+        <strong>#${escapeHtml(String(run.id))} ${escapeHtml(run.tool_name)}</strong>
         <span class="agent-badge ${escapeAttr(run.status)}">${escapeHtml(run.status)}</span>
       </div>
       <div class="meta">${escapeHtml(run.started_at || "")} ${run.finished_at ? "→ " + escapeHtml(run.finished_at) : ""}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify(run.output || run.input || {}, null, 2))}</pre>
-      ${run.status === "running" ? `<button onclick="cancelAgentOperation(${run.id})"><i data-lucide="ban"></i>Cancel</button>` : ""}
+      ${run.status === "running" ? `<button ${numericRecordAction("cancel-agent-operation", run.id, "operation id")}>Cancel</button>` : ""}
     </div>
   `).join("") : '<p class="meta">Запусков пока нет.</p>';
   logBox.innerHTML = operations.logs.length ? operations.logs.map((log) => `
@@ -945,7 +1180,6 @@ function renderAgentOperations() {
       <span>${escapeHtml(log.message || "")}</span>
     </div>
   `).join("") : '<p class="meta">Логов пока нет.</p>';
-  refreshIcons();
 }
 
 function renderAgentInbox() {
@@ -1030,12 +1264,11 @@ function renderAgentTemplates() {
     <div class="agent-row">
       <div class="agent-row-head">
         <strong>${escapeHtml(item.name)}</strong>
-        <button onclick="deleteAgentTemplate('${escapeJsString(item.name)}')"><i data-lucide="trash-2"></i>Удалить</button>
+        <button ${keyedRecordAction("delete-agent-template", item.name)}>Удалить</button>
       </div>
       <pre class="agent-json">${escapeHtml(item.body || "")}</pre>
     </div>
   `).join("") : '<p class="meta">Шаблонов пока нет.</p>';
-  refreshIcons();
 }
 
 function renderAgentBlacklist() {
@@ -1046,12 +1279,11 @@ function renderAgentBlacklist() {
     <div class="agent-row">
       <div class="agent-row-head">
         <strong>${escapeHtml(item.employer_name || item.employer_id)}</strong>
-        <button onclick="deleteAgentBlacklist('${escapeJsString(item.employer_id)}')"><i data-lucide="trash-2"></i>Удалить</button>
+        <button ${keyedRecordAction("delete-agent-blacklist", item.employer_id)}>Удалить</button>
       </div>
       <div class="meta">${escapeHtml(item.employer_id)} · ${escapeHtml(item.reason || "")}</div>
     </div>
   `).join("") : '<p class="meta">Blacklist пустой.</p>';
-  refreshIcons();
 }
 
 function renderHhLabQuickCalls() {
@@ -1059,11 +1291,8 @@ function renderHhLabQuickCalls() {
   if (!box) return;
   const calls = state.agent.labQuickCalls || [];
   box.innerHTML = calls.map((item) => `
-    <button onclick="runHhLabQuick('${escapeJsString(item.id)}')">
-      <i data-lucide="zap"></i>${escapeHtml(item.label || item.path)}
-    </button>
+    <button ${keyedRecordAction("run-hh-lab-quick", item.id)}>${escapeHtml(item.label || item.path)}</button>
   `).join("");
-  refreshIcons();
 }
 
 function renderHhLabSnippets() {
@@ -1083,13 +1312,12 @@ function renderHhLabSnippets() {
       <div class="meta">${escapeHtml(item.path)}</div>
       <pre class="agent-json">${escapeHtml(JSON.stringify({ params: item.params || {}, body: item.body || {} }, null, 2))}</pre>
       <div class="agent-row-actions">
-        <button onclick="fillHhLabRequestByName('${escapeJsString(item.name)}')"><i data-lucide="copy"></i>Load</button>
-        <button onclick="runHhLabSnippet('${escapeJsString(item.name)}')"><i data-lucide="play"></i>Run</button>
-        <button onclick="deleteHhLabSnippet('${escapeJsString(item.name)}')"><i data-lucide="trash-2"></i>Delete</button>
+        <button ${keyedRecordAction("fill-hh-lab-snippet", item.name)}>Load</button>
+        <button ${keyedRecordAction("run-hh-lab-snippet", item.name)}>Run</button>
+        <button ${keyedRecordAction("delete-hh-lab-snippet", item.name)}>Delete</button>
       </div>
     </div>
   `).join("");
-  refreshIcons();
 }
 
 function fillHhLabRequest(request) {
@@ -1119,6 +1347,14 @@ function writeHhLabOutput(payload) {
   box.textContent = JSON.stringify(payload, null, 2);
 }
 
+const HH_LAB_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function confirmHhLabMutation(payload) {
+  if (!HH_LAB_MUTATING_METHODS.has(payload.method.toUpperCase())) return true;
+  if (!window.confirm(`HH API mutation: ${payload.method} ${payload.path}. Continue?`)) return false;
+  return window.confirm("Final confirmation: this can change your HH account.");
+}
+
 async function runHhLabCall() {
   try {
     const payload = {
@@ -1127,6 +1363,8 @@ async function runHhLabCall() {
       params: parseHhLabJson("#hh-lab-params", {}),
       body: parseHhLabJson("#hh-lab-body", null),
     };
+    if (!confirmHhLabMutation(payload)) return;
+    if (HH_LAB_MUTATING_METHODS.has(payload.method.toUpperCase())) payload.confirm = true;
     writeHhLabOutput({ status: "running", request: payload });
     const result = await api("/api/hh/lab/call", { method: "POST", body: JSON.stringify(payload) });
     writeHhLabOutput(result);
@@ -1179,12 +1417,20 @@ async function deleteHhLabSnippet(name) {
 }
 
 async function runAgentOperation(operation, button = null) {
+  const params = {};
+  if (operation === "update-resumes") {
+    if (!window.confirm("Update your HH resumes now?")) {
+      $("#agent-operation-note").textContent = `${operation}: cancelled`;
+      return;
+    }
+    params.confirm = true;
+  }
   if (button) button.disabled = true;
   $("#agent-operation-note").textContent = `${operation}: running`;
   try {
     const result = await api("/api/agent/run", {
       method: "POST",
-      body: JSON.stringify({ operation, params: operation === "preflight" ? { live_auth: false } : {} }),
+      body: JSON.stringify({ operation, params }),
     });
     $("#agent-operation-note").textContent = `${operation}: ${result.result?.status || "ok"}`;
     await Promise.all([loadAgentPreflight(), loadAgentDigest(), loadAgentOperations(), loadAgentApprovals()]);
@@ -1192,28 +1438,107 @@ async function runAgentOperation(operation, button = null) {
     $("#agent-operation-note").textContent = `${operation}: ${err.message}`;
   } finally {
     if (button) button.disabled = false;
-    refreshIcons();
   }
 }
 
+function agentResearchPayload() {
+  const rawLimit = Number.parseInt($("#agent-research-limit")?.value || "10", 10);
+  return {
+    text: $("#agent-research-text")?.value.trim() || "",
+    limit: Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 100)) : 10,
+    resume_id: $("#agent-research-resume-id")?.value.trim() || "",
+    confirm_apply: false,
+  };
+}
+
+async function runAgentResearch(planApply = false) {
+  const runButton = $("#agent-research-run-button");
+  const planButton = $("#agent-research-plan-button");
+  if (runButton) runButton.disabled = true;
+  if (planButton) planButton.disabled = true;
+  state.agent.research = { result: { status: "running", items: [] } };
+  renderAgentResearch();
+  try {
+    const result = await api("/api/agent/run", {
+      method: "POST",
+      body: JSON.stringify({
+        operation: planApply ? "research-and-apply" : "research-vacancies",
+        params: agentResearchPayload(),
+      }),
+    });
+    state.agent.research = result;
+    renderAgentResearch();
+    await loadAgentOperations();
+  } catch (err) {
+    state.agent.research = { result: { status: "error", error: err.message, items: [] } };
+    renderAgentResearch();
+  } finally {
+    if (runButton) runButton.disabled = false;
+    if (planButton) planButton.disabled = false;
+  }
+}
+
+function renderAgentResearch() {
+  const box = $("#agent-research-output");
+  if (!box) return;
+  const payload = state.agent.research || {};
+  const result = payload.result || payload;
+  if (!result || !result.status) {
+    box.innerHTML = '<p class="meta">No research run yet.</p>';
+    return;
+  }
+  if (result.status === "running") {
+    box.innerHTML = '<p class="meta">Running research...</p>';
+    return;
+  }
+  if (result.status === "error") {
+    box.innerHTML = `<p class="error">${escapeHtml(result.error || "Research failed")}</p>`;
+    return;
+  }
+  const counts = result.counts || {};
+  const items = result.items || [];
+  const header = `
+    <div class="source-row">
+      <strong>${escapeHtml(String(result.status))}</strong>
+      <div class="meta">operation #${escapeHtml(String(payload.operation_id || "-"))} · analyzed ${escapeHtml(String(counts.analyzed || 0))} · planned ${escapeHtml(String(counts.planned || 0))} · blocked ${escapeHtml(String(counts.blocked || 0))} · errors ${escapeHtml(String(counts.errors || 0))}</div>
+    </div>
+  `;
+  const cards = items.map((item) => `
+    <div class="source-row agent-research-card">
+      <strong>${escapeHtml(item.name || item.title || item.vacancy_id || "-")}</strong>
+      <div class="meta">${escapeHtml(item.employer_name || item.company || "-")} · vacancy ${escapeHtml(item.vacancy_id || item.id || "-")} · score ${escapeHtml(String(item.score ?? "-"))} · ${escapeHtml(item.recommended_action || "-")} · ${escapeHtml(item.attempt_status || "not_planned")}</div>
+      <div class="chips">
+        ${(item.reasons || []).map((reason) => `<span class="chip">${escapeHtml(reason)}</span>`).join("") || '<span class="chip">no reasons</span>'}
+        ${(item.risk_flags || []).map((risk) => `<span class="chip red">${escapeHtml(risk)}</span>`).join("")}
+      </div>
+      ${item.attempt_reason ? `<div class="meta">plan: ${escapeHtml(item.attempt_reason)}</div>` : ""}
+    </div>
+  `).join("");
+  box.innerHTML = header + (cards || '<p class="meta">No items returned.</p>');
+}
+
 async function cancelAgentOperation(id) {
-  await api(`/api/cancel/${id}`, { method: "POST", body: JSON.stringify({ reason: "cancelled_from_ui" }) });
+  const operationId = requirePositiveInteger(id, "operation id");
+  await api(`/api/cancel/${operationId}`, { method: "POST", body: JSON.stringify({ reason: "cancelled_from_ui" }) });
   await loadAgentOperations();
 }
 
 async function approveAgentApproval(id) {
-  await api(`/api/approvals/${id}/approve`, { method: "POST", body: JSON.stringify({ reason: "approved_from_ui" }) });
+  const approvalId = requirePositiveInteger(id, "approval id");
+  await api(`/api/approvals/${approvalId}/approve`, { method: "POST", body: JSON.stringify({ reason: "approved_from_ui" }) });
   await Promise.all([loadAgentApprovals(), loadAgentDigest()]);
 }
 
 async function rejectAgentApproval(id) {
-  await api(`/api/approvals/${id}/reject`, { method: "POST", body: JSON.stringify({ reason: "rejected_from_ui" }) });
+  const approvalId = requirePositiveInteger(id, "approval id");
+  await api(`/api/approvals/${approvalId}/reject`, { method: "POST", body: JSON.stringify({ reason: "rejected_from_ui" }) });
   await Promise.all([loadAgentApprovals(), loadAgentDigest()]);
 }
 
 async function modifyAgentApproval(id) {
-  const instruction = $(`#agent-modify-${id}`)?.value.trim() || "modified_from_ui";
-  await api(`/api/approvals/${id}/modify`, {
+  const approvalId = requirePositiveInteger(id, "approval id");
+  const instruction = $(`#agent-modify-${approvalId}`)?.value.trim() || "modified_from_ui";
+  await api(`/api/approvals/${approvalId}/modify`, {
     method: "POST",
     body: JSON.stringify({ instruction, payload_patch: {} }),
   });
@@ -1221,7 +1546,8 @@ async function modifyAgentApproval(id) {
 }
 
 async function flagAgentApproval(id) {
-  await api(`/api/approvals/${id}/flag`, { method: "POST", body: JSON.stringify({ reason: "flagged_from_ui" }) });
+  const approvalId = requirePositiveInteger(id, "approval id");
+  await api(`/api/approvals/${approvalId}/flag`, { method: "POST", body: JSON.stringify({ reason: "flagged_from_ui" }) });
   await Promise.all([loadAgentApprovals(), loadAgentDigest()]);
 }
 
@@ -1299,6 +1625,63 @@ function setupResumeBuilderDefaults() {
   if (matrix && !matrix.value.trim()) matrix.value = defaultBatchMatrix();
 }
 
+
+const delegatedUiActions = Object.freeze({
+  "bulk-action": (control) => bulkAction(control.dataset.status),
+  "clear-bulk-selection": () => clearBulkSelection(),
+  "toggle-select-all": (_control, event) => {
+    event.stopPropagation();
+    toggleSelectAll();
+  },
+  "get-resume-tips": () => getResumeTips(),
+  "get-ats-resume": () => getAtsResume(),
+  "get-ats-audit": () => getAtsAudit(),
+  "get-ai-fit": () => getAiFit(),
+  "get-summary": () => getSummary(),
+  "get-experience-pitch": () => getExperiencePitch(),
+  "get-interview-questions": () => getInterviewQuestions(),
+  "prepare-letter": () => prepareLetter(),
+  "prepare-letter-ai": () => prepareLetterAi(),
+  "save-job-note": () => saveJobNote(),
+  "show-event-form": () => showEventForm(),
+  "save-event": () => saveEvent(),
+  "hide-event-form": () => hideEventForm(),
+  "load-agent-digest": () => loadAgentDigest(),
+  "load-agent-approvals": () => loadAgentApprovals(),
+  "load-agent-operations": () => loadAgentOperations(),
+  "show-resume-form": () => showResumeForm(),
+  "save-resume": () => saveResume(),
+  "hide-resume-form": () => hideResumeForm(),
+  "show-search-form": () => showSearchForm(),
+  "save-search": () => saveSearch(),
+  "hide-search-form": () => hideSearchForm(),
+  "load-ghost-jobs": () => loadGhostJobs(),
+  "load-market-trends": () => loadMarketTrends(),
+  "mark-selected": (control) => markSelected(control.dataset.status),
+  "fetch-full-description": () => fetchFullDescription(),
+  "apply-hh": (control) => applyHh(control.dataset.dryRun !== "false"),
+  "share-to-telegram": () => shareToTelegram(),
+  "smart-classify": () => smartClassify(),
+  "parse-job-structure": () => parseJobStructure(),
+  "run-gap-analysis": () => runGapAnalysis(),
+});
+
+
+function handleDelegatedUiAction(event) {
+  const control = event.target instanceof Element
+    ? event.target.closest("[data-ui-action]")
+    : null;
+  if (!control) return;
+  const handler = delegatedUiActions[control.dataset.uiAction];
+  if (!handler) return;
+  try {
+    Promise.resolve(handler(control, event)).catch(reportDynamicActionError);
+  } catch (error) {
+    reportDynamicActionError(error);
+  }
+}
+
+
 async function previewAgentResumeTemplate() {
   const template = $("#agent-resume-template").value;
   let context = {};
@@ -1330,18 +1713,55 @@ async function buildAgentBatchMatrix() {
   $("#agent-batch-matrix-output").textContent = JSON.stringify(result, null, 2);
 }
 
-document.addEventListener("DOMContentLoaded", async () => {
-  for (const button of document.querySelectorAll("button")) {
-    button.dataset.label = button.textContent;
+const dynamicRecordActions = Object.freeze({
+  "toggle-job-select": (control) => toggleJobSelect(
+    requirePositiveInteger(control.dataset.recordId, "job id"),
+    control.checked,
+  ),
+  "approve-agent-approval": (control) => approveAgentApproval(control.dataset.recordId),
+  "reject-agent-approval": (control) => rejectAgentApproval(control.dataset.recordId),
+  "modify-agent-approval": (control) => modifyAgentApproval(control.dataset.recordId),
+  "flag-agent-approval": (control) => flagAgentApproval(control.dataset.recordId),
+  "cancel-agent-operation": (control) => cancelAgentOperation(control.dataset.recordId),
+  "delete-agent-template": (control) => deleteAgentTemplate(control.dataset.recordKey),
+  "delete-agent-blacklist": (control) => deleteAgentBlacklist(control.dataset.recordKey),
+  "run-hh-lab-quick": (control) => runHhLabQuick(control.dataset.recordKey),
+  "fill-hh-lab-snippet": (control) => fillHhLabRequestByName(control.dataset.recordKey),
+  "run-hh-lab-snippet": (control) => runHhLabSnippet(control.dataset.recordKey),
+  "delete-hh-lab-snippet": (control) => deleteHhLabSnippet(control.dataset.recordKey),
+  "activate-resume": (control) => activateResume(control.dataset.recordId),
+  "edit-resume": (control) => showResumeForm(control.dataset.recordId),
+  "delete-resume": (control) => deleteResume(control.dataset.recordId),
+  "delete-event": (control) => deleteEvent(control.dataset.recordId),
+  "delete-search": (control) => deleteSearch(control.dataset.recordId),
+  "mark-ghost-job": (control) => markGhostJob(control.dataset.recordId),
+});
+
+function reportDynamicActionError(error) {
+  window.alert(`Ошибка: ${error?.message || error}`);
+}
+
+function handleDynamicRecordAction(event) {
+  const control = event.target instanceof Element
+    ? event.target.closest("[data-record-action]")
+    : null;
+  if (!control) return;
+  const handler = dynamicRecordActions[control.dataset.recordAction];
+  if (!handler) return;
+  if (control.matches(".job-checkbox")) event.stopPropagation();
+  try {
+    Promise.resolve(handler(control)).catch(reportDynamicActionError);
+  } catch (error) {
+    reportDynamicActionError(error);
   }
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
   setupResumeBuilderDefaults();
+  document.addEventListener("click", handleDelegatedUiAction);
+  document.addEventListener("click", handleDynamicRecordAction);
   document.querySelectorAll(".nav-button").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
-      document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
-      button.classList.add("active");
-      $(`#view-${button.dataset.view}`).classList.add("active");
-    });
+    button.addEventListener("click", () => activateView(button.dataset.view));
   });
   $("#sync-button").addEventListener("click", syncJobs);
   $("#score-button").addEventListener("click", scoreJobs);
@@ -1370,12 +1790,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#filter-with-salary")?.addEventListener("change", applySmartFilters);
   $("#filter-level")?.addEventListener("change", applySmartFilters);
   $("#refresh-stats-button")?.addEventListener("click", loadStats);
-  $("#agent-refresh-button")?.addEventListener("click", loadAgentCockpit);
+  $("#agent-refresh-button")?.addEventListener("click", () => loadAgentCockpit());
+  $("#agent-live-auth-button")?.addEventListener("click", checkAgentLiveAuth);
   $("#agent-digest-button")?.addEventListener("click", loadAgentDigest);
   $("#agent-save-template-button")?.addEventListener("click", saveAgentTemplate);
   $("#agent-save-blacklist-button")?.addEventListener("click", saveAgentBlacklist);
   $("#agent-resume-preview-button")?.addEventListener("click", previewAgentResumeTemplate);
   $("#agent-batch-matrix-button")?.addEventListener("click", buildAgentBatchMatrix);
+  $("#agent-research-run-button")?.addEventListener("click", () => runAgentResearch(false));
+  $("#agent-research-plan-button")?.addEventListener("click", () => runAgentResearch(true));
   $("#hh-lab-run-button")?.addEventListener("click", runHhLabCall);
   $("#hh-lab-save-snippet-button")?.addEventListener("click", saveHhLabSnippet);
   document.querySelectorAll("[data-agent-operation]").forEach((button) => {
@@ -1389,17 +1812,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     tab.addEventListener("click", () => switchAgentPanel(tab.dataset.agentPanel));
   });
 
-  document.querySelector("[data-view='favorites']")?.addEventListener("click", loadFavorites);
-  document.querySelector("[data-view='stats']")?.addEventListener("click", loadStats);
-  document.querySelector("[data-view='trends']")?.addEventListener("click", loadMarketTrends);
-  document.querySelector("[data-view='agent']")?.addEventListener("click", () => loadAgentCockpit().catch(console.error));
+  window.addEventListener("popstate", () => activateView(routeViewFromPath(window.location.pathname), { push: false }));
 
   loadTheme();
-  refreshIcons();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js");
   }
-  await Promise.all([loadJobs(), loadConfig(), loadProfile(), loadSources()]);
+  await Promise.allSettled([
+    runIsolatedLoad("jobs", loadJobs),
+    runIsolatedLoad("config", loadConfig),
+    runIsolatedLoad("profile", loadProfile),
+    runIsolatedLoad("sources", loadSources),
+  ]);
+  activateView(routeViewFromPath(window.location.pathname), { push: false });
   loadResumes().catch(() => {});
   loadEvents().catch(() => {});
   loadSearches().catch(() => {});
@@ -1408,28 +1833,41 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 let editingResumeId = 0;
 
+function resetResumeForm() {
+  editingResumeId = 0;
+  $("#resume-name-input").value = "";
+  $("#resume-body-input").value = "";
+}
+
 function showResumeForm(id = 0) {
-  editingResumeId = id;
+  editingResumeId = id ? requirePositiveInteger(id, "resume id") : 0;
+  const resume = state.resumes.find((item) => Number(item.id) === editingResumeId);
+  $("#resume-name-input").value = resume?.name || "";
+  $("#resume-body-input").value = resume?.body || "";
+  $("#save-resume-button").textContent = editingResumeId ? "Обновить" : "Сохранить";
   $("#resume-form").style.display = "block";
-  $("#save-resume-button").textContent = id ? "Обновить" : "Сохранить";
-  if (id) {
-  }
   $("#resume-name-input").focus();
+}
+
+function resumePayloadFromForm() {
+  const original = state.resumes.find((item) => Number(item.id) === editingResumeId);
+  return {
+    id: editingResumeId,
+    name: $("#resume-name-input").value.trim(),
+    body: $("#resume-body-input").value,
+    profile_id: original?.profile_id || state.profile?.active || "default",
+    is_active: original?.is_active === true,
+    ats_score: original?.ats_score ?? null,
+  };
 }
 
 function hideResumeForm() {
   $("#resume-form").style.display = "none";
-  editingResumeId = 0;
+  resetResumeForm();
 }
 
 async function saveResume() {
-  const body = {
-    name: $("#resume-name-input").value.trim(),
-    body: $("#resume-body-input").value,
-    profile_id: state.profile?.active || "default",
-    is_active: false,
-  };
-  if (editingResumeId) body.id = editingResumeId;
+  const body = resumePayloadFromForm();
   try {
     await api("/api/resumes", { method: "POST", body: JSON.stringify(body) });
     hideResumeForm();
@@ -1440,16 +1878,18 @@ async function saveResume() {
 async function loadResumes() {
   try {
     const resumes = await api("/api/resumes");
+    state.resumes = resumes;
     const list = $("#resumes-list");
     list.innerHTML = "";
     for (const r of resumes) {
+      const resumeId = requirePositiveInteger(r.id, "resume id");
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(r.name)}</strong>
-        <div class="meta">${r.is_active ? "★ Активное" : ""} · ATS: ${r.ats_score ?? "—"}</div>
+        <div class="meta">${r.is_active ? "★ Активное" : ""} · ATS: ${escapeHtml(String(r.ats_score ?? "—"))}</div>
         <div style="margin-top:6px;display:flex;gap:6px;">
-          <button onclick="activateResume(${r.id})">Активировать</button>
-          <button onclick="showResumeForm(${r.id})">Ред.</button>
-          <button onclick="deleteResume(${r.id})">Удалить</button>
+          <button aria-label="Активировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("activate-resume", resumeId, "resume id")}>Активировать</button>
+          <button aria-label="Редактировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("edit-resume", resumeId, "resume id")}>Ред.</button>
+          <button aria-label="Удалить резюме ${escapeAttr(r.name)}" ${numericRecordAction("delete-resume", resumeId, "resume id")}>Удалить</button>
         </div>
       </div>`;
     }
@@ -1457,13 +1897,15 @@ async function loadResumes() {
 }
 
 async function activateResume(id) {
-  await api(`/api/resumes/${id}/activate`, { method: "POST", body: "{}" });
+  const resumeId = requirePositiveInteger(id, "resume id");
+  await api(`/api/resumes/${resumeId}/activate`, { method: "POST", body: "{}" });
   await loadResumes();
 }
 
 async function deleteResume(id) {
   if (!confirm("Удалить резюме?")) return;
-  await api(`/api/resumes/${id}/delete`, { method: "POST", body: "{}" });
+  const resumeId = requirePositiveInteger(id, "resume id");
+  await api(`/api/resumes/${resumeId}/delete`, { method: "POST", body: "{}" });
   await loadResumes();
 }
 
@@ -1512,19 +1954,21 @@ async function loadEvents() {
       return;
     }
     for (const ev of events) {
+      const eventId = requirePositiveInteger(ev.id, "event id");
       const date = ev.event_date ? new Date(ev.event_date).toLocaleString("ru-RU") : "—";
       list.innerHTML += `<div class="source-row">
-        <strong>${escapeHtml(ev.title)} — ${date}</strong>
-        <div class="meta">${escapeHtml(ev.event_type)} · Job #${ev.job_id || "—"}</div>
+        <strong>${escapeHtml(ev.title)} — ${escapeHtml(date)}</strong>
+        <div class="meta">${escapeHtml(ev.event_type)} · Job #${escapeHtml(String(ev.job_id || "—"))}</div>
         <div class="meta">${escapeHtml(ev.notes || "")}</div>
-        <button onclick="deleteEvent(${ev.id})" style="margin-top:4px;">Удалить</button>
+        <button ${numericRecordAction("delete-event", eventId, "event id")} style="margin-top:4px;">Удалить</button>
       </div>`;
     }
   } catch (e) { console.error(e); }
 }
 
 async function deleteEvent(id) {
-  await api(`/api/events/${id}/delete`, { method: "POST", body: "{}" });
+  const eventId = requirePositiveInteger(id, "event id");
+  await api(`/api/events/${eventId}/delete`, { method: "POST", body: "{}" });
   await loadEvents();
 }
 
@@ -1535,14 +1979,15 @@ function toggleSelectAll() {
   selectedJobIds.clear();
   document.querySelectorAll(".job-checkbox").forEach(cb => {
     cb.checked = checked;
-    if (checked) selectedJobIds.add(parseInt(cb.dataset.jobId));
+    if (checked) selectedJobIds.add(requirePositiveInteger(cb.dataset.jobId, "job id"));
   });
   updateBulkToolbar();
 }
 
 function toggleJobSelect(jobId, checked) {
-  if (checked) selectedJobIds.add(jobId);
-  else selectedJobIds.delete(jobId);
+  const id = requirePositiveInteger(jobId, "job id");
+  if (checked) selectedJobIds.add(id);
+  else selectedJobIds.delete(id);
   updateBulkToolbar();
 }
 
@@ -1550,6 +1995,18 @@ function updateBulkToolbar() {
   const toolbar = $("#bulk-toolbar");
   toolbar.style.display = selectedJobIds.size > 0 ? "flex" : "none";
   $("#bulk-count").textContent = `Выбрано: ${selectedJobIds.size}`;
+}
+
+function syncBulkCheckboxes() {
+  const boxes = Array.from(document.querySelectorAll(".job-checkbox"));
+  for (const cb of boxes) {
+    cb.checked = selectedJobIds.has(requirePositiveInteger(cb.dataset.jobId, "job id"));
+  }
+  const selectAll = $("#select-all-checkbox");
+  if (selectAll) {
+    selectAll.checked = boxes.length > 0 && boxes.every((cb) => cb.checked);
+  }
+  updateBulkToolbar();
 }
 
 function clearBulkSelection() {
@@ -1597,13 +2054,15 @@ function renderFilteredJobs(jobs) {
   const body = $("#jobs-body");
   body.innerHTML = "";
   for (const job of jobs) {
+    const jobId = requirePositiveInteger(job.id, "job id");
     const tr = document.createElement("tr");
-    tr.className = job.id === state.selectedId ? "selected" : "";
-    tr.addEventListener("click", () => selectJob(job.id));
+    tr.className = jobId === state.selectedId ? "selected" : "";
+    bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
+    const checked = selectedJobIds.has(jobId) ? "checked" : "";
     tr.innerHTML = `
-      <td><input type="checkbox" class="job-checkbox" data-job-id="${job.id}" onclick="event.stopPropagation();toggleJobSelect(${job.id}, this.checked)"></td>
+      <td><input type="checkbox" class="job-checkbox" data-job-id="${jobId}" data-record-action="toggle-job-select" data-record-id="${jobId}" ${checked}></td>
       <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
@@ -1615,6 +2074,7 @@ function renderFilteredJobs(jobs) {
     `;
     body.appendChild(tr);
   }
+  syncBulkCheckboxes();
 }
 
 function updateSummaryForFiltered(jobs) {
@@ -1651,17 +2111,19 @@ async function loadSearches() {
     list.innerHTML = "";
     if (!searches.length) { list.innerHTML = '<p class="meta">Нет сохранённых поисков.</p>'; return; }
     for (const s of searches) {
+      const searchId = requirePositiveInteger(s.id, "search id");
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(s.name)}</strong>
         <div class="meta">${escapeHtml(s.query)} · alert: ${s.alert_enabled ? "on" : "off"}</div>
-        <button onclick="deleteSearch(${s.id})" style="margin-top:4px;">Удалить</button>
+        <button ${numericRecordAction("delete-search", searchId, "search id")} style="margin-top:4px;">Удалить</button>
       </div>`;
     }
   } catch (e) { console.error(e); }
 }
 
 async function deleteSearch(id) {
-  await api(`/api/saved-searches/${id}/delete`, { method: "POST", body: "{}" });
+  const searchId = requirePositiveInteger(id, "search id");
+  await api(`/api/saved-searches/${searchId}/delete`, { method: "POST", body: "{}" });
   await loadSearches();
 }
 
@@ -1682,19 +2144,24 @@ async function loadMarketTrends() {
     const result = await api("/api/market-trends", { method: "POST", body: JSON.stringify({ limit: 50 }) });
     $("#trends-output").innerHTML = renderMarkdown(result.content);
   } catch (e) {
-    $("#trends-output").innerHTML = `<p class="error">Ошибка: ${e.message}</p>`;
+    const output = $("#trends-output");
+    output.classList.add("error");
+    output.textContent = `Ошибка: ${e.message}`;
   }
 }
 
 async function parseJobStructure() {
   if (!state.selectedId) return;
-  setBusy("[onclick='parseJobStructure()']", true);
+  setBusy('[data-ui-action="parse-job-structure"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/parse-structure`, { method: "POST", body: "{}" });
     const output = $("#resume-tips-output");
     output.textContent = JSON.stringify(result, null, 2);
-  } catch (e) { alert("Ошибка: " + e.message); }
-  setBusy("[onclick='parseJobStructure()']", false);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  } finally {
+    setBusy('[data-ui-action="parse-job-structure"]', false);
+  }
 }
 
 async function runGapAnalysis() {
@@ -1702,14 +2169,17 @@ async function runGapAnalysis() {
   const resumes = await api("/api/resumes");
   const active = resumes.find(r => r.is_active);
   if (!active) { alert("Сначала создай и активируй резюме в настройках."); return; }
-  setBusy("[onclick='runGapAnalysis()']", true);
+  setBusy('[data-ui-action="run-gap-analysis"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/gap-analysis`, {
       method: "POST", body: JSON.stringify({ resume_id: active.id }),
     });
     $("#resume-tips-output").innerHTML = renderMarkdown(result.content);
-  } catch (e) { alert("Ошибка: " + e.message); }
-  setBusy("[onclick='runGapAnalysis()']", false);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  } finally {
+    setBusy('[data-ui-action="run-gap-analysis"]', false);
+  }
 }
 
 async function scoreAtsResume() {
@@ -1754,13 +2224,23 @@ async function loadGhostJobs() {
     list.innerHTML = "";
     if (!jobs.length) { list.innerHTML = '<p class="meta">Призраков нет!</p>'; return; }
     for (const j of jobs) {
+      const jobId = requirePositiveInteger(j.id, "job id");
       list.innerHTML += `<div class="source-row">
         <strong>${escapeHtml(j.title)}</strong>
         <div class="meta">${escapeHtml(j.company || "?")} · ${escapeHtml(j.source)}</div>
-        <button onclick="markSelected('ghosted');loadGhostJobs();" style="margin-top:4px;">Отметить ghosted</button>
+        <button aria-label="Отметить ghosted: ${escapeAttr(j.title)}" data-record-action="mark-ghost-job" data-record-id="${jobId}" data-job-id="${jobId}" style="margin-top:4px;">Отметить ghosted</button>
       </div>`;
     }
   } catch (e) { console.error(e); }
+}
+
+async function markGhostJob(jobId) {
+  const id = await updateJobStatus(jobId, "ghosted");
+  await loadJobs();
+  if (Number(state.selectedId) === id) {
+    await selectJob(id);
+  }
+  await loadGhostJobs();
 }
 
 function shareToTelegram() {

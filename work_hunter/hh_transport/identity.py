@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -85,3 +85,10 @@ class HHIdentity:
         expires_at = payload.get("expires_at") or payload.get("access_expires_at")
         if expires_at:
             self.access_expires_at = _parse_datetime(str(expires_at))
+        elif payload.get("expires_in") is not None:
+            try:
+                seconds = int(payload["expires_in"])
+            except (TypeError, ValueError):
+                seconds = 0
+            if seconds > 0:
+                self.access_expires_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from http.cookiejar import Cookie
 
 import pytest
+import requests
 
 from work_hunter.hh_transport import (
     ChallengeKind,
+    HHAuthError,
     HHApiSession,
     HHBrowserSession,
     HHChallengeHandler,
     HHIdentity,
     HHOnlyCookieJar,
+    HHRateLimitError,
+    HHTransportError,
     HHWebActions,
     build_android_user_agent,
     extract_xsrf_token,
@@ -45,18 +50,20 @@ def test_android_user_agent_is_hh_android_like():
     user_agent = build_android_user_agent(app_version="1.2.3", android_version="14", model="Pixel Test")
 
     assert "ru.hh.android/1.2.3" in user_agent
-    assert "Android 14" in user_agent
-    assert "Pixel Test" in user_agent
+    assert "Android OS: 14" in user_agent
+    assert "Device: Pixel Test" in user_agent
 
 
 def test_hh_cookie_jar_rejects_non_hh_domains():
     jar = HHOnlyCookieJar()
 
     jar.set_cookie(make_cookie(".hh.ru", "good", "yes"))
+    jar.set_cookie(make_cookie(".hh.kz", "kz", "yes"))
     jar.set_cookie(make_cookie("evil.test", "bad", "no"))
+    jar.set_cookie(make_cookie("israel.hh.ru", "excluded", "no"))
 
     cookies = list(jar)
-    assert [cookie.name for cookie in cookies] == ["good"]
+    assert [cookie.name for cookie in cookies] == ["good", "kz"]
 
 
 def test_identity_refresh_payload_and_expiry():
@@ -78,6 +85,16 @@ def test_identity_refresh_payload_and_expiry():
         "client_secret": "secret",
     }
     assert identity.is_access_expired(now=datetime(2029, 1, 1, tzinfo=timezone.utc)) is False
+
+
+def test_identity_accepts_expires_in_token_response():
+    identity = HHIdentity(refresh_token="refresh")
+
+    identity.update_from_token_response({"access_token": "access", "expires_in": 3600})
+
+    assert identity.access_token == "access"
+    assert identity.access_expires_at is not None
+    assert identity.is_access_expired(now=datetime.now(timezone.utc)) is False
 
 
 def test_api_session_refresh_updates_backend(monkeypatch):
@@ -107,6 +124,214 @@ def test_api_session_refresh_updates_backend(monkeypatch):
     assert config["access_token"] == "new-access"
     assert config["refresh_token"] == "new-refresh"
     assert calls[0]["data"]["refresh_token"] == "old-refresh"
+
+
+def test_api_session_retries_once_after_unauthorized(monkeypatch):
+    class Response:
+        def __init__(self, status_code: int, payload: dict):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers: dict[str, str] = {}
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        if method == "POST" and url.endswith("/token"):
+            return Response(
+                200,
+                {
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_at": "2031-01-01T00:00:00+00:00",
+                },
+            )
+        if len([call for call in calls if call["method"] == "GET"]) == 1:
+            return Response(401, {"errors": [{"type": "oauth", "value": "token_expired"}]})
+        return Response(200, {"id": "me-1"})
+
+    def fake_session_request(_session, method, url, **kwargs):
+        return fake_request(method, url, **kwargs)
+
+    config = {
+        "access_token": "old-access",
+        "refresh_token": "old-refresh",
+        "client_id": "cid",
+        "client_secret": "secret",
+    }
+    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setattr("requests.sessions.Session.request", fake_session_request)
+
+    payload = HHApiSession(config, backend=DictConfigBackend(config)).request_json("GET", "/me")
+
+    assert payload == {"id": "me-1"}
+    assert config["access_token"] == "new-access"
+    get_calls = [call for call in calls if call["method"] == "GET"]
+    assert get_calls[0]["headers"]["Authorization"] == "Bearer old-access"
+    assert get_calls[1]["headers"]["Authorization"] == "Bearer new-access"
+
+
+def test_api_session_refreshes_before_request_when_only_refresh_token_exists(monkeypatch):
+    class Response:
+        def __init__(self, status_code: int, payload: dict):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers: dict[str, str] = {}
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        if method == "POST" and url.endswith("/token"):
+            return Response(
+                200,
+                {
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_at": "2031-01-01T00:00:00+00:00",
+                },
+            )
+        return Response(200, {"id": "me-1"})
+
+    def fake_session_request(_session, method, url, **kwargs):
+        return fake_request(method, url, **kwargs)
+
+    config = {
+        "refresh_token": "old-refresh",
+        "client_id": "cid",
+        "client_secret": "secret",
+    }
+    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setattr("requests.sessions.Session.request", fake_session_request)
+
+    payload = HHApiSession(config, backend=DictConfigBackend(config)).request_json("GET", "/me")
+
+    assert payload == {"id": "me-1"}
+    assert config["access_token"] == "new-access"
+    get_call = [call for call in calls if call["method"] == "GET"][0]
+    assert get_call["headers"]["Authorization"] == "Bearer new-access"
+
+
+def test_api_session_raises_typed_errors(monkeypatch):
+    class Response:
+        status_code = 429
+        headers = {}
+
+        def json(self):
+            return {"errors": [{"type": "too_many_requests"}]}
+
+    def fake_session_request(_session, *args, **kwargs):
+        return Response()
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_session_request)
+
+    with pytest.raises(HHRateLimitError) as exc:
+        HHApiSession({"access_token": "token"}).request_json("GET", "/me")
+
+    assert exc.value.status_code == 429
+    assert exc.value.code == "too_many_requests"
+
+
+def test_api_session_requires_access_token():
+    with pytest.raises(HHAuthError) as exc:
+        HHApiSession({}).request_json("GET", "/me")
+
+    assert exc.value.code == "auth_missing"
+
+
+def test_api_session_masks_and_wraps_request_exception(monkeypatch):
+    original = requests.ConnectionError(
+        "https://api.hh.ru/vacancies?access_token=secret"
+    )
+
+    def fail(*args, **kwargs):
+        raise original
+
+    monkeypatch.setattr("requests.sessions.Session.request", fail)
+    session = HHApiSession({"access_token": "token"})
+
+    with pytest.raises(HHTransportError) as error:
+        session.request_json("get", "/vacancies?access_token=secret")
+
+    assert error.value.code == "network_error"
+    assert error.value.payload == {"method": "GET", "path": "/vacancies"}
+    assert str(error.value) == "GET /vacancies failed: ConnectionError"
+    assert "secret" not in str(error.value)
+    assert error.value.__cause__ is original
+
+
+def test_api_session_masks_and_wraps_refresh_request_exception(monkeypatch):
+    original = requests.Timeout("refresh_token=secret")
+
+    def fail(*args, **kwargs):
+        raise original
+
+    monkeypatch.setattr("requests.request", fail)
+    session = HHApiSession(
+        {
+            "refresh_token": "secret",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+        }
+    )
+
+    with pytest.raises(HHTransportError) as error:
+        session.refresh_token()
+
+    assert error.value.code == "network_error"
+    assert error.value.payload == {"method": "POST", "path": "/token"}
+    assert str(error.value) == "POST /token failed: Timeout"
+    assert "secret" not in str(error.value)
+    assert error.value.__cause__ is original
+
+
+def test_api_session_wraps_nonempty_invalid_json_as_parse_error(monkeypatch):
+    original = json.JSONDecodeError("invalid", "not-json-secret", 0)
+
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+        content = b"not-json-secret"
+
+        def json(self):
+            raise original
+
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+
+    with pytest.raises(HHTransportError) as error:
+        HHApiSession({"access_token": "token"}).request_json("GET", "/vacancies")
+
+    assert error.value.code == "parse_error"
+    assert error.value.status_code == 200
+    assert str(error.value) == "HH API response contained invalid JSON: JSONDecodeError"
+    assert "secret" not in str(error.value)
+    assert error.value.__cause__ is original
+
+
+def test_api_session_accepts_empty_no_content_response(monkeypatch):
+    class Response:
+        status_code = 204
+        headers: dict[str, str] = {}
+        content = b""
+
+        def json(self):
+            raise json.JSONDecodeError("empty", "", 0)
+
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+
+    assert HHApiSession({"access_token": "token"}).request_json("GET", "/empty") == {}
 
 
 def test_extract_xsrf_token_prefers_cookie_then_html():

@@ -12,10 +12,13 @@ from work_hunter.web.server import make_handler
 
 class FakeHHOperationsClient:
     updated_resumes: list[str] = []
-    requests: list[tuple[str, str, object | None]] = []
+    requests: list[tuple[str, str, object | None, object]] = []
+    constructed = 0
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
+        type(self).constructed += 1
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True
@@ -57,9 +60,15 @@ class FakeHHOperationsClient:
             }
         ]
 
-    def request_json(self, method: str, path: str, data=None):
-        self.requests.append((method, path, data))
-        return {"method": method, "path": path, "data": data}
+    def request_json(self, method: str, path: str, data=None, params=None):
+        self.requests.append((method, path, data, params or {}))
+        return {
+            "method": method,
+            "path": path,
+            "data": data,
+            "params": params or {},
+            "access_token": "secret-token",
+        }
 
 
 def test_sync_hh_negotiations_persists_related_records(monkeypatch, tmp_path):
@@ -103,23 +112,145 @@ def test_hh_skipped_vacancies_can_be_saved_listed_and_cleared(tmp_path):
 def test_update_hh_resumes_updates_only_publishable_resumes(monkeypatch, tmp_path):
     monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
     FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
 
-    result = app.update_hh_resumes()
+    result = app.update_hh_resumes(confirm=True)
 
     assert result == {"status": "ok", "count": 1, "updated": ["resume-1"]}
     assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
 
 
-def test_hh_call_api_delegates_to_client(monkeypatch, tmp_path):
+def test_update_hh_resumes_blocks_before_transport_without_confirmation(
+    monkeypatch, tmp_path
+):
     monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+
+    result = app.update_hh_resumes()
+
+    assert result["status"] == "blocked"
+    assert result["code"] == "resume_mutation_requires_confirmation"
+    assert FakeHHOperationsClient.updated_resumes == []
+    assert FakeHHOperationsClient.constructed == 0
+
+
+def test_update_hh_resumes_cli_requires_confirm(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+    app.save_config(app.config)
+    arguments = ["--root", str(tmp_path), "hh-update-resumes"]
+
+    cli_main(arguments)
+    blocked = json.loads(capsys.readouterr().out)
+    assert blocked["status"] == "blocked"
+    assert FakeHHOperationsClient.updated_resumes == []
+    assert FakeHHOperationsClient.constructed == 0
+
+    cli_main([*arguments, "--confirm"])
+    updated = json.loads(capsys.readouterr().out)
+    assert updated == {"status": "ok", "count": 1, "updated": ["resume-1"]}
+    assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
+
+
+def test_hh_agent_update_resumes_forwards_only_literal_confirmation(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+
+    blocked = app.run_hh_agent_operation("update-resumes", {"confirm": "true"})
+    assert blocked["result"]["status"] == "blocked"
+    assert blocked["result"]["code"] == "resume_mutation_requires_confirmation"
+    assert FakeHHOperationsClient.constructed == 0
+
+    confirmed = app.run_hh_agent_operation("update-resumes", {"confirm": True})
+    assert confirmed["result"] == {
+        "status": "ok",
+        "count": 1,
+        "updated": ["resume-1"],
+    }
+    assert FakeHHOperationsClient.updated_resumes == ["resume-1"]
+
+
+def test_hh_agent_research_forwards_only_literal_confirmation(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_research(self, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(WorkHunter, "run_hh_research_operation", fake_research)
+    app = WorkHunter(tmp_path)
+
+    app.run_hh_agent_operation(
+        "research-vacancies",
+        {"confirm_apply": "false"},
+    )
+    app.run_hh_agent_operation(
+        "research-and-apply",
+        {"confirm_apply": "false"},
+    )
+
+    assert [call["plan_apply"] for call in calls] == [False, True]
+    assert [call["confirm_apply"] for call in calls] == [False, False]
+
+
+def test_hh_call_api_blocks_mutations_without_confirm_and_masks_result(monkeypatch, tmp_path):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.requests = []
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
 
-    result = app.hh_call_api("POST", "/test", data={"hello": "world"})
+    blocked = app.hh_call_api("POST", "/test", data={"hello": "world"})
+    result = app.hh_call_api("POST", "/test?access_token=secret", data={"hello": "world"}, confirm=True)
 
-    assert result == {"method": "POST", "path": "/test", "data": {"hello": "world"}}
+    assert blocked["status"] == "blocked"
+    assert blocked["code"] == "mutation_requires_confirm"
+    assert result["status"] == "ok"
+    assert result["path"] == "/test"
+    assert result["params"]["access_token"] == "***"
+    assert result["result"]["access_token"] == "***"
+    assert FakeHHOperationsClient.requests == [
+        ("POST", "/test", {"hello": "world"}, {"access_token": "secret"})
+    ]
+
+
+def test_hh_search_uses_web_fallback_without_access_token(monkeypatch, tmp_path):
+    html = """
+    <div class="vacancy-serp-item">
+      <a data-qa="serp-item__title" href="/vacancy/123">Python Backend</a>
+      <span data-qa="vacancy-serp__vacancy-employer-text">Acme</span>
+      <span data-qa="vacancy-serp__vacancy-address">Remote</span>
+    </div>
+    """
+
+    monkeypatch.setattr("work_hunter.sources.hh.fetch_url", lambda *args, **kwargs: html)
+    app = WorkHunter(root=tmp_path)
+    app.config["sources"]["hh"]["access_token"] = ""
+    app.config["sources"]["hh"]["refresh_token"] = ""
+    app.config["sources"]["hh"]["web_fallback"] = True
+
+    result = app.search_hh_vacancies(text="python", area=["1"], limit=1)
+
+    assert result["status"] == "ok"
+    assert result["transport"] == "web"
+    assert result["fallback_reason"] == "missing_access_token"
+    assert result["count"] == 1
+    jobs = app.storage.list_jobs(source="hh", limit=5)
+    assert jobs[0].source_id == "123"
+    assert jobs[0].title == "Python Backend"
 
 
 def test_hh_operations_cli_syncs_negotiations_and_clears_skipped(monkeypatch, tmp_path, capsys):
@@ -162,7 +293,7 @@ def test_hh_operations_web_api_exposes_operational_loop(monkeypatch, tmp_path):
             negotiations_payload = json.loads(response.read().decode("utf-8"))
         req = urllib.request.Request(
             f"{base}/api/hh/resumes/update",
-            data=b"{}",
+            data=b'{"confirm": true}',
             method="POST",
             headers={"Content-Type": "application/json"},
         )
@@ -185,6 +316,36 @@ def test_hh_operations_web_api_exposes_operational_loop(monkeypatch, tmp_path):
     assert negotiations_payload[0]["id"] == "neg-1"
     assert update_payload == {"status": "ok", "count": 1, "updated": ["resume-1"]}
     assert clear_payload == {"status": "ok", "count": 1}
+
+
+def test_resume_http_update_rejects_string_confirmation(monkeypatch, tmp_path):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHOperationsClient)
+    FakeHHOperationsClient.updated_resumes = []
+    FakeHHOperationsClient.constructed = 0
+    app = WorkHunter(tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+    app.save_config(app.config)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/hh/resumes/update",
+            data=b'{"confirm": "false"}',
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert result["status"] == "blocked"
+    assert result["code"] == "resume_mutation_requires_confirmation"
+    assert FakeHHOperationsClient.updated_resumes == []
+    assert FakeHHOperationsClient.constructed == 0
 
 
 def test_hh_operator_summary_exposes_cockpit_metrics(monkeypatch, tmp_path):

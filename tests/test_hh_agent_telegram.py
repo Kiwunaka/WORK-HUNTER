@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from work_hunter.config import default_config
-from work_hunter.hh_agent.telegram_bot import TelegramRemote, TelegramReply
+from work_hunter.hh_agent.telegram_bot import (
+    TelegramRemote,
+    TelegramReply,
+    _telegram_user_id,
+)
 
 
 class FakeCockpitAPI:
@@ -61,6 +67,22 @@ def test_default_config_has_safe_telegram_remote_settings():
     assert telegram["bot_token"] == ""
     assert telegram["allowed_user_ids"] == []
     assert telegram["cockpit_base_url"] == "http://127.0.0.1:8787"
+
+
+@pytest.mark.parametrize(
+    ("container", "expected"),
+    [
+        ({}, None),
+        ({"from": None}, None),
+        ({"from": "not-a-user"}, None),
+        ({"from": {"id": None}}, None),
+        ({"from": {"id": "invalid"}}, None),
+        ({"from": {"id": 42}}, 42),
+        ({"from": {"id": "42"}}, 42),
+    ],
+)
+def test_telegram_user_id_narrows_untrusted_update_values(container, expected):
+    assert _telegram_user_id(container) == expected
 
 
 def test_allowed_user_guard_blocks_without_touching_cockpit_api():

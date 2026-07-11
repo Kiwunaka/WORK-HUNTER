@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 
 from work_hunter.cli import main as cli_main
+from work_hunter.models import Job, JobScore
 from work_hunter.services import WorkHunter
 
 
 class FakeHHRichSearchClient:
     search_calls: list[dict] = []
 
-    def __init__(self, config):
+    def __init__(self, config, *, backend=None):
         self.config = config
+        self.backend = backend
 
     def has_token(self):
         return True
@@ -106,6 +108,64 @@ def test_plan_hh_search_campaign_fetches_with_rich_filters(monkeypatch, tmp_path
     jobs = app.storage.list_jobs(limit=10, source="hh")
     assert {job.source_id for job in jobs} == {"vac-1", "vac-2"}
     assert app.storage.list_hh_campaign_items(result["id"])[0].resume_id == "resume-1"
+
+
+def test_hh_search_campaign_hydrates_active_profile_score(monkeypatch, tmp_path):
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHRichSearchClient)
+    FakeHHRichSearchClient.search_calls = []
+    app = WorkHunter(root=tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+    app.config["profiles"]["python"] = {}
+    app.config["profile"] = "python"
+    existing_id = app.storage.upsert_job(
+        Job(
+            source="hh",
+            source_id="vac-1",
+            url="https://hh.ru/vacancy/vac-1",
+            title="Existing Python Backend",
+        )
+    )
+    app.storage.save_score(
+        JobScore(job_id=existing_id, profile_id="default", total_score=10)
+    )
+    app.storage.save_score(
+        JobScore(job_id=existing_id, profile_id="python", total_score=90)
+    )
+    default_winner_id = app.storage.upsert_job(
+        Job(
+            source="hh",
+            source_id="vac-2",
+            url="https://hh.ru/vacancy/vac-2",
+            title="Existing API Engineer",
+        )
+    )
+    app.storage.save_score(
+        JobScore(
+            job_id=default_winner_id,
+            profile_id="default",
+            total_score=95,
+        )
+    )
+
+    result = app.plan_hh_search_campaign(
+        text="python backend",
+        limit=2,
+        min_score=50,
+        resume_id="resume-1",
+    )
+
+    items = {
+        item.vacancy_id: item
+        for item in app.storage.list_hh_campaign_items(result["id"])
+    }
+    assert items["vac-1"].job_id == existing_id
+    assert items["vac-1"].status == "ready"
+    assert items["vac-2"].job_id == default_winner_id
+    assert items["vac-2"].reason == "below_min_score"
+    assert app.storage.query_readonly(
+        "SELECT COUNT(*) AS count FROM jobs "
+        "WHERE source = 'hh' AND source_id = 'vac-1'"
+    )[0]["count"] == 1
 
 
 def test_hh_search_campaign_cli_accepts_filter_arguments(monkeypatch, tmp_path, capsys):

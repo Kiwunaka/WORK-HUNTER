@@ -1,6 +1,13 @@
+import json
+
+import pytest
+import requests
+
+from work_hunter.hh_transport import HHAuthError, HHForbiddenError, HHTransportError
+from work_hunter.models import Job
 from work_hunter.sources.geekjob import parse_geekjob_html
 from work_hunter.sources.habr import parse_habr_rss
-from work_hunter.sources.hh import HHApplyClient
+from work_hunter.sources.hh import HHApplyClient, HHSource
 
 
 def test_parse_habr_rss_item():
@@ -34,11 +41,11 @@ def test_hh_apply_client_posts_exact_negotiation_form(monkeypatch):
         def json(self):
             return {}
 
-    def fake_request(method, url, **kwargs):
+    def fake_request(_session, method, url, **kwargs):
         calls.append({"method": method, "url": url, **kwargs})
         return Response()
 
-    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
     client = HHApplyClient({"access_token": "token", "hh_user_agent": "test-agent"})
 
     result = client.apply("123", "resume-1", "Hi")
@@ -63,10 +70,284 @@ def test_hh_apply_client_surfaces_apply_errors(monkeypatch):
         def json(self):
             return {"errors": [{"type": "bad_argument", "value": "already_applied"}]}
 
-    monkeypatch.setattr("requests.request", lambda *args, **kwargs: Response())
+    monkeypatch.setattr("requests.sessions.Session.request", lambda *args, **kwargs: Response())
     client = HHApplyClient({"access_token": "token"})
 
     result = client.apply("123", "resume-1", "Hi")
 
     assert result["status"] == "error"
     assert result["error"] == "already_applied"
+
+
+def test_hh_source_uses_web_fallback_for_request_timeout(monkeypatch):
+    fallback_job = Job(
+        source="hh",
+        source_id="web-1",
+        url="https://hh.ru/vacancy/web-1",
+        title="Fallback",
+    )
+    source = HHSource({"access_token": "token", "web_fallback": True})
+
+    def fail(*args, **kwargs):
+        raise requests.Timeout("offline")
+
+    monkeypatch.setattr("requests.sessions.Session.request", fail)
+    monkeypatch.setattr(source, "_collect_web", lambda profile, limit: [fallback_job])
+
+    assert source.collect({"queries": ["python"]}) == [fallback_job]
+
+
+def test_hh_source_keeps_fallback_for_parse_failure(monkeypatch):
+    fallback_job = Job(
+        source="hh",
+        source_id="web-1",
+        url="https://hh.ru/vacancy/web-1",
+        title="Fallback",
+    )
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    parse_error = json.JSONDecodeError("invalid HH payload", "{", 1)
+
+    def fail(*args, **kwargs):
+        raise parse_error
+
+    monkeypatch.setattr(
+        "work_hunter.sources.hh.HHApiSession.search_vacancies",
+        fail,
+    )
+    monkeypatch.setattr(source, "_collect_web", lambda profile, limit: [fallback_job])
+
+    assert source.collect({"queries": ["python"]}) == [fallback_job]
+
+
+def test_hh_source_does_not_relabel_or_fallback_on_auth_error(monkeypatch):
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    auth_error = HHAuthError("expired", code="token_expired")
+
+    def fail(*args, **kwargs):
+        raise auth_error
+
+    monkeypatch.setattr(
+        "work_hunter.sources.hh.HHApiSession.search_vacancies",
+        fail,
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail("auth error must not use web fallback"),
+    )
+
+    with pytest.raises(HHAuthError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value is auth_error
+    assert error.value.code == "token_expired"
+
+
+def test_hh_source_does_not_fallback_on_challenge_error(monkeypatch):
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    challenge_error = HHForbiddenError("captcha", code="captcha_required")
+
+    def fail(*args, **kwargs):
+        raise challenge_error
+
+    monkeypatch.setattr(
+        "work_hunter.sources.hh.HHApiSession.search_vacancies",
+        fail,
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "challenge error must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(HHForbiddenError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value is challenge_error
+    assert error.value.code == "captcha_required"
+
+
+def test_hh_source_does_not_fallback_on_untyped_runtime_error(monkeypatch):
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    programmer_error = RuntimeError("programmer bug")
+
+    def fail(*args, **kwargs):
+        raise programmer_error
+
+    monkeypatch.setattr(
+        "work_hunter.sources.hh.HHApiSession.search_vacancies",
+        fail,
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "untyped runtime error must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value is programmer_error
+
+
+def test_hh_source_uses_web_fallback_for_nonempty_invalid_api_json(monkeypatch):
+    fallback_job = Job(
+        source="hh",
+        source_id="web-1",
+        url="https://hh.ru/vacancy/web-1",
+        title="Fallback",
+    )
+
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+        content = b"not-json"
+
+        def json(self):
+            raise json.JSONDecodeError("invalid", "not-json", 0)
+
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+    monkeypatch.setattr(source, "_collect_web", lambda profile, limit: [fallback_job])
+
+    assert source.collect({"queries": ["python"]}) == [fallback_job]
+
+
+def test_hh_source_classifies_challenge_before_refresh(monkeypatch):
+    class Response:
+        status_code = 403
+        headers: dict[str, str] = {}
+        content = b'{"errors":[{"value":"captcha_required"}]}'
+
+        def json(self):
+            return {"errors": [{"type": "forbidden", "value": "captcha_required"}]}
+
+    refresh_calls = 0
+
+    def fail_refresh(*args, **kwargs):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        raise requests.Timeout("offline")
+
+    source = HHSource(
+        {
+            "access_token": "token",
+            "refresh_token": "refresh",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "web_fallback": True,
+        }
+    )
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+    monkeypatch.setattr("requests.request", fail_refresh)
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "challenge error must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(HHForbiddenError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value.code == "captcha_required"
+    assert refresh_calls == 0
+
+
+def test_hh_source_does_not_fallback_on_api_redirect(monkeypatch):
+    class Response:
+        status_code = 302
+        headers = {"Location": "https://hh.ru/login?access_token=secret"}
+        content = b"<html>captcha secret</html>"
+
+        def json(self):
+            raise json.JSONDecodeError("invalid", "<html>captcha secret</html>", 0)
+
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "API redirect must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(HHTransportError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value.status_code == 302
+    assert error.value.code == "redirect"
+    assert "secret" not in str(error.value)
+
+
+def test_hh_source_does_not_fallback_when_403_spoofs_parse_error(monkeypatch):
+    class Response:
+        status_code = 403
+        headers: dict[str, str] = {}
+        content = b'{"error":"parse_error"}'
+
+        def json(self):
+            return {"error": "parse_error"}
+
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "server-controlled parse_error must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(HHForbiddenError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value.status_code == 403
+    assert error.value.code == "parse_error"
+
+
+def test_hh_source_does_not_fallback_when_5xx_spoofs_network_error(monkeypatch):
+    class Response:
+        status_code = 503
+        headers: dict[str, str] = {}
+        content = b'{"error":"network_error"}'
+
+        def json(self):
+            return {"error": "network_error"}
+
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+    monkeypatch.setattr(
+        source,
+        "_collect_web",
+        lambda *args, **kwargs: pytest.fail(
+            "server-controlled network_error must not use web fallback"
+        ),
+    )
+
+    with pytest.raises(HHTransportError) as error:
+        source.collect({"queries": ["python"]})
+
+    assert error.value.status_code == 503
+    assert error.value.code == "network_error"

@@ -66,8 +66,8 @@ def draft_form_review(
     fields = list(_form_fields(form))
     answers: dict[str, str] = {}
     unknown_fields: list[dict[str, Any]] = []
-    for index, field in enumerate(fields, start=1):
-        normalized = _normalize_field(field, index)
+    for index, raw_field in enumerate(fields, start=1):
+        normalized = _normalize_field(raw_field, index)
         field_key = normalized["name"]
         explicit = extra_answers.get(field_key) or extra_answers.get(normalized["label"])
         answer = explicit or _draft_field_answer(normalized, persona=persona, resume=resume, vacancy=vacancy)

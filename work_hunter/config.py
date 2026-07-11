@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import copy
+import errno
+import importlib
 import json
+import os
+import shutil
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from .sources.public_boards import PUBLIC_BOARD_SOURCE_NAMES, public_board_default_config
 
@@ -13,6 +21,39 @@ DATA_DIRNAME = ".work-hunter"
 MASK = "***"
 SENSITIVE_EXACT = {"token", "password", "secret", "api_key", "key"}
 SENSITIVE_SUFFIXES = ("_token", "_password", "_secret", "_api_key", "_key")
+CONFIG_SECRET_CLEAR_PATHS = frozenset(
+    {
+        ("ai", "api_key"),
+        ("hh_agent", "telegram", "bot_token"),
+        ("sources", "hh", "access_token"),
+        ("sources", "hh", "refresh_token"),
+        ("sources", "hh", "client_secret"),
+    }
+)
+HH_ACCOUNT_SECRET_KEYS = frozenset(
+    {"access_token", "refresh_token", "client_secret"}
+)
+_MISSING_CONFIG_VALUE = object()
+_CONFIG_WRITE_LOCK = threading.RLock()
+_CONFIG_LOCK_STATE = threading.local()
+_CONFIG_LOCK_FDS: set[int] = set()
+
+
+def _reset_config_state_after_fork() -> None:
+    global _CONFIG_WRITE_LOCK, _CONFIG_LOCK_STATE, _CONFIG_LOCK_FDS
+    for fd in sorted(_CONFIG_LOCK_FDS):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _CONFIG_WRITE_LOCK = threading.RLock()
+    _CONFIG_LOCK_STATE = threading.local()
+    _CONFIG_LOCK_FDS = set()
+
+
+_register_at_fork = getattr(os, "register_at_fork", None)
+if callable(_register_at_fork):
+    _register_at_fork(after_in_child=_reset_config_state_after_fork)
 
 
 def _default_profile() -> dict[str, Any]:
@@ -180,6 +221,198 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in SENSITIVE_EXACT or any(
+        lowered.endswith(suffix) for suffix in SENSITIVE_SUFFIXES
+    )
+
+
+def _contains_sensitive_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            is_sensitive_key(key) or _contains_sensitive_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_sensitive_key(item) for item in value)
+    return False
+
+
+def _list_item_identity(
+    item: Any,
+) -> tuple[tuple[str, str | int], ...] | None:
+    if not isinstance(item, dict):
+        return None
+
+    keys: dict[str, list[Any]] = {}
+    for key, value in item.items():
+        if not isinstance(key, str) or is_sensitive_key(key):
+            continue
+        keys.setdefault(key.casefold(), []).append(value)
+
+    def identity_for(identity_keys: list[str]) -> tuple[tuple[str, str | int], ...] | None:
+        if not identity_keys:
+            return None
+        identity: list[tuple[str, str | int]] = []
+        for key in identity_keys:
+            values = keys[key]
+            if len(values) != 1:
+                return None
+            value = values[0]
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                return None
+            if isinstance(value, str) and not value:
+                return None
+            identity.append((key, value))
+        return tuple(identity)
+
+    for exact_key in ("id", "uid", "uuid"):
+        if exact_key in keys:
+            return identity_for([exact_key])
+
+    id_keys = sorted(key for key in keys if key.endswith("_id"))
+    if id_keys:
+        return identity_for(id_keys)
+    return None
+
+
+def _merge_masked_list(stored: Any, submitted: list[Any]) -> list[Any]:
+    stored_list = stored if isinstance(stored, list) else []
+    requires_identity = _contains_sensitive_key(stored_list) or _contains_sensitive_key(
+        submitted
+    )
+    if not requires_identity:
+        return [
+            _merge_masked_value(
+                stored_list[index]
+                if index < len(stored_list)
+                else _MISSING_CONFIG_VALUE,
+                value,
+            )
+            for index, value in enumerate(submitted)
+        ]
+
+    stored_by_identity: dict[
+        tuple[tuple[str, str | int], ...],
+        list[Any],
+    ] = {}
+    for item in stored_list:
+        identity = _list_item_identity(item)
+        if identity is not None:
+            stored_by_identity.setdefault(identity, []).append(item)
+
+    submitted_identity_counts: dict[tuple[tuple[str, str | int], ...], int] = {}
+    for item in submitted:
+        identity = _list_item_identity(item)
+        if identity is not None:
+            submitted_identity_counts[identity] = (
+                submitted_identity_counts.get(identity, 0) + 1
+            )
+
+    merged: list[Any] = []
+    for item in submitted:
+        identity = _list_item_identity(item)
+        stored_matches = stored_by_identity.get(identity, []) if identity else []
+        if (
+            identity is not None
+            and len(stored_matches) == 1
+            and submitted_identity_counts[identity] == 1
+        ):
+            current = stored_matches[0]
+        else:
+            current = _MISSING_CONFIG_VALUE
+        merged.append(_merge_masked_value(current, item))
+    return merged
+
+
+def _merge_masked_value(
+    stored: Any,
+    submitted: Any,
+    *,
+    sensitive_key: bool = False,
+) -> Any:
+    if sensitive_key:
+        if not isinstance(submitted, str) or submitted == "" or submitted == MASK:
+            if stored is _MISSING_CONFIG_VALUE:
+                return _MISSING_CONFIG_VALUE
+            return copy.deepcopy(stored)
+        return copy.deepcopy(submitted)
+
+    stored_has_secrets = _contains_sensitive_key(stored)
+    same_container_type = (
+        isinstance(stored, dict)
+        and isinstance(submitted, dict)
+        or isinstance(stored, list)
+        and isinstance(submitted, list)
+    )
+    if stored_has_secrets and not same_container_type:
+        return copy.deepcopy(stored)
+
+    if isinstance(submitted, dict):
+        stored_dict = stored if isinstance(stored, dict) else {}
+        merged = copy.deepcopy(stored_dict)
+        for key, value in submitted.items():
+            current = stored_dict.get(key, _MISSING_CONFIG_VALUE)
+            updated = _merge_masked_value(
+                current,
+                value,
+                sensitive_key=is_sensitive_key(key),
+            )
+            if updated is _MISSING_CONFIG_VALUE:
+                merged.pop(key, None)
+            else:
+                merged[key] = updated
+        return merged
+
+    if isinstance(submitted, list):
+        return _merge_masked_list(stored, submitted)
+
+    return copy.deepcopy(submitted)
+
+
+def merge_masked_config(
+    stored: dict[str, Any],
+    submitted: dict[str, Any],
+) -> dict[str, Any]:
+    return _merge_masked_value(stored, submitted)
+
+
+def clear_config_secret_value(
+    config: dict[str, Any],
+    path: str,
+) -> dict[str, Any]:
+    parts = tuple(path.split("."))
+    clear_parts = parts if parts in CONFIG_SECRET_CLEAR_PATHS else ()
+    account_prefix = "hh_account_profiles."
+    if not clear_parts and path.startswith(account_prefix):
+        account_name, separator, secret_key = path[len(account_prefix) :].rpartition(
+            "."
+        )
+        accounts = config.get("hh_account_profiles")
+        if (
+            separator
+            and account_name
+            and isinstance(accounts, dict)
+            and account_name in accounts
+            and isinstance(accounts[account_name], dict)
+            and secret_key in HH_ACCOUNT_SECRET_KEYS
+        ):
+            clear_parts = ("hh_account_profiles", account_name, secret_key)
+    if not clear_parts:
+        raise ValueError(f"Configuration secret path is not allowed: {path}")
+
+    cleared = copy.deepcopy(config)
+    parent: dict[str, Any] = cleared
+    for key in clear_parts[:-1]:
+        child = parent.get(key)
+        if not isinstance(child, dict):
+            raise ValueError(f"Configuration secret path is not allowed: {path}")
+        parent = child
+    parent[clear_parts[-1]] = ""
+    return cleared
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     path = Path(path)
     if not path.exists():
@@ -189,12 +422,247 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return _deep_merge(default_config(), loaded)
 
 
+def merge_config_snapshot_changes(
+    baseline: dict[str, Any],
+    desired: dict[str, Any],
+    fresh: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply baseline-to-desired changes onto a fresh config snapshot.
+
+    Unchanged values come from ``fresh``. Changed scalar values and lists replace
+    the fresh value, mappings merge recursively, and keys removed from ``desired``
+    are removed from the result.
+    """
+    merged = _merge_config_value(baseline, desired, fresh)
+    if not isinstance(merged, dict):
+        raise TypeError("Configuration root must be a mapping")
+    return merged
+
+
+def _merge_config_value(baseline: Any, desired: Any, fresh: Any) -> Any:
+    if _config_values_equal(baseline, desired):
+        if fresh is _MISSING_CONFIG_VALUE:
+            return _MISSING_CONFIG_VALUE
+        return copy.deepcopy(fresh)
+    if isinstance(baseline, dict) and isinstance(desired, dict):
+        if not isinstance(fresh, dict):
+            return copy.deepcopy(desired)
+        merged = copy.deepcopy(fresh)
+        keys = dict.fromkeys((*baseline.keys(), *desired.keys()))
+        for key in keys:
+            baseline_value = baseline.get(key, _MISSING_CONFIG_VALUE)
+            desired_value = desired.get(key, _MISSING_CONFIG_VALUE)
+            if desired_value is _MISSING_CONFIG_VALUE:
+                merged.pop(key, None)
+                continue
+            if baseline_value is _MISSING_CONFIG_VALUE:
+                merged[key] = copy.deepcopy(desired_value)
+                continue
+            fresh_value = fresh.get(key, _MISSING_CONFIG_VALUE)
+            merged_value = _merge_config_value(
+                baseline_value,
+                desired_value,
+                fresh_value,
+            )
+            if merged_value is _MISSING_CONFIG_VALUE:
+                merged.pop(key, None)
+            else:
+                merged[key] = merged_value
+        return merged
+    return copy.deepcopy(desired)
+
+
+def _config_values_equal(baseline: Any, desired: Any) -> bool:
+    if type(baseline) is not type(desired):
+        return False
+    if isinstance(baseline, dict):
+        if baseline.keys() != desired.keys():
+            return False
+        return all(
+            _config_values_equal(baseline[key], desired[key])
+            for key in baseline
+        )
+    if isinstance(baseline, list):
+        return len(baseline) == len(desired) and all(
+            _config_values_equal(baseline_value, desired_value)
+            for baseline_value, desired_value in zip(baseline, desired)
+        )
+    return bool(baseline == desired)
+
+
 def save_config(path: str | Path, config: dict[str, Any]) -> None:
     path = Path(path)
+    with _CONFIG_WRITE_LOCK:
+        with _config_file_lock(path):
+            _save_config(path, config)
+
+
+def _save_config(path: str | Path, config: dict[str, Any]) -> None:
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(config, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        # Existing files retain portable mode bits. New files keep mkstemp's
+        # restrictive platform default; ACL and ownership follow os.replace.
+        if path.exists():
+            try:
+                shutil.copymode(path, temporary, follow_symlinks=False)
+            except (NotImplementedError, OSError):
+                pass
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(config, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _fsync_directory(directory: str | Path) -> None:
+    """Best-effort durability for the replaced directory entry."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_fd = os.open(directory, flags)
+    except (NotImplementedError, OSError):
+        return
+    try:
+        try:
+            os.fsync(directory_fd)
+        except (NotImplementedError, OSError):
+            pass
+    finally:
+        os.close(directory_fd)
+
+
+def _config_lock_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.lock")
+
+
+def _lock_config_fd(fd: int) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        _lock_windows_config_fd(fd)
+        return
+    fcntl = importlib.import_module("fcntl")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _lock_windows_config_fd(fd: int) -> None:
+    msvcrt = importlib.import_module("msvcrt")
+    contention_errnos = {
+        errno.EACCES,
+        errno.EAGAIN,
+        getattr(errno, "EDEADLK", errno.EACCES),
+        getattr(errno, "EDEADLOCK", errno.EACCES),
+    }
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in contention_errnos:
+                raise
+            time.sleep(0.05)
+
+
+def _unlock_config_fd(fd: int) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    fcntl = importlib.import_module("fcntl")
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _config_file_lock(path: Path) -> Iterator[None]:
+    lock_path = _config_lock_path(path.resolve(strict=False))
+    lock_key = os.path.normcase(str(lock_path))
+    process_id = os.getpid()
+    if getattr(_CONFIG_LOCK_STATE, "process_id", None) != process_id:
+        _CONFIG_LOCK_STATE.process_id = process_id
+        _CONFIG_LOCK_STATE.depths = {}
+    depths: dict[str, int] = _CONFIG_LOCK_STATE.depths
+    depth = depths.get(lock_key, 0)
+    if depth:
+        depths[lock_key] = depth + 1
+        try:
+            yield
+        finally:
+            depths[lock_key] -= 1
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    _CONFIG_LOCK_FDS.add(fd)
+    locked = False
+    try:
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        _lock_config_fd(fd)
+        locked = True
+        depths[lock_key] = 1
+        yield
+    finally:
+        if os.getpid() == process_id:
+            try:
+                depths.pop(lock_key, None)
+                if locked:
+                    _unlock_config_fd(fd)
+            finally:
+                _CONFIG_LOCK_FDS.discard(fd)
+                os.close(fd)
+
+
+def update_config(
+    path: str | Path,
+    update: Callable[[dict[str, Any]], None],
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    path = Path(path)
+    owner_pid = os.getpid()
+    with _CONFIG_WRITE_LOCK:
+        with _config_file_lock(path):
+            if path.exists():
+                config = load_config(path)
+            else:
+                config = copy.deepcopy(fallback or default_config())
+            update(config)
+            _assert_config_transaction_owner(owner_pid)
+            _save_config(path, config)
+            return config
+
+
+def _assert_config_transaction_owner(owner_pid: int) -> None:
+    if os.getpid() != owner_pid:
+        raise RuntimeError(
+            "Config transaction inherited across fork must be restarted"
+        )
+
+
+def reconcile_config_snapshot(
+    path: str | Path,
+    baseline: dict[str, Any],
+    desired: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = Path(path)
+    with _CONFIG_WRITE_LOCK:
+        with _config_file_lock(path):
+            if path.exists():
+                fresh = load_config(path)
+            else:
+                fresh = copy.deepcopy(baseline)
+            reconciled = merge_config_snapshot_changes(baseline, desired, fresh)
+            return fresh, reconciled
 
 
 def active_profile(config: dict[str, Any]) -> dict[str, Any]:
@@ -231,8 +699,7 @@ def mask_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         masked: dict[str, Any] = {}
         for key, item in value.items():
-            lowered = key.lower()
-            if lowered in SENSITIVE_EXACT or any(lowered.endswith(suffix) for suffix in SENSITIVE_SUFFIXES):
+            if is_sensitive_key(key):
                 masked[key] = MASK
             else:
                 masked[key] = mask_secrets(item)

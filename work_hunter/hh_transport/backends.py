@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 class ConfigBackend(Protocol):
@@ -30,6 +30,23 @@ class DictConfigBackend:
 
     def save(self, patch: dict[str, Any]) -> None:
         self.config.update(patch)
+
+
+class CallbackConfigBackend:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        save_callback: Callable[[dict[str, Any]], None],
+    ):
+        self.config = config
+        self.save_callback = save_callback
+
+    def load(self) -> dict[str, Any]:
+        return dict(self.config)
+
+    def save(self, patch: dict[str, Any]) -> None:
+        self.config.update(patch)
+        self.save_callback(dict(patch))
 
 
 class JsonFileBackend:

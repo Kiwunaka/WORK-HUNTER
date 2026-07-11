@@ -36,7 +36,7 @@ def test_sync_sources_caps_total_unique_results_and_dedupes_between_sources(tmp_
     }
 
     class App(WorkHunter):
-        def _collector(self, source_name, source_config):
+        def _collector(self, source_name, source_config, *, backend=None):
             return collectors[source_name]
 
     app = App(root=tmp_path)
