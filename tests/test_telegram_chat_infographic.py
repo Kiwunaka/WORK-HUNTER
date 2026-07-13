@@ -200,3 +200,36 @@ def test_raw_poll_answers_and_derivations_match_source():
     assert sum(weights[index] for index in (0, 2, 4)) == 2260
     assert sum(weights[index] for index in (1, 3, 5)) == 1179
     assert weights[6] == 830
+
+
+def test_required_svg_plates_and_visual_tokens_exist():
+    html = _html()
+    charts = (
+        "daily-messages",
+        "reacted-share",
+        "channel-skew",
+        "top-composition",
+        "gender-poll",
+        "weights-poll",
+        "gem-constellation",
+    )
+    for chart in charts:
+        opening = re.search(rf'<svg[^>]*data-chart="{chart}"[^>]*>', html)
+        assert opening, chart
+        assert 'role="img"' in opening.group(0)
+    for token in ("--paper:", "--paper-hi:", "--ink:", "--cobalt:", "--signal:"):
+        assert token in html
+    assert "@media (max-width:900px)" in html
+    assert "@media (max-width:700px)" in html
+    assert "@media (prefers-reduced-motion:reduce)" in html
+    assert "Bahnschrift" in html and "Georgia" in html
+
+
+def test_svg_values_are_source_bound_and_accessibly_labeled():
+    html = _html()
+    for value in (930, 1073, 740, 530, 505, 301, 287, 196, 183, 470):
+        assert f'data-value="{value}"' in html
+    assert html.count("<title") >= 7
+    assert "неполный день, до 19:03 MSK" in html
+    assert "758 сообщений с реакциями из 2743" in html
+    assert "Канальные сообщения: 3,1% сообщений и 40,2% реакций" in html

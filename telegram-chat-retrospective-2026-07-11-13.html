@@ -5,7 +5,238 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Чат Котенков и Горь — 67 часов внутри AI-гонки</title>
-  <style>html{color-scheme:light}body{margin:0}section{min-height:1px}</style>
+  <style>
+    :root{
+      --paper:#ece4d4;--paper-hi:#f7f1e5;--paper-low:#ded3bf;--ink:#11110f;
+      --muted:#6d685e;--cobalt:#1246d8;--cobalt-dark:#0b2f98;--signal:#f04424;
+      --acid:#c9f44a;--rule:rgba(17,17,15,.2);--rule-inverse:rgba(247,241,229,.23);
+      --display:Bahnschrift,"Aptos Display","Segoe UI Variable Display",sans-serif;
+      --text:"Aptos","Segoe UI Variable Text","Segoe UI",sans-serif;
+      --serif:Georgia,"Times New Roman",serif;--mass:cubic-bezier(.32,.72,0,1);
+    }
+    *{box-sizing:border-box}
+    html{color-scheme:light;scroll-behavior:smooth;background:var(--paper);color:var(--ink)}
+    body{margin:0;min-width:320px;font-family:var(--text);font-size:17px;line-height:1.5;background:var(--paper);overflow-x:clip}
+    body::before{content:"";position:fixed;inset:0;z-index:20;pointer-events:none;opacity:.065;background-image:radial-gradient(rgba(17,17,15,.72) .55px,transparent .75px);background-size:5px 5px;mix-blend-mode:multiply}
+    ::selection{background:var(--signal);color:var(--paper-hi)}
+    a{color:inherit}
+    button,a{font:inherit}
+    img,svg{display:block;max-width:100%}
+    svg text{font-family:var(--text);fill:currentColor}
+    h1,h2,h3,p{margin-top:0}
+    h1,h2,h3{font-family:var(--display);font-weight:720;letter-spacing:-.045em}
+    h2{font-size:clamp(3rem,7vw,7rem);line-height:.88}
+    h3{font-size:clamp(1.25rem,2.1vw,2rem);line-height:1.02}
+    code{padding:.1em .35em;border:1px solid currentColor;font-family:Consolas,"Cascadia Mono",monospace;font-size:.82em}
+    :focus-visible{outline:3px solid var(--cobalt);outline-offset:4px}
+    .skip-link{position:fixed;left:20px;top:18px;z-index:1000;padding:12px 18px;background:var(--acid);color:var(--ink);font-weight:800;text-decoration:none;transform:translateY(-160%);transition:transform .25s ease}
+    .skip-link:focus{transform:none}
+    .page-shell{width:min(1520px,100%);margin:0 auto;padding-inline:clamp(20px,4vw,72px)}
+    .section{position:relative;padding-block:clamp(96px,12vw,176px);scroll-margin-top:80px}
+    .section-heading{display:grid;grid-template-columns:minmax(150px,2fr) minmax(0,7fr) minmax(220px,3fr);gap:clamp(24px,4vw,64px);align-items:end;margin-bottom:clamp(64px,9vw,124px)}
+    .section-heading h2{margin:0;max-width:11ch}
+    .section-heading>p:last-child{margin:0;max-width:34ch;color:var(--muted)}
+    .section-index,.folio,.eyebrow{font-family:var(--display);font-size:.72rem;font-weight:780;letter-spacing:.14em;text-transform:uppercase}
+    .section-index{align-self:start;padding-top:.45rem;border-top:2px solid currentColor}
+    .double-bezel{padding:7px;border:1px solid var(--rule);border-radius:34px;background:rgba(17,17,15,.035)}
+    .double-bezel__core{height:100%;padding:clamp(24px,3vw,48px);border-radius:27px;background:var(--paper-hi);box-shadow:inset 0 1px 0 rgba(255,255,255,.75);overflow:hidden}
+    .site-header{position:fixed;left:0;right:0;top:0;z-index:40;display:flex;align-items:center;justify-content:space-between;gap:30px;padding:14px clamp(20px,4vw,72px);background:rgba(17,17,15,.94);color:var(--paper-hi);border-bottom:1px solid rgba(255,255,255,.15);backdrop-filter:blur(12px)}
+    .wordmark{font-family:var(--display);font-size:.82rem;font-weight:800;letter-spacing:.08em;text-decoration:none;white-space:nowrap}
+    .dossier-nav{display:flex;align-items:center;gap:4px;overflow-x:auto;scrollbar-width:none}
+    .dossier-nav::-webkit-scrollbar{display:none}
+    .dossier-nav a{min-height:44px;display:grid;place-items:center;padding:0 14px;border-radius:2px;font-family:var(--display);font-size:.68rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;text-decoration:none;color:rgba(247,241,229,.66);transition:color .35s ease,background-color .35s ease}
+    .dossier-nav a:hover,.dossier-nav a:focus-visible,.dossier-nav a[aria-current]{background:var(--cobalt);color:#fff}
+    .message-link{min-height:44px;display:inline-flex;align-items:center;gap:12px;border-radius:999px;padding:6px 6px 6px 18px;background:var(--ink);color:var(--paper-hi);font-family:var(--display);font-size:.76rem;font-weight:760;letter-spacing:.04em;text-decoration:none;transition:transform .65s var(--mass),background-color .65s var(--mass)}
+    .message-link:hover,.message-link:focus-visible{transform:translateY(-3px);background:var(--cobalt)}
+    .arrow-island{width:34px;height:34px;flex:0 0 34px;border-radius:50%;display:grid;place-items:center;background:var(--paper-hi);color:var(--ink);transition:transform .65s var(--mass)}
+    .message-link:hover .arrow-island,.message-link:focus-visible .arrow-island{transform:translate(2px,-2px) rotate(5deg)}
+    .link-cluster,.link-pair{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
+    .link-cluster a,.link-pair a,.gem-card>a,.joke-card>a{min-height:44px;display:inline-flex;align-items:center;padding:8px 14px;border:1px solid currentColor;font-family:var(--display);font-size:.75rem;font-weight:780;letter-spacing:.06em;text-decoration:none;transition:background-color .25s ease,color .25s ease,transform .25s ease}
+    .link-cluster a:hover,.link-pair a:hover,.gem-card>a:hover,.joke-card>a:hover{background:var(--ink);color:var(--paper-hi);transform:translateY(-2px)}
+
+    .opening-dossier{padding-top:clamp(136px,13vw,210px);min-height:100vh;background:linear-gradient(90deg,var(--cobalt) 0 7px,transparent 7px calc(100% - 7px),var(--signal) calc(100% - 7px))}
+    .opening-dossier::after{content:"ARCHIVE / 1778093200";position:absolute;right:-79px;top:47%;font-family:var(--display);font-size:.66rem;font-weight:800;letter-spacing:.2em;transform:rotate(90deg);color:var(--muted)}
+    .hero-grid{display:grid;grid-template-columns:minmax(0,7.3fr) minmax(300px,4.7fr);gap:clamp(36px,6vw,110px);align-items:start}
+    .hero-copy{position:relative;padding-top:18px;border-top:1px solid var(--ink)}
+    .hero-copy::before{content:"";position:absolute;left:0;top:-6px;width:120px;height:6px;background:var(--signal)}
+    .hero-copy h1{max-width:8ch;margin:clamp(38px,6vw,88px) 0 32px;font-size:clamp(5.1rem,13.3vw,13.8rem);line-height:.75;letter-spacing:-.075em;text-transform:uppercase}
+    .hero-copy h1::first-line{text-decoration:underline;text-decoration-color:var(--cobalt);text-decoration-thickness:8px;text-underline-offset:16px}
+    .date-range{font-family:var(--display);font-size:clamp(.78rem,1.2vw,1rem);font-weight:750;letter-spacing:.08em;text-transform:uppercase}
+    .dek{max-width:47rem;margin-top:40px;padding-left:clamp(0px,7vw,130px);font-family:var(--serif);font-size:clamp(1.25rem,2vw,1.85rem);line-height:1.34}
+    .tldr{margin-top:clamp(50px,8vw,130px);transform:rotate(1.4deg)}
+    .tldr .double-bezel__core{background:var(--ink);color:var(--paper-hi)}
+    .tldr .eyebrow{display:inline-block;padding:6px 9px;background:var(--signal);color:#fff}
+    .tldr p:not(.eyebrow){font-family:var(--serif);font-size:clamp(1rem,1.35vw,1.25rem);line-height:1.48}
+    .tldr p:last-child{margin-bottom:0;color:rgba(247,241,229,.7)}
+    .hero-metrics{display:grid;grid-template-columns:repeat(12,1fr);gap:clamp(12px,2vw,26px);align-items:stretch;margin-top:clamp(80px,11vw,150px);padding-top:24px;border-top:1px solid var(--ink)}
+    .mega-metric{grid-column:span 4;min-height:360px;display:flex;flex-direction:column;justify-content:space-between;padding:clamp(22px,3vw,42px);background:var(--paper-hi);border:1px solid var(--ink)}
+    .mega-metric strong{font-family:var(--display);font-size:clamp(5.2rem,10vw,10.5rem);font-weight:800;line-height:.78;letter-spacing:-.075em;font-variant-numeric:tabular-nums}
+    .mega-metric span{padding-top:16px;border-top:6px solid var(--cobalt);font-family:var(--display);font-size:.78rem;font-weight:800;letter-spacing:.13em;text-transform:uppercase}
+    .mega-metric--ink{background:var(--ink);color:var(--paper-hi)}
+    .mega-metric--ink span{border-color:var(--signal)}
+    .fact-strip{grid-column:span 4;display:flex;flex-direction:column;justify-content:space-between;margin:0;padding:24px 0}
+    .fact-strip div{display:grid;grid-template-columns:1fr 1.4fr;gap:20px;padding:20px 0;border-bottom:1px solid var(--rule)}
+    .fact-strip dt{font-family:var(--display);font-size:.68rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+    .fact-strip dd{margin:0;font-family:var(--serif);font-size:1.1rem}
+    .overview-plates{display:grid;grid-template-columns:repeat(12,1fr);gap:clamp(18px,2.5vw,40px);align-items:start;margin-top:clamp(70px,10vw,140px)}
+    .data-plate{position:relative;padding:clamp(24px,3vw,44px);border-top:9px solid var(--ink);background:rgba(247,241,229,.72)}
+    .data-plate header{display:grid;grid-template-columns:1fr 2.3fr;gap:24px;margin-bottom:32px}
+    .data-plate h2{margin:0;font-size:clamp(1.8rem,3.5vw,4.2rem);line-height:.94}
+    .data-plate--wide{grid-column:span 8}
+    .data-plate--compact{grid-column:span 4;background:var(--cobalt);color:#fff;border-top-color:var(--acid);transform:translateY(72px)}
+    .data-plate--compact header{display:block}
+    .data-plate--contrast{grid-column:3/span 9;margin-top:30px;background:var(--ink);color:var(--paper-hi);border-top-color:var(--signal)}
+    .ratio-statement{margin:40px 0 10px;font-family:var(--display);font-weight:700}
+    .ratio-statement strong{display:block;font-size:clamp(4.6rem,8vw,8.2rem);line-height:.8}
+    .channel-split{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:0}
+    .channel-split div{padding-top:20px;border-top:1px solid var(--rule-inverse)}
+    .channel-split dt{font-family:var(--display);font-size:.72rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+    .channel-split dd{margin:8px 0 0;font-family:var(--serif);font-size:clamp(1.1rem,2vw,1.55rem)}
+    .scope-note{max-width:78ch;margin:80px 0 0 auto;padding-top:18px;border-top:1px solid var(--rule);color:var(--muted);font-size:.88rem}
+    .static-series,.poll-options{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+    .chart-shell{position:relative;margin-top:24px}
+    [data-chart]{width:100%;height:auto;overflow:visible;color:currentColor}
+    [data-chart] .gridline{stroke:currentColor;stroke-opacity:.14;stroke-width:1;shape-rendering:crispEdges}
+    [data-chart] .label{font-size:12px;font-weight:700;letter-spacing:.04em}
+    [data-chart] .value{font-family:var(--display);font-size:14px;font-weight:800}
+    .daily-chart .chart-bar rect{fill:var(--cobalt);transform-origin:105px center;transform:scaleX(var(--bar-scale));vector-effect:non-scaling-stroke}
+    .daily-chart .chart-bar:nth-of-type(4) rect{fill:var(--signal)}
+    .ring-base{fill:none;stroke:rgba(255,255,255,.16);stroke-width:22}
+    .ring-value{fill:none;stroke:var(--acid);stroke-width:22;stroke-linecap:butt;transform:rotate(-90deg);transform-origin:130px 130px}
+
+    .story-section{background:var(--paper-hi);border-top:1px solid var(--ink)}
+    .story-section::before{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 49.9%,rgba(17,17,15,.06) 50%,transparent 50.1%);pointer-events:none}
+    .chapter-line{position:relative;display:grid;grid-template-columns:repeat(12,1fr);gap:clamp(36px,5vw,80px) clamp(18px,3vw,44px);margin:0;padding:0;list-style:none}
+    .chapter-line::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--rule)}
+    .chapter{position:relative;grid-column:1/span 5;display:grid;grid-template-columns:54px 1fr;gap:20px;padding:0 0 clamp(40px,6vw,84px)}
+    .chapter:nth-child(even){grid-column:8/span 5;transform:translateY(120px)}
+    .chapter--wide{grid-column:2/span 5}
+    .chapter-no{width:50px;height:50px;display:grid;place-items:center;background:var(--signal);color:#fff;font-family:var(--display);font-size:.72rem;font-weight:800}
+    .chapter h3{margin-bottom:20px;font-size:clamp(1.7rem,3vw,3.1rem)}
+    .chapter p:not(.eyebrow){color:var(--muted)}
+    .chapter--signal>div{padding:26px;background:var(--signal);color:#fff}
+    .chapter--signal p:not(.eyebrow){color:rgba(255,255,255,.8)}
+    .chapter--dark>div{padding:30px;background:var(--ink);color:var(--paper-hi)}
+    .chapter--dark p:not(.eyebrow){color:rgba(247,241,229,.7)}
+
+    .ledger-section{background:var(--ink);color:var(--paper-hi)}
+    .section-heading--inverse>p:last-child{color:rgba(247,241,229,.62)}
+    .reaction-composition{display:grid;grid-template-columns:2fr 7fr;gap:clamp(30px,5vw,80px);align-items:center;margin-bottom:70px;padding:clamp(24px,4vw,58px);border:1px solid var(--rule-inverse)}
+    .reaction-composition h3{font-size:clamp(1.5rem,3vw,3rem)}
+    .composition-key{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin:22px 0 0;padding:0;list-style:none}
+    .composition-key li{padding-top:10px;border-top:3px solid var(--cobalt);font-size:.74rem}
+    .composition-key li:nth-child(2),.composition-key li:nth-child(7){border-color:var(--signal)}
+    .composition-key span,.composition-key strong{display:block}
+    .composition-key strong{font-family:var(--display);font-size:.64rem;letter-spacing:.02em}
+    .ledger-list{margin:0;padding:0;list-style:none;counter-reset:ledger}
+    .ledger-row{position:relative;isolation:isolate;display:grid;grid-template-columns:80px minmax(0,1fr) auto;gap:clamp(18px,3vw,46px);align-items:center;min-height:154px;margin-bottom:12px;padding:24px clamp(20px,3vw,42px);overflow:hidden;background:var(--paper-hi);color:var(--ink)}
+    .ledger-row::before{content:"";position:absolute;z-index:-1;left:0;bottom:0;width:100%;height:7px;background:var(--cobalt);transform:scaleX(var(--rank-scale,1));transform-origin:left center}
+    .ledger-row--joke::before{background:var(--signal)}
+    .ledger-row--paired{box-shadow:inset 8px 0 0 var(--signal)}
+    .ledger-rank{font-family:var(--display);font-size:clamp(2rem,4vw,4.6rem);font-weight:800;line-height:1;color:var(--cobalt)}
+    .ledger-row--joke .ledger-rank{color:var(--signal)}
+    .ledger-copy h3{margin:0;font-size:clamp(2.2rem,4.2vw,5rem);font-variant-numeric:tabular-nums}
+    .ledger-copy p{margin-bottom:5px}
+    .ledger-copy p:last-child{margin:4px 0 0;color:var(--muted)}
+
+    .polls-section{background:linear-gradient(180deg,var(--paper) 0 64%,var(--paper-low) 64%)}
+    .poll-grid{display:grid;grid-template-columns:1fr 1fr;gap:clamp(22px,4vw,64px);align-items:start}
+    .poll-plate{transform:rotate(-.7deg)}
+    .poll-plate:nth-child(2){margin-top:clamp(50px,7vw,110px);transform:rotate(.8deg)}
+    .poll-plate h3{font-size:clamp(2rem,3.6vw,4.5rem)}
+    .poll-lead{max-width:30ch;font-family:var(--serif);font-size:clamp(1.15rem,1.8vw,1.45rem)}
+    .poll-note{padding-top:18px;border-top:1px solid var(--rule);color:var(--muted);font-size:.85rem}
+    .poll-chart{margin:36px 0;color:var(--ink)}
+    .poll-chart .bar{fill:var(--cobalt)}
+    .poll-plate--blue .double-bezel__core{background:var(--cobalt);color:#fff}
+    .poll-plate--blue .poll-note{color:rgba(255,255,255,.72);border-color:rgba(255,255,255,.28)}
+    .poll-plate--blue .poll-chart{color:#fff}
+    .poll-plate--blue .poll-chart .bar{fill:var(--acid)}
+    .poll-plate--blue .message-link{background:var(--paper-hi);color:var(--ink)}
+    .poll-plate--blue .arrow-island{background:var(--ink);color:var(--paper-hi)}
+
+    .jokes-section{background:var(--signal);color:var(--ink)}
+    .jokes-section::before{content:"“";position:absolute;left:1.5vw;top:8rem;font-family:var(--serif);font-size:clamp(12rem,28vw,34rem);line-height:.6;color:rgba(247,241,229,.19)}
+    .section-heading--jokes>p:last-child{color:rgba(17,17,15,.7)}
+    .joke-wall{display:grid;grid-template-columns:repeat(12,1fr);gap:clamp(14px,2vw,28px);align-items:start}
+    .joke-card{grid-column:span 4;min-height:300px;display:flex;flex-direction:column;justify-content:space-between;padding:clamp(22px,3vw,40px);background:var(--paper-hi);border:1px solid var(--ink)}
+    .joke-card blockquote{margin:30px 0;font-family:var(--serif);font-size:clamp(1.2rem,2vw,1.85rem);line-height:1.35}
+    .joke-score{align-self:flex-start;margin:0;padding:5px 8px;background:var(--signal);color:#fff;font-family:var(--display);font-size:.68rem;font-weight:800;letter-spacing:.08em}
+    .joke-card>a{align-self:flex-start}
+    .joke-card--hero{grid-column:span 7;min-height:430px}
+    .joke-card--hero blockquote{font-size:clamp(2.5rem,5vw,6rem);line-height:.95;letter-spacing:-.04em}
+    .joke-card--offset{grid-column:9/span 4;margin-top:80px;transform:rotate(1.3deg)}
+    .joke-card--ink{grid-column:2/span 5;background:var(--ink);color:var(--paper-hi);transform:rotate(-1deg)}
+    .joke-card--ink .joke-score{background:var(--acid);color:var(--ink)}
+    .joke-card--blue{background:var(--cobalt);color:#fff;border-color:var(--cobalt)}
+    .joke-card--wide{grid-column:span 8}
+    .joke-card--signal{background:var(--paper-low)}
+
+    .gems-section{background:var(--paper-hi)}
+    .gem-layout{display:grid;grid-template-columns:minmax(360px,5fr) minmax(0,7fr);gap:clamp(30px,5vw,84px);align-items:start}
+    .gem-visual{position:sticky;top:100px;padding:20px;background:var(--ink);color:var(--paper-hi);border:7px double var(--paper-low)}
+    .gem-constellation .orbit{fill:none;stroke:rgba(247,241,229,.19);stroke-width:1;stroke-dasharray:4 5}
+    .gem-constellation .connector{fill:none;stroke:rgba(247,241,229,.34);stroke-width:1.2;vector-effect:non-scaling-stroke}
+    .gem-constellation .facet{fill:none;stroke:var(--acid);stroke-width:1.4;vector-effect:non-scaling-stroke}
+    .gem-constellation circle{fill:var(--cobalt);stroke:var(--paper-hi);stroke-width:2}
+    .gem-constellation [data-category="infrastructure"] circle{fill:var(--signal)}
+    .gem-constellation [data-category="method"] circle{fill:var(--acid)}
+    .gem-constellation [data-category="theory"] circle{fill:var(--paper-hi)}
+    .gem-constellation text{font-size:12px;font-weight:800;fill:var(--paper-hi)}
+    .gem-catalog{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .gem-card{min-height:280px;display:flex;flex-direction:column;padding:clamp(22px,3vw,38px);border:1px solid var(--ink);background:var(--paper)}
+    .gem-card:nth-child(3n+2){transform:translateY(24px)}
+    .gem-card h3{font-size:clamp(1.5rem,2.5vw,2.6rem)}
+    .gem-card p:not(.eyebrow){color:var(--muted)}
+    .gem-card .link-pair,.gem-card>a{margin-top:auto}
+    .gem-card--accent{background:var(--acid)}
+    .gem-card--accent p:not(.eyebrow){color:rgba(17,17,15,.72)}
+    .gem-card--theory{grid-column:span 2;background:var(--cobalt);color:#fff}
+    .gem-card--theory p:not(.eyebrow){color:rgba(255,255,255,.72)}
+
+    .method-section{background:var(--ink);color:var(--paper-hi)}
+    .method-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-inverse);border:1px solid var(--rule-inverse)}
+    .method-grid article{min-height:340px;padding:clamp(24px,3vw,40px);background:var(--ink)}
+    .method-no{display:block;margin-bottom:70px;font-family:var(--display);font-size:3.8rem;font-weight:800;color:var(--signal)}
+    .method-grid h3{font-size:1.7rem}
+    .method-grid p{color:rgba(247,241,229,.66);font-size:.92rem}
+    .source-footer{display:flex;justify-content:space-between;gap:30px;align-items:center;margin-top:80px;padding-top:24px;border-top:1px solid var(--rule-inverse);font-size:.78rem;color:rgba(247,241,229,.58)}
+    .back-to-top{min-height:44px;display:inline-flex;align-items:center;padding:8px 14px;border:1px solid currentColor;color:var(--paper-hi);font-family:var(--display);font-weight:800;text-decoration:none;white-space:nowrap}
+    #copy-status{position:fixed;z-index:80;right:20px;bottom:20px;max-width:min(420px,calc(100vw - 40px));padding:12px 16px;background:var(--acid);color:var(--ink);font-size:.82rem;font-weight:700;transform:translateY(160%);transition:transform .45s var(--mass)}
+    #copy-status:not(:empty){transform:none}
+
+    @media (max-width:900px){
+      .section-heading{grid-template-columns:1fr 3fr}.section-heading>p:last-child{grid-column:2}
+      .hero-grid{grid-template-columns:1fr}.tldr{width:min(620px,88%);margin-left:auto;margin-top:20px}
+      .hero-metrics{grid-template-columns:1fr 1fr}.mega-metric,.fact-strip{grid-column:auto}.fact-strip{grid-column:span 2;display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.fact-strip div{display:block}
+      .overview-plates{grid-template-columns:1fr 1fr}.data-plate--wide{grid-column:span 2}.data-plate--compact{grid-column:auto;transform:none}.data-plate--contrast{grid-column:auto;margin:0}
+      .chapter-line{column-gap:28px}.chapter{grid-column:1/span 6}.chapter:nth-child(even){grid-column:7/span 6}
+      .reaction-composition{grid-template-columns:1fr}.composition-key{grid-template-columns:repeat(4,1fr)}
+      .ledger-row{grid-template-columns:60px minmax(0,1fr)}.ledger-row .message-link{grid-column:2;justify-self:start}
+      .poll-grid{grid-template-columns:1fr}.poll-plate,.poll-plate:nth-child(2){width:min(760px,100%);margin:0 auto;transform:none}.poll-plate:nth-child(2){margin-top:28px}
+      .joke-card{grid-column:span 6}.joke-card--hero{grid-column:span 8}.joke-card--offset{grid-column:9/span 4}.joke-card--ink{grid-column:span 6}.joke-card--wide{grid-column:span 7}
+      .gem-layout{grid-template-columns:1fr}.gem-visual{position:relative;top:auto;width:min(700px,100%);margin:0 auto}.gem-catalog{grid-template-columns:repeat(2,1fr)}
+      .method-grid{grid-template-columns:1fr 1fr}
+    }
+    @media (max-width:700px){
+      body{font-size:16px}.page-shell{padding-inline:16px}.section{padding-block:84px;scroll-margin-top:72px}
+      .site-header{position:sticky;padding:8px 12px}.wordmark{display:none}.dossier-nav{width:100%;justify-content:flex-start}.dossier-nav a{padding-inline:12px}
+      .opening-dossier{padding-top:72px;background:linear-gradient(90deg,var(--cobalt) 0 4px,transparent 4px calc(100% - 4px),var(--signal) calc(100% - 4px))}.opening-dossier::after{display:none}
+      .hero-copy h1{font-size:clamp(4.1rem,21vw,6.3rem);margin-top:45px}.hero-copy h1::first-line{text-decoration-thickness:5px;text-underline-offset:10px}.dek{padding-left:0;font-size:1.18rem}.tldr{width:100%;transform:none}.tldr .double-bezel__core{padding:24px}
+      .hero-metrics{grid-template-columns:1fr;gap:10px}.mega-metric,.fact-strip{grid-column:auto}.mega-metric{min-height:240px}.mega-metric strong{font-size:clamp(5rem,25vw,7rem)}.fact-strip{display:block;padding:0}.fact-strip div{display:grid;grid-template-columns:1fr 1.4fr}
+      .overview-plates{display:block}.data-plate{margin-bottom:14px;padding:22px}.data-plate header{display:block}.data-plate--compact,.data-plate--contrast{transform:none}.channel-split{grid-template-columns:1fr}.scope-note{margin-top:40px}
+      .section-heading{display:block;margin-bottom:58px}.section-heading .section-index{width:max-content;margin-bottom:38px}.section-heading h2{font-size:clamp(3.2rem,16vw,5.3rem);margin-bottom:28px}.section-heading>p:last-child{max-width:30rem}
+      .chapter-line{display:block}.chapter-line::before{left:24px}.chapter,.chapter:nth-child(even),.chapter--wide{display:grid;grid-template-columns:48px 1fr;transform:none;margin-bottom:20px;padding-bottom:42px}.chapter--signal>div,.chapter--dark>div{padding:20px}.chapter-no{width:48px;height:48px;z-index:1}
+      .reaction-composition{display:block;padding:20px}.composition-key{grid-template-columns:repeat(2,1fr)}.ledger-row{grid-template-columns:52px 1fr;padding:20px 16px;min-height:0}.ledger-rank{font-size:2rem}.ledger-copy h3{font-size:2.35rem}.ledger-row .message-link{grid-column:1/span 2}.ledger-row::before{height:5px}
+      .double-bezel{border-radius:24px}.double-bezel__core{border-radius:18px;padding:22px}.poll-plate h3{font-size:2.8rem}.poll-lead{font-size:1.1rem}
+      .joke-wall{display:block}.joke-card,.joke-card--hero,.joke-card--offset,.joke-card--ink,.joke-card--wide{min-height:0;margin:0 0 12px;transform:none}.joke-card--hero blockquote{font-size:2.5rem}
+      .gem-layout{display:block}.gem-catalog{display:block}.gem-card,.gem-card:nth-child(3n+2),.gem-card--theory{min-height:0;margin-bottom:12px;transform:none}.gem-card--theory{grid-column:auto}
+      .method-grid{grid-template-columns:1fr}.method-grid article{min-height:0}.method-no{margin-bottom:34px}.source-footer{display:block}.back-to-top{margin-top:20px}
+      .data-plate [data-chart],.reaction-composition>[data-chart],.poll-plate [data-chart],.gem-visual{display:none}.static-series,.poll-options{position:static!important;width:auto!important;height:auto!important;margin:24px 0!important;padding:0!important;overflow:visible!important;clip:auto!important;white-space:normal!important;list-style:none!important}
+      .static-series li,.poll-options li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px 0;border-bottom:1px solid currentColor}.poll-options li span{padding-right:10px}.poll-options strong{font-family:var(--display)}
+    }
+    @media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
+  </style>
 </head>
 <body>
   <a class="skip-link" href="#overview">К содержанию</a>
@@ -61,6 +292,28 @@
         <div class="overview-plates" aria-label="Срез активности">
           <article class="data-plate data-plate--wide">
             <header><p class="eyebrow">Пульс / сутки</p><h2>Пик пришёлся на 12 июля</h2></header>
+            <svg class="daily-chart" data-chart="daily-messages" viewBox="0 0 720 340" role="img" aria-labelledby="daily-title daily-desc">
+              <title id="daily-title">Сообщения по дням</title>
+              <desc id="daily-desc">11 июля — 930; 12 июля — 1073; 13 июля — 740, неполный день, до 19:03 MSK. Нулевая шкала до 1100.</desc>
+              <g aria-hidden="true">
+                <line class="gridline" x1="105" y1="48" x2="105" y2="284"/>
+                <line class="gridline" x1="355" y1="48" x2="355" y2="284"/>
+                <line class="gridline" x1="605" y1="48" x2="605" y2="284"/>
+                <text class="label" x="105" y="30" text-anchor="middle">0</text>
+                <text class="label" x="355" y="30" text-anchor="middle">550</text>
+                <text class="label" x="605" y="30" text-anchor="middle">1 100</text>
+              </g>
+              <g class="chart-bar" data-day="2026-07-11" data-value="930" style="--bar-scale:.845">
+                <text class="label" x="0" y="99">11 июля</text><rect x="105" y="70" width="500" height="42"/><text class="value" x="630" y="98">930</text>
+              </g>
+              <g class="chart-bar" data-day="2026-07-12" data-value="1073" style="--bar-scale:.975">
+                <text class="label" x="0" y="171">12 июля</text><rect x="105" y="142" width="500" height="42"/><text class="value" x="630" y="170">1 073</text>
+              </g>
+              <g class="chart-bar" data-day="2026-07-13" data-value="740" style="--bar-scale:.673">
+                <text class="label" x="0" y="243">13 июля*</text><rect x="105" y="214" width="500" height="42"/><text class="value" x="630" y="242">740</text>
+              </g>
+              <text class="label" x="105" y="313">* неполный день, до 19:03 MSK</text>
+            </svg>
             <ol class="static-series daily-series">
               <li data-day="2026-07-11" data-value="930"><span>11 июля</span><strong>930</strong></li>
               <li data-day="2026-07-12" data-value="1073"><span>12 июля</span><strong>1 073</strong></li>
@@ -71,12 +324,38 @@
 
           <article class="data-plate data-plate--compact">
             <header><p class="eyebrow">След реакции</p><h2>Реакция была у каждого четвёртого сообщения</h2></header>
+            <svg data-chart="reacted-share" viewBox="0 0 260 260" role="img" aria-labelledby="reacted-title reacted-desc">
+              <title id="reacted-title">758 сообщений с реакциями из 2743</title>
+              <desc id="reacted-desc">27,6 процента сообщений получили хотя бы одну реакцию; 72,4 процента не получили реакций.</desc>
+              <circle cx="130" cy="130" r="92" pathLength="100" class="ring-base"/>
+              <circle cx="130" cy="130" r="92" pathLength="100" class="ring-value" data-metric="reacted" data-value="758" stroke-dasharray="27.6 72.4"/>
+              <text x="130" y="126" text-anchor="middle" fill="currentColor" style="font:800 42px var(--display)">758</text>
+              <text x="130" y="154" text-anchor="middle" fill="currentColor" style="font:700 15px var(--display)">27,6%</text>
+            </svg>
             <p class="ratio-statement"><strong data-metric="reacted" data-value="758">758</strong> с реакциями · 27,6%</p>
             <p><span data-metric="unreacted" data-value="1985">1 985</span> без реакций · 72,4%</p>
           </article>
 
           <article class="data-plate data-plate--contrast">
             <header><p class="eyebrow">Асимметрия внимания</p><h2>3,1% сообщений забрали 40,2% реакций</h2></header>
+            <svg data-chart="channel-skew" viewBox="0 0 720 260" role="img" aria-labelledby="skew-title skew-desc">
+              <title id="skew-title">Канальные сообщения: 3,1% сообщений и 40,2% реакций</title>
+              <desc id="skew-desc">85 канальных и 2658 нативных сообщений. Канальные получили 2047 реакций, нативные — 3041.</desc>
+              <g>
+                <text class="label" x="0" y="34">ДОЛЯ СООБЩЕНИЙ</text>
+                <rect x="0" y="54" width="18.6" height="44" fill="var(--signal)"/>
+                <rect x="18.6" y="54" width="581.4" height="44" fill="rgba(247,241,229,.18)"/>
+                <g data-metric="channel-messages" data-value="85"><text class="value" x="0" y="126">85 · 3,1%</text></g>
+                <g data-metric="native-messages" data-value="2658"><text class="label" x="600" y="126" text-anchor="end">2 658 · 96,9%</text></g>
+              </g>
+              <g>
+                <text class="label" x="0" y="165">ДОЛЯ РЕАКЦИЙ</text>
+                <rect x="0" y="185" width="241.2" height="44" fill="var(--signal)"/>
+                <rect x="241.2" y="185" width="358.8" height="44" fill="rgba(247,241,229,.18)"/>
+                <g data-metric="channel-reactions" data-value="2047"><text class="value" x="0" y="254">2 047 · 40,2%</text></g>
+                <g data-metric="native-reactions" data-value="3041"><text class="label" x="600" y="254" text-anchor="end">3 041 · 59,8%</text></g>
+              </g>
+            </svg>
             <dl class="channel-split">
               <div><dt>Канальные сообщения</dt><dd><span data-metric="channel-messages" data-value="85">85</span> / <span data-metric="native-messages" data-value="2658">2 658</span> нативных</dd></div>
               <div><dt>Реакции на них</dt><dd><span data-metric="channel-reactions" data-value="2047">2 047</span> / <span data-metric="native-reactions" data-value="3041">3 041</span> на нативных</dd></div>
@@ -179,7 +458,20 @@
 
         <div class="reaction-composition" aria-labelledby="composition-title">
           <h3 id="composition-title">Состав реакций топ-10</h3>
-          <ul class="composition-key">
+          <div>
+            <svg data-chart="top-composition" viewBox="0 0 720 98" role="img" aria-labelledby="top-composition-title top-composition-desc">
+              <title id="top-composition-title">Состав 2472 реакций у десяти самых реактивных сообщений</title>
+              <desc id="top-composition-desc">Смех 530, клоун 505, задумчивость 301, одобрение 287, взрыв головы 196, горящее сердце 183, прочие 470.</desc>
+              <g data-reaction="😁" data-value="530"><rect x="0" y="18" width="154.4" height="46" fill="var(--cobalt)"/><title>😁 — 530 · 21,4%</title></g>
+              <g data-reaction="🤡" data-value="505"><rect x="154.4" y="18" width="147.1" height="46" fill="var(--signal)"/><title>🤡 — 505 · 20,4%</title></g>
+              <g data-reaction="🤔" data-value="301"><rect x="301.5" y="18" width="87.7" height="46" fill="#6177bd"/><title>🤔 — 301 · 12,2%</title></g>
+              <g data-reaction="👍" data-value="287"><rect x="389.2" y="18" width="83.6" height="46" fill="var(--acid)"/><title>👍 — 287 · 11,6%</title></g>
+              <g data-reaction="🤯" data-value="196"><rect x="472.8" y="18" width="57.1" height="46" fill="#9d755e"/><title>🤯 — 196 · 7,9%</title></g>
+              <g data-reaction="❤‍🔥" data-value="183"><rect x="529.9" y="18" width="53.3" height="46" fill="#ff8065"/><title>❤‍🔥 — 183 · 7,4%</title></g>
+              <g data-reaction="other" data-value="470"><rect x="583.2" y="18" width="136.8" height="46" fill="rgba(247,241,229,.28)"/><title>Прочие — 470 · 19,0%</title></g>
+              <text class="label" x="0" y="88">0</text><text class="label" x="720" y="88" text-anchor="end">2 472 реакции</text>
+            </svg>
+            <ul class="composition-key">
             <li data-reaction="😁" data-value="530"><span>😁</span><strong>530 · 21,4%</strong></li>
             <li data-reaction="🤡" data-value="505"><span>🤡</span><strong>505 · 20,4%</strong></li>
             <li data-reaction="🤔" data-value="301"><span>🤔</span><strong>301 · 12,2%</strong></li>
@@ -187,47 +479,48 @@
             <li data-reaction="🤯" data-value="196"><span>🤯</span><strong>196 · 7,9%</strong></li>
             <li data-reaction="❤‍🔥" data-value="183"><span>❤‍🔥</span><strong>183 · 7,4%</strong></li>
             <li data-reaction="other" data-value="470"><span>Прочие</span><strong>470 · 19,0%</strong></li>
-          </ul>
+            </ul>
+          </div>
         </div>
 
         <ol class="ledger-list">
-          <li class="ledger-row ledger-row--paired" data-message-id="497797" data-reactions="419" data-reveal>
+          <li class="ledger-row ledger-row--paired" data-message-id="497797" data-reactions="419" data-reveal style="--rank-scale:1">
             <span class="ledger-rank">01</span><div class="ledger-copy"><p class="eyebrow">AI-2040 · часть 1</p><h3>419 реакций</h3><p>Главный сигнал: 🤡 213</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/497797" target="_blank" rel="noopener noreferrer"><span>Открыть #497797</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row ledger-row--paired" data-message-id="497798" data-reactions="369" data-reveal>
+          <li class="ledger-row ledger-row--paired" data-message-id="497798" data-reactions="369" data-reveal style="--rank-scale:.881">
             <span class="ledger-rank">02</span><div class="ledger-copy"><p class="eyebrow">AI-2040 · часть 2</p><h3>369 реакций</h3><p>Главный сигнал: 🤡 178</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/497798" target="_blank" rel="noopener noreferrer"><span>Открыть #497798</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row ledger-row--joke" data-message-id="498680" data-reactions="329" data-reveal>
+          <li class="ledger-row ledger-row--joke" data-message-id="498680" data-reactions="329" data-reveal style="--rank-scale:.785">
             <span class="ledger-rank">03</span><div class="ledger-copy"><p class="eyebrow">«Мне русские модели сами пишут»</p><h3>329 реакций</h3><p>Главный сигнал: 😁 313</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/498680" target="_blank" rel="noopener noreferrer"><span>Открыть #498680</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row" data-message-id="497477" data-reactions="307" data-reveal>
+          <li class="ledger-row" data-message-id="497477" data-reactions="307" data-reveal style="--rank-scale:.733">
             <span class="ledger-rank">04</span><div class="ledger-copy"><p class="eyebrow">Иск Apple к OpenAI</p><h3>307 реакций</h3><p>Главный сигнал: 🤯 136</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/497477" target="_blank" rel="noopener noreferrer"><span>Открыть #497477</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row" data-message-id="499982" data-reactions="261" data-reveal>
+          <li class="ledger-row" data-message-id="499982" data-reactions="261" data-reveal style="--rank-scale:.623">
             <span class="ledger-rank">05</span><div class="ledger-copy"><p class="eyebrow">Суперфорекастер о сроках GPT-6</p><h3>261 реакция</h3><p>Главный сигнал: 🤔 156</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/499982" target="_blank" rel="noopener noreferrer"><span>Открыть #499982</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row" data-message-id="499375" data-reactions="210" data-reveal>
+          <li class="ledger-row" data-message-id="499375" data-reactions="210" data-reveal style="--rank-scale:.501">
             <span class="ledger-rank">06</span><div class="ledger-copy"><p class="eyebrow">Модель на AtCoder</p><h3>210 реакций</h3><p>Главный сигнал: ❤‍🔥 104</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/499375" target="_blank" rel="noopener noreferrer"><span>Открыть #499375</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row" data-message-id="498677" data-reactions="174" data-reveal>
+          <li class="ledger-row" data-message-id="498677" data-reactions="174" data-reveal style="--rank-scale:.415">
             <span class="ledger-rank">07</span><div class="ledger-copy"><p class="eyebrow">Опрос о поле модели</p><h3>174 реакции</h3><p>Главный сигнал: 🤔 89</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/498677" target="_blank" rel="noopener noreferrer"><span>Открыть #498677</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row" data-message-id="499557" data-reactions="168" data-reveal>
+          <li class="ledger-row" data-message-id="499557" data-reactions="168" data-reveal style="--rank-scale:.401">
             <span class="ledger-rank">08</span><div class="ledger-copy"><p class="eyebrow">Опрос о запрете открытых весов</p><h3>168 реакций</h3><p>Главный сигнал: 🤡 92</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/499557" target="_blank" rel="noopener noreferrer"><span>Открыть #499557</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row ledger-row--joke" data-message-id="498682" data-reactions="148" data-reveal>
+          <li class="ledger-row ledger-row--joke" data-message-id="498682" data-reactions="148" data-reveal style="--rank-scale:.353">
             <span class="ledger-rank">09</span><div class="ledger-copy"><p class="eyebrow">«После третьего сообщения кинула бы в ЧС»</p><h3>148 реакций</h3><p>Главный сигнал: 😁 141</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/498682" target="_blank" rel="noopener noreferrer"><span>Открыть #498682</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
-          <li class="ledger-row ledger-row--joke" data-message-id="497823" data-reactions="87" data-reveal>
+          <li class="ledger-row ledger-row--joke" data-message-id="497823" data-reactions="87" data-reveal style="--rank-scale:.208">
             <span class="ledger-rank">10</span><div class="ledger-copy"><p class="eyebrow">«Папа, а что ты делал, когда рождался AGI?»</p><h3>87 реакций</h3><p>😁 76 · 🤣 9</p></div>
             <a class="message-link" href="https://t.me/c/1778093200/497823" target="_blank" rel="noopener noreferrer"><span>Открыть #497823</span><span class="arrow-island" aria-hidden="true">↗</span></a>
           </li>
@@ -249,6 +542,17 @@
               <p class="eyebrow">Poll 01 · <span data-metric="gender-voters" data-value="9183">9 183</span> голоса</p>
               <h3>Какого пола для вас модель?</h3>
               <p class="poll-lead"><strong>72,6%</strong> — исключительно мужского; <strong>80,0%</strong> — мужского в той или иной форме.</p>
+              <svg class="poll-chart" data-chart="gender-poll" viewBox="0 0 720 390" role="img" aria-labelledby="gender-title gender-desc">
+                <title id="gender-title">Опрос о поле модели, 9183 голоса</title>
+                <desc id="gender-desc">Исключительно мужского 6663; в основном мужского 680; 50 на 50 — 311; в основном женского 255; исключительно женского 236; паркет или кафель 1038.</desc>
+                <g data-poll="gender" data-option="0" data-value="6663"><text class="label" x="0" y="39">Исключительно мужского</text><rect class="bar" x="258" y="14" width="360" height="34"/><text class="value" x="635" y="39">6 663</text></g>
+                <g data-poll="gender" data-option="1" data-value="680"><text class="label" x="0" y="99">В основном мужского</text><rect class="bar" x="258" y="74" width="36.7" height="34"/><text class="value" x="311" y="99">680</text></g>
+                <g data-poll="gender" data-option="2" data-value="311"><text class="label" x="0" y="159">50/50</text><rect class="bar" x="258" y="134" width="16.8" height="34"/><text class="value" x="291" y="159">311</text></g>
+                <g data-poll="gender" data-option="3" data-value="255"><text class="label" x="0" y="219">В основном женского</text><rect class="bar" x="258" y="194" width="13.8" height="34"/><text class="value" x="288" y="219">255</text></g>
+                <g data-poll="gender" data-option="4" data-value="236"><text class="label" x="0" y="279">Исключительно женского</text><rect class="bar" x="258" y="254" width="12.8" height="34"/><text class="value" x="287" y="279">236</text></g>
+                <g data-poll="gender" data-option="5" data-value="1038"><text class="label" x="0" y="339">Паркет или кафель</text><rect class="bar" x="258" y="314" width="56.1" height="34"/><text class="value" x="331" y="339">1 038</text></g>
+                <line class="gridline" x1="258" y1="372" x2="618" y2="372"/><text class="label" x="258" y="388">0</text><text class="label" x="618" y="388" text-anchor="end">6 663</text>
+              </svg>
               <ol class="poll-options">
                 <li data-poll="gender" data-option="0" data-value="6663"><span>Исключительно мужского</span><strong>6 663</strong></li>
                 <li data-poll="gender" data-option="1" data-value="680"><span>В основном мужского</span><strong>680</strong></li>
@@ -267,6 +571,19 @@
               <p class="eyebrow">Poll 02 · 6 066 голосов</p>
               <h3>Кто первым ограничит открытые веса?</h3>
               <p class="poll-lead"><strong>52,9%</strong> содержательных ответов — США; <strong>27,6%</strong> — Китай; <strong>19,4%</strong> — никогда.</p>
+              <svg class="poll-chart" data-chart="weights-poll" viewBox="0 0 720 500" role="img" aria-labelledby="weights-title weights-desc">
+                <title id="weights-title">Опрос о запрете открытых весов, 6066 голосов</title>
+                <desc id="weights-desc">США до конца 2026 — 1143; Китай до конца 2026 — 656; США до июня 2027 — 834; Китай до июня 2027 — 408; США после июня 2027 — 283; Китай после июня 2027 — 115; никогда — 830; посмотреть результаты — 1797.</desc>
+                <g data-poll="weights" data-option="0" data-value="1143"><text class="label" x="0" y="35">США · до конца 2026</text><rect class="bar" x="245" y="12" width="229" height="31"/><text class="value" x="490" y="35">1 143</text></g>
+                <g data-poll="weights" data-option="1" data-value="656"><text class="label" x="0" y="93">Китай · до конца 2026</text><rect class="bar" x="245" y="70" width="131.4" height="31"/><text class="value" x="392" y="93">656</text></g>
+                <g data-poll="weights" data-option="2" data-value="834"><text class="label" x="0" y="151">США · до июня 2027</text><rect class="bar" x="245" y="128" width="167" height="31"/><text class="value" x="428" y="151">834</text></g>
+                <g data-poll="weights" data-option="3" data-value="408"><text class="label" x="0" y="209">Китай · до июня 2027</text><rect class="bar" x="245" y="186" width="81.7" height="31"/><text class="value" x="343" y="209">408</text></g>
+                <g data-poll="weights" data-option="4" data-value="283"><text class="label" x="0" y="267">США · после июня 2027</text><rect class="bar" x="245" y="244" width="56.7" height="31"/><text class="value" x="318" y="267">283</text></g>
+                <g data-poll="weights" data-option="5" data-value="115"><text class="label" x="0" y="325">Китай · после июня 2027</text><rect class="bar" x="245" y="302" width="23" height="31"/><text class="value" x="284" y="325">115</text></g>
+                <g data-poll="weights" data-option="6" data-value="830"><text class="label" x="0" y="383">Никогда</text><rect class="bar" x="245" y="360" width="166.3" height="31"/><text class="value" x="427" y="383">830</text></g>
+                <g data-poll="weights" data-option="7" data-value="1797"><text class="label" x="0" y="441">Посмотреть результаты</text><rect x="245" y="418" width="360" height="31" fill="rgba(255,255,255,.22)"/><text class="value" x="621" y="441">1 797</text></g>
+                <line class="gridline" x1="245" y1="476" x2="605" y2="476"/><text class="label" x="245" y="496">0</text><text class="label" x="605" y="496" text-anchor="end">1 797</text>
+              </svg>
               <ol class="poll-options">
                 <li data-poll="weights" data-option="0" data-value="1143"><span>США до конца 2026</span><strong>1 143</strong></li>
                 <li data-poll="weights" data-option="1" data-value="656"><span>Китай до конца 2026</span><strong>656</strong></li>
@@ -315,6 +632,32 @@
         </header>
 
         <div class="gem-layout">
+          <figure class="gem-visual">
+            <svg class="gem-constellation" data-chart="gem-constellation" viewBox="0 0 720 560" role="img" aria-labelledby="gems-chart-title gems-chart-desc">
+              <title id="gems-chart-title">Восемь скрытых граалей по четырём категориям</title>
+              <desc id="gems-chart-desc">Две находки workflow, одна infrastructure, четыре method и одна theory. Размер узлов одинаков: низкое число реакций показано рядом с каждым ID.</desc>
+              <g aria-hidden="true">
+                <circle class="orbit" cx="354" cy="278" r="92"/><circle class="orbit" cx="354" cy="278" r="154"/><circle class="orbit" cx="354" cy="278" r="220"/>
+                <path class="connector" d="M180 120L354 278L550 130M242 250L354 278L478 326M160 382L354 278L574 418M322 444L354 278"/>
+                <path class="facet" d="M354 175L430 250L399 365L310 382L274 270Z M354 175L354 278L430 250 M354 278L399 365 M354 278L310 382 M354 278L274 270 M274 270L430 250 M310 382L430 250"/>
+                <circle cx="354" cy="278" r="9" fill="var(--signal)" stroke="none"/>
+                <text x="354" y="300" text-anchor="middle" style="font-size:10px;letter-spacing:.14em">UNDER-REACTED</text>
+              </g>
+              <g data-category="workflow" data-message-id="500156" data-reactions="9"><circle cx="180" cy="120" r="18"/><text x="208" y="116">500156</text><text x="208" y="134" style="font-size:10px;opacity:.65">workflow · 9</text></g>
+              <g data-category="infrastructure" data-message-id="499892" data-reactions="0"><circle cx="550" cy="130" r="18"/><text x="578" y="126">499892</text><text x="578" y="144" style="font-size:10px;opacity:.65">infra · 0</text></g>
+              <g data-category="workflow" data-message-id="498539" data-reactions="0"><circle cx="242" cy="250" r="18"/><text x="155" y="246">498539</text><text x="155" y="264" style="font-size:10px;opacity:.65">workflow · 0</text></g>
+              <g data-category="method" data-message-id="498540" data-reactions="5"><circle cx="478" cy="326" r="18"/><text x="506" y="322">498540</text><text x="506" y="340" style="font-size:10px;opacity:.65">method · 5</text></g>
+              <g data-category="method" data-message-id="498794" data-reactions="8"><circle cx="574" cy="418" r="18"/><text x="602" y="414">498794</text><text x="602" y="432" style="font-size:10px;opacity:.65">method · 8</text></g>
+              <g data-category="method" data-message-id="497846" data-reactions="3"><circle cx="322" cy="444" r="18"/><text x="350" y="440">497846</text><text x="350" y="458" style="font-size:10px;opacity:.65">method · 3</text></g>
+              <g data-category="method" data-message-id="500329" data-reactions="3"><circle cx="160" cy="382" r="18"/><text x="76" y="378">500329</text><text x="76" y="396" style="font-size:10px;opacity:.65">method · 3</text></g>
+              <g data-category="theory" data-message-id="498087" data-reactions="1"><circle cx="520" cy="234" r="18"/><text x="548" y="230">498087</text><text x="548" y="248" style="font-size:10px;opacity:.65">theory · 1</text></g>
+              <g aria-hidden="true">
+                <text x="24" y="32" style="font-size:10px;letter-spacing:.12em;opacity:.55">ATTENTION MAP / 08 NODES</text>
+                <line x1="24" y1="46" x2="210" y2="46" class="connector"/>
+                <text x="24" y="530" style="font-size:10px;letter-spacing:.1em;opacity:.55">REACTIONS: 0—9 · LINKS IN CATALOG →</text>
+              </g>
+            </svg>
+          </figure>
           <div class="gem-catalog">
             <article class="gem-card" data-category="workflow" data-message-id="500156" data-reactions="9" data-reveal><p class="eyebrow">Workflow · 9 + 8 реакций</p><h3>Харнесс меняет модель</h3><p>Один Sol Max: Claude Code копает глубже, но в этом тесте съел около 5× времени и токенов. Использовать для действительно сложного.</p><div class="link-pair"><a href="https://t.me/c/1778093200/500156" target="_blank" rel="noopener noreferrer">500156</a><a data-message-id="500250" data-reactions="8" href="https://t.me/c/1778093200/500250" target="_blank" rel="noopener noreferrer">500250</a></div></article>
             <article class="gem-card" data-category="infrastructure" data-message-id="499892" data-reactions="0" data-reveal><p class="eyebrow">Infrastructure · 0 + 1 реакция</p><h3>Удалённый Codex без разрыва сессии</h3><p>SSH + tmux дают постоянную рабочую сессию и нормальный handoff между приложением, терминалом и телефоном.</p><div class="link-pair"><a href="https://t.me/c/1778093200/499892" target="_blank" rel="noopener noreferrer">499892</a><a data-message-id="499896" data-reactions="1" href="https://t.me/c/1778093200/499896" target="_blank" rel="noopener noreferrer">499896</a></div></article>
