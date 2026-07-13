@@ -9,6 +9,11 @@ const state = {
   autoSyncInterval: null,
   autoSyncMinutes: 0,
   darkTheme: false,
+  route: null,
+  sourceKeys: null,
+  initialLoadsPending: true,
+  routeNeedsReload: false,
+  calendarEvents: [],
   agent: {
     preflight: null,
     digest: null,
@@ -43,29 +48,33 @@ function notifyError(scope, error, title = "Не удалось выполнит
 }
 
 const ROUTES = {
-  today: { path: "/today", title: "Сегодня", summary: "Главные действия, новые совпадения и ближайшие события.", actions: false },
-  inbox: { path: "/jobs", title: "Вакансии", summary: "Поиск, оценка и подготовка точных откликов.", actions: true },
-  calendar: { path: "/calendar", title: "Календарь", summary: "Собеседования, напоминания и следующие шаги.", actions: false },
-  favorites: { path: "/favorites", title: "Сохранённые", summary: "Сохранённые вакансии и заметки.", actions: false },
-  chat: { path: "/chat", title: "Ассистент", summary: "Диалог с контекстом выбранной вакансии.", actions: false },
-  agent: { path: "/agent", title: "Отклики", summary: "Воронка, подтверждения и автоматизация HH.", actions: false },
-  settings: { path: "/settings", title: "Настройки", summary: "Профили, резюме, интеграции и внешний вид.", actions: false },
-  sources: { path: "/sources", title: "Источники", summary: "Состояние подключений и последняя синхронизация.", actions: false },
-  stats: { path: "/stats", title: "Аналитика", summary: "Воронка, распределение score и источники.", actions: false },
-  trends: { path: "/trends", title: "Тренды", summary: "Анализ рынка по загруженным вакансиям.", actions: false },
+  today: { url: "/today", title: "Сегодня", summary: "Главные действия, новые совпадения и ближайшие события.", actions: false },
+  inbox: { url: "/jobs?filter=all", title: "Вакансии", summary: "Поиск, оценка и подготовка точных откликов.", actions: true },
+  calendar: { url: "/calendar", title: "Календарь", summary: "Собеседования, напоминания и следующие шаги.", actions: false },
+  favorites: { url: "/jobs?filter=saved", view: "inbox", title: "Сохранённые", summary: "Сохранённые вакансии и заметки.", actions: true },
+  chat: { url: "/assistant", title: "Ассистент", summary: "Диалог с контекстом выбранной вакансии.", actions: false },
+  agent: { url: "/applications?tab=pipeline", title: "Отклики", summary: "Воронка, подтверждения и автоматизация HH.", actions: false },
+  settings: { url: "/settings?section=profile", title: "Настройки", summary: "Профили, резюме, интеграции и внешний вид.", actions: false },
+  sources: { url: "/sources", title: "Источники", summary: "Состояние подключений и последняя синхронизация.", actions: false },
+  stats: { url: "/analytics?tab=overview", title: "Аналитика", summary: "Воронка, распределение score и источники.", actions: false },
+  trends: { url: "/analytics?tab=trends", view: "stats", title: "Тренды", summary: "Анализ рынка по загруженным вакансиям.", actions: false },
 };
 
-const PATH_TO_VIEW = Object.fromEntries(Object.entries(ROUTES).map(([view, route]) => [route.path, view]));
-PATH_TO_VIEW["/"] = "today";
-PATH_TO_VIEW["/applications"] = "agent";
-PATH_TO_VIEW["/assistant"] = "chat";
+const DESTINATION_TO_VIEW = Object.freeze({
+  today: "today",
+  vacancies: "inbox",
+  applications: "agent",
+  calendar: "calendar",
+  assistant: "chat",
+  analytics: "stats",
+  sources: "sources",
+  settings: "settings",
+});
 
 function routeViewFromPath(pathname, search = window.location.search) {
   if (pathname === "/today" && window.__WORK_HUNTER_TEST_LEGACY_ROOT__) return "inbox";
-  if (pathname === "/analytics") {
-    return "stats";
-  }
-  return PATH_TO_VIEW[pathname] || "inbox";
+  const resolved = window.WorkHunterUI.route.resolve(pathname, search, window.location.hash, state.sourceKeys);
+  return DESTINATION_TO_VIEW[resolved.destination] || "today";
 }
 
 async function api(path, options = {}) {
@@ -133,11 +142,36 @@ async function loadJobs() {
     const minScore = $("#min-score-filter").value || "0";
     const params = new URLSearchParams({ limit: "200", min_score: minScore });
     if (source) params.set("source", source);
+    const routeParams = state.route?.destination === "vacancies"
+      ? new URLSearchParams(state.route.query)
+      : new URLSearchParams();
+    const status = routeParams.get("status")
+      || (routeParams.get("filter") === "saved" ? "saved" : "");
+    if (status) params.set("status", status);
     state.jobs = await api(`/api/jobs?${params.toString()}`);
     renderJobs();
     updateSummary();
+    await applyJobRouteSelection();
   } finally {
     setSectionLoading("jobs", false);
+  }
+}
+
+async function applyJobRouteSelection() {
+  if (!state.route || !["vacancies", "assistant"].includes(state.route.destination)) return;
+  const params = new URLSearchParams(state.route.query);
+  const rawJobId = params.get("job");
+  if (!rawJobId) return;
+  const jobId = requirePositiveInteger(rawJobId, "job id");
+  try {
+    if (Number(state.selectedId) !== jobId) await selectJob(jobId);
+    if (state.route.destination === "assistant") {
+      const attach = $("#chat-attach-job");
+      if (attach) attach.checked = true;
+      updateChatContext();
+    }
+  } catch (error) {
+    notify("warning", "route-job", "record-not-found", "Вакансия из ссылки не найдена");
   }
 }
 
@@ -539,6 +573,18 @@ async function saveAiSettings() {
 
 async function loadSources() {
   const sources = await api("/api/sources");
+  state.sourceKeys = [...new Set(sources.map((source) => String(source.source || "")).filter(Boolean))];
+  const sourceFilter = $("#source-filter");
+  for (const sourceKey of state.sourceKeys) {
+    if (![...sourceFilter.options].some((option) => option.value === sourceKey)) {
+      sourceFilter.add(new Option(sourceKey, sourceKey));
+    }
+  }
+  const resolved = window.WorkHunterUI.route.syncFromLocation(state.sourceKeys);
+  if (resolved.warnings.includes("invalid_source")) {
+    state.routeNeedsReload = true;
+    notify("warning", "route-source", "invalid-source", "Источник из ссылки больше недоступен");
+  }
   const box = $("#sources-list");
   box.innerHTML = "";
   if (!sources.length) {
@@ -575,11 +621,23 @@ async function todayResource(path) {
 }
 
 function navigateFromToday(view, params = {}) {
-  activateView(view);
-  if (view === "inbox" && params.job) {
-    selectJob(params.job).catch((error) => notifyError("today-vacancy", error));
+  const route = ROUTES[view] || ROUTES.today;
+  const target = new URL(route.url, window.location.origin);
+  if (view === "agent" && params.approval) target.searchParams.set("tab", "agent");
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") {
+      target.searchParams.set(key, String(value));
+    }
   }
-  if (view === "agent" && params.approval) switchAgentPanel("approvals");
+  window.WorkHunterUI.route.activate(
+    window.WorkHunterUI.route.resolve(
+      target.pathname,
+      target.search,
+      target.hash,
+      state.sourceKeys,
+    ),
+    { historyMode: "push" },
+  );
 }
 
 async function loadToday() {
@@ -816,10 +874,73 @@ function getLetterValue() {
   return $("#ai-letter-box")?.value || "";
 }
 
+function resolvedRouteForUrl(url) {
+  const target = new URL(url, window.location.origin);
+  return window.WorkHunterUI.route.resolve(
+    target.pathname,
+    target.search,
+    target.hash,
+    state.sourceKeys,
+  );
+}
+
+function syncVacancyControls(resolved) {
+  if (resolved.destination !== "vacancies") return;
+  const params = new URLSearchParams(resolved.query);
+  const source = params.get("source") || "";
+  const sourceFilter = $("#source-filter");
+  if (source && ![...sourceFilter.options].some((option) => option.value === source)) {
+    sourceFilter.add(new Option(source, source));
+  }
+  sourceFilter.value = source;
+  $("#min-score-filter").value = params.get("min_score") || "0";
+}
+
+function applyApplicationRecordRoute(params) {
+  let panelName = null;
+  let selector = null;
+  if (params.get("approval")) {
+    panelName = "approvals";
+    selector = `[data-approval-id="${params.get("approval")}"]`;
+  } else if (params.get("run")) {
+    panelName = "runs";
+    selector = `[data-run-id="${params.get("run")}"]`;
+  } else if (params.get("operation")) {
+    panelName = "runs";
+    selector = `[data-operation-id="${params.get("operation")}"]`;
+  }
+  if (!panelName) return;
+  switchAgentPanel(panelName);
+  const record = selector ? document.querySelector(selector) : null;
+  if (record instanceof HTMLElement) {
+    record.tabIndex = -1;
+    record.focus({ preventScroll: true });
+    record.scrollIntoView({ block: "nearest" });
+  }
+}
+
 function activateView(view, options = {}) {
   const route = ROUTES[view] || ROUTES.inbox;
-  const routeView = ROUTES[view] ? view : "inbox";
-  const routePath = route.path;
+  if (options.push !== false) {
+    return window.WorkHunterUI.route.activate(
+      resolvedRouteForUrl(route.url),
+      { historyMode: "push" },
+    );
+  }
+  const resolved = options.resolved || window.WorkHunterUI.route.resolve(
+    window.location.pathname,
+    window.location.search,
+    window.location.hash,
+    state.sourceKeys,
+  );
+  state.route = resolved;
+  const canonicalView = DESTINATION_TO_VIEW[resolved.destination] || route.view || view || "today";
+  const routeView = resolved.destination === "today" && window.__WORK_HUNTER_TEST_LEGACY_ROOT__
+    ? "inbox"
+    : canonicalView;
+  const viewRoute = ROUTES[routeView] || route;
+  const params = new URLSearchParams(resolved.query);
+  syncVacancyControls(resolved);
 
   document.querySelectorAll(".nav-button").forEach((item) => item.classList.remove("active"));
   document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
@@ -829,28 +950,32 @@ function activateView(view, options = {}) {
   if (viewEl) viewEl.classList.add("active");
 
   const title = $("#route-topbar h1");
-  if (title) title.textContent = route.title;
+  if (title) title.textContent = viewRoute.title;
   const summary = $("#summary-line");
-  if (summary) summary.textContent = route.summary;
+  if (summary) summary.textContent = viewRoute.summary;
   const actions = $("#route-actions");
-  if (actions) actions.style.display = route.actions ? "flex" : "none";
+  if (actions) actions.style.display = viewRoute.actions ? "flex" : "none";
 
-  if (options.push !== false && window.location.pathname !== routePath) {
-    window.history.pushState({ view: routeView }, "", routePath);
+  const shouldLoad = options.load !== false;
+  if (shouldLoad && routeView === "stats") loadStats().catch(console.error);
+  if (shouldLoad && routeView === "inbox") loadJobs().catch((error) => notifyError("jobs-route", error));
+  if (shouldLoad && routeView === "chat") applyJobRouteSelection();
+  if (shouldLoad && routeView === "calendar") loadEvents().catch(console.error);
+  if (shouldLoad && routeView === "agent") {
+    loadAgentCockpit()
+      .then(() => applyApplicationRecordRoute(params))
+      .catch(console.error);
   }
-
-  if (routeView === "favorites") loadFavorites().catch(console.error);
-  if (routeView === "stats") loadStats().catch(console.error);
-  if (routeView === "agent") loadAgentCockpit().catch(console.error);
-  if (routeView === "today") loadToday().catch((error) => notifyError("today", error, "Не удалось загрузить экран Сегодня"));
+  if (shouldLoad && routeView === "today") loadToday().catch((error) => notifyError("today", error, "Не удалось загрузить экран Сегодня"));
   if (routeView === "agent") {
-    switchApplicationsTab(new URLSearchParams(window.location.search).get("tab") || "pipeline", { push: false });
+    switchApplicationsTab(params.get("tab") || "pipeline", { push: false });
+    applyApplicationRecordRoute(params);
   }
   if (routeView === "stats") {
-    switchAnalyticsTab(new URLSearchParams(window.location.search).get("tab") || "overview", { push: false });
+    switchAnalyticsTab(params.get("tab") || "overview", { push: false });
   }
   if (routeView === "settings") {
-    switchSettingsSection(new URLSearchParams(window.location.search).get("section") || "profile", { push: false });
+    switchSettingsSection(params.get("section") || "profile", { push: false });
   }
 }
 
@@ -1219,6 +1344,25 @@ function switchSettingsSection(section, { push = true } = {}) {
   pushDestinationSubview("/settings", "section", selected, push);
 }
 
+function bindRovingTablist(selector, dataKey, activate) {
+  const tabs = [...document.querySelectorAll(selector)];
+  for (const tab of tabs) {
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const currentIndex = tabs.indexOf(tab);
+      let nextIndex = currentIndex;
+      if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = tabs.length - 1;
+      else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+      else nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+      const next = tabs[nextIndex];
+      activate(next.dataset[dataKey]);
+      next.focus();
+    });
+  }
+}
+
 function setupDestinationPanels() {
   const statsView = $("#view-stats");
   const statsTabs = statsView?.querySelector(".destination-tabs");
@@ -1452,7 +1596,7 @@ function renderAgentApprovals() {
   box.innerHTML = approvals.map((item) => {
     const approvalId = requirePositiveInteger(item.id, "approval id");
     return `
-      <div class="agent-row">
+      <div class="agent-row" data-approval-id="${approvalId}">
         <div class="agent-row-head">
           <strong>#${approvalId} ${escapeHtml(item.action_type)}</strong>
           <span class="agent-badge ${escapeAttr(item.status)}">${escapeHtml(item.status)}</span>
@@ -1477,7 +1621,7 @@ function renderAgentOperations() {
   if (!box || !logBox) return;
   const operations = state.agent.operations || { runs: [], logs: [] };
   box.innerHTML = operations.runs.length ? operations.runs.map((run) => `
-    <div class="agent-row">
+    <div class="agent-row" data-run-id="${escapeAttr(String(run.id))}">
       <div class="agent-row-head">
         <strong>#${escapeHtml(String(run.id))} ${escapeHtml(run.tool_name)}</strong>
         <span class="agent-badge ${escapeAttr(run.status)}">${escapeHtml(run.status)}</span>
@@ -1488,7 +1632,7 @@ function renderAgentOperations() {
     </div>
   `).join("") : '<p class="meta">Запусков пока нет.</p>';
   logBox.innerHTML = operations.logs.length ? operations.logs.map((log) => `
-    <div class="agent-log-row">
+    <div class="agent-log-row" data-operation-id="${escapeAttr(String(log.operation_id || ""))}">
       <span class="agent-badge ${escapeAttr(log.level)}">${escapeHtml(log.level)}</span>
       <span>#${escapeHtml(String(log.operation_id || "—"))}</span>
       <span>${escapeHtml(log.message || "")}</span>
@@ -2065,8 +2209,7 @@ const delegatedUiActions = Object.freeze({
   "toggle-theme-from-settings": () => toggleTheme(),
   "restart-onboarding": () => window.appOnboarding?.review(),
   "restart-guidance": () => {
-    localStorage.removeItem("work-hunter:guidance:v2");
-    sessionStorage.removeItem("work-hunter:guidance-session:v2");
+    window.WorkHunterUI.onboarding.resetGuidance();
     notify("success", "guidance", "reset", "Контекстные советы включены снова");
   },
   "mark-selected": (control) => markSelected(control.dataset.status),
@@ -2144,6 +2287,7 @@ const dynamicRecordActions = Object.freeze({
   "activate-resume": (control) => activateResume(control.dataset.recordId),
   "edit-resume": (control) => showResumeForm(control.dataset.recordId),
   "delete-resume": (control) => deleteResume(control.dataset.recordId),
+  "edit-event": (control) => showEventForm(control.dataset.recordId),
   "delete-event": (control) => deleteEvent(control.dataset.recordId),
   "delete-search": (control) => deleteSearch(control.dataset.recordId),
   "mark-ghost-job": (control) => markGhostJob(control.dataset.recordId),
@@ -2172,6 +2316,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupDestinationPanels();
   setupNavigationAccessibility();
   setupResumeBuilderDefaults();
+  let routeApplied = false;
+  const initialRoute = window.WorkHunterUI.route.resolve(
+    window.location.pathname,
+    window.location.search,
+    window.location.hash,
+    state.sourceKeys,
+  );
+  state.route = initialRoute;
+  syncVacancyControls(initialRoute);
+  window.addEventListener("work-hunter:route", (event) => {
+    routeApplied = true;
+    const resolved = event.detail;
+    const view = DESTINATION_TO_VIEW[resolved.destination] || "today";
+    activateView(view, { push: false, resolved, load: !state.initialLoadsPending });
+  });
   document.addEventListener("click", handleDelegatedUiAction);
   document.addEventListener("click", handleDynamicRecordAction);
   document.querySelectorAll(".nav-button").forEach((button) => {
@@ -2235,8 +2394,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll("[data-settings-tab]").forEach(tab => {
     tab.addEventListener("click", () => switchSettingsSection(tab.dataset.settingsTab));
   });
-
-  window.addEventListener("popstate", () => activateView(routeViewFromPath(window.location.pathname), { push: false }));
+  bindRovingTablist("[data-applications-tab]", "applicationsTab", switchApplicationsTab);
+  bindRovingTablist("[data-analytics-tab]", "analyticsTab", switchAnalyticsTab);
+  bindRovingTablist("[data-settings-tab]", "settingsTab", switchSettingsSection);
 
   loadTheme();
   if ("serviceWorker" in navigator) {
@@ -2248,6 +2408,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     runIsolatedLoad("profile", loadProfile),
     runIsolatedLoad("sources", loadSources),
   ]);
+  if (!routeApplied) window.WorkHunterUI.route.syncFromLocation(state.sourceKeys);
+  state.initialLoadsPending = false;
+  if (state.routeNeedsReload) {
+    state.routeNeedsReload = false;
+    activateView(DESTINATION_TO_VIEW[state.route.destination] || "today", {
+      push: false,
+      resolved: state.route,
+    });
+  } else if (["applications", "analytics"].includes(state.route?.destination)) {
+    activateView(DESTINATION_TO_VIEW[state.route.destination], {
+      push: false,
+      resolved: state.route,
+    });
+  }
   window.appOnboarding = window.WorkHunterUI.onboarding.createController({
     api,
     notifications: window.appNotifications,
@@ -2256,7 +2430,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.appGuidance = window.WorkHunterUI.onboarding.createGuidanceController({
     overlays: window.appOverlays,
   });
-  activateView(routeViewFromPath(window.location.pathname), { push: false });
   loadResumes().catch(() => {});
   loadEvents().catch(() => {});
   loadSearches().catch(() => {});
@@ -2384,10 +2557,17 @@ async function deleteResume(id) {
 let editingEventId = 0;
 
 function showEventForm(id = 0) {
-  editingEventId = id;
+  editingEventId = id ? requirePositiveInteger(id, "event id") : 0;
+  const event = state.calendarEvents.find((item) => Number(item.id) === editingEventId);
   $("#event-form").style.display = "block";
-  $("#event-form-title").textContent = id ? "Редактировать событие" : "Новое событие";
-  if (!id) {
+  $("#event-form-title").textContent = editingEventId ? "Редактировать событие" : "Новое событие";
+  if (event) {
+    $("#event-title-input").value = event.title || "";
+    $("#event-type-select").value = event.event_type || "interview";
+    $("#event-date-input").value = String(event.event_date || "").slice(0, 16);
+    $("#event-job-input").value = event.job_id || "";
+    $("#event-notes-input").value = event.notes || "";
+  } else {
     $("#event-title-input").value = "";
     $("#event-date-input").value = "";
     $("#event-job-input").value = "";
@@ -2419,6 +2599,7 @@ async function saveEvent() {
 async function loadEvents() {
   try {
     const events = await api("/api/events");
+    state.calendarEvents = events;
     const list = $("#events-list");
     list.innerHTML = "";
     if (!events.length) {
@@ -2428,12 +2609,19 @@ async function loadEvents() {
     for (const ev of events) {
       const eventId = requirePositiveInteger(ev.id, "event id");
       const date = ev.event_date ? new Date(ev.event_date).toLocaleString("ru-RU") : "—";
-      list.innerHTML += `<div class="source-row">
+      list.innerHTML += `<div class="source-row" data-event-id="${eventId}">
         <strong>${escapeHtml(ev.title)} — ${escapeHtml(date)}</strong>
         <div class="meta">${escapeHtml(ev.event_type)} · Job #${escapeHtml(String(ev.job_id || "—"))}</div>
         <div class="meta">${escapeHtml(ev.notes || "")}</div>
+        <button ${numericRecordAction("edit-event", eventId, "event id")} style="margin-top:4px;">Редактировать</button>
         <button ${numericRecordAction("delete-event", eventId, "event id")} style="margin-top:4px;">Удалить</button>
       </div>`;
+    }
+    if (state.route?.destination === "calendar") {
+      const eventId = new URLSearchParams(state.route.query).get("event");
+      if (eventId && events.some((event) => Number(event.id) === Number(eventId))) {
+        showEventForm(eventId);
+      }
     }
   } catch (e) { console.error(e); }
 }

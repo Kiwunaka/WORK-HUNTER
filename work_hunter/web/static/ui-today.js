@@ -285,7 +285,23 @@
       const title = item.title || item.action_type || (item.kind === "approval" ? `Решение #${item.id}` : `Запись #${item.id}`);
       const meta = item.kind === "job" ? `Совпадение ${scoreOf(item)}` : item.kind === "approval" ? "Ожидает решения" : item.kind === "event" ? "Сегодня" : "К выполнению";
       row.append(Object.assign(document.createElement("strong"), { textContent: title }), Object.assign(document.createElement("span"), { textContent: meta }));
-      row.addEventListener("click", () => navigate?.(item.kind === "job" ? "inbox" : item.kind === "event" || item.kind === "task" ? "calendar" : item.kind === "approval" ? "agent" : "settings"));
+      row.addEventListener("click", () => {
+        const destination = item.kind === "job"
+          ? "inbox"
+          : item.kind === "event" || item.kind === "task"
+            ? "calendar"
+            : item.kind === "approval"
+              ? "agent"
+              : "settings";
+        const params = item.kind === "job"
+          ? { job: item.id }
+          : item.kind === "event"
+            ? { event: item.id }
+            : item.kind === "approval"
+              ? { approval: item.id }
+              : {};
+        navigate?.(destination, params);
+      });
       focusRoot.append(row);
     }
 

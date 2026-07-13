@@ -306,13 +306,33 @@ def test_ui_static_contract_has_routes_and_no_duplicate_ids():
     assert 'id="letter-box"' not in app
     assert 'id="ai-letter-box" data-letter-box' in index
     assert 'id="detail-letter-box" data-letter-box' in app
-    legacy_routes = ["/jobs", "/calendar", "/favorites", "/chat", "/agent", "/settings", "/sources", "/stats", "/trends"]
+    canonical_urls = [
+        "/today",
+        "/jobs?filter=all",
+        "/applications?tab=pipeline",
+        "/calendar",
+        "/assistant",
+        "/analytics?tab=overview",
+        "/sources",
+        "/settings?section=profile",
+    ]
+    for url in canonical_urls:
+        assert f'url: "{url}"' in app
+    legacy_routes = [
+        "/jobs",
+        "/calendar",
+        "/favorites",
+        "/chat",
+        "/agent",
+        "/settings",
+        "/sources",
+        "/stats",
+        "/trends",
+    ]
     for path in legacy_routes:
-        assert f'path: "{path}"' in app
-    for path in ["/today", "/applications", "/assistant", "/analytics"]:
         assert f'"{path}"' in core
     assert "window.history.pushState" in app
-    assert "window.addEventListener(\"popstate\"" in app
+    assert 'global.addEventListener("popstate"' in core
 
 
 def test_ui_static_assets_have_no_remote_runtime_dependencies():

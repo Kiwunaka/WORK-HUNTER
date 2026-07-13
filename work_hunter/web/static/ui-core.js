@@ -51,6 +51,7 @@
 
   function resolve(pathname, search = "", hash = "", sourceKeys = null) {
     const params = new URLSearchParams(search);
+    const rawSegments = String(search).replace(/^\?/, "").split("&").filter(Boolean);
     const [destination, path, overrides] = PATHS[pathname] || ["today", "/today", {}];
     const recognized = new Set(RECOGNIZED[destination]);
     const output = new URLSearchParams();
@@ -128,10 +129,17 @@
       );
     }
 
-    for (const [key, value] of params.entries()) {
-      if (!recognized.has(key)) output.append(key, value);
-    }
-    const query = output.toString();
+    const unknownSegments = rawSegments.filter((segment) => {
+      const rawKey = segment.split("=", 1)[0];
+      try {
+        const key = decodeURIComponent(rawKey.replaceAll("+", " "));
+        return !recognized.has(key);
+      } catch (_error) {
+        return true;
+      }
+    });
+    const recognizedQuery = output.toString();
+    const query = [recognizedQuery, ...unknownSegments].filter(Boolean).join("&");
     const canonicalUrl = `${path}${query ? `?${query}` : ""}${hash}`;
     return { destination, path, query, hash, canonicalUrl, warnings };
   }

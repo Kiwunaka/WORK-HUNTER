@@ -6,6 +6,7 @@
   const SESSION_KEY = "work-hunter:guidance-session:v2";
   const VERSION = 2;
   const STEPS = ["goal", "sources", "resume"];
+  const SAFE_FINALIZATION_CODES = new Set(["sync_failed"]);
 
   function defaultProgress() {
     return {
@@ -16,8 +17,11 @@
       finalization: {
         syncStatus: "not_started",
         syncCompletedAt: null,
-        error: null,
+        safeErrorCode: null,
       },
+      completedCoachMarks: [],
+      dismissedCoachMarks: [],
+      updatedAt: new Date().toISOString(),
     };
   }
 
@@ -46,10 +50,14 @@
       ? [...new Set(raw.completedSteps.filter((step) => STEPS.includes(step)))]
       : [];
     const pending = Number(raw.pendingResumeActivationId);
-    const syncStatuses = new Set(["not_started", "running", "succeeded", "failed"]);
+    const syncStatuses = new Set(["not_started", "succeeded", "failed"]);
     const finalization = raw.finalization && typeof raw.finalization === "object"
       ? raw.finalization
       : {};
+    const coachIds = new Set(["find-vacancies", "match-score", "vacancy-actions", "live-safety"]);
+    const coachList = (value) => Array.isArray(value)
+      ? [...new Set(value.filter((id) => coachIds.has(id)))]
+      : [];
     return {
       version: VERSION,
       completed: raw.completed === true,
@@ -58,8 +66,13 @@
       finalization: {
         syncStatus: syncStatuses.has(finalization.syncStatus) ? finalization.syncStatus : "not_started",
         syncCompletedAt: typeof finalization.syncCompletedAt === "string" ? finalization.syncCompletedAt : null,
-        error: typeof finalization.error === "string" ? finalization.error : null,
+        safeErrorCode: SAFE_FINALIZATION_CODES.has(finalization.safeErrorCode)
+          ? finalization.safeErrorCode
+          : null,
       },
+      completedCoachMarks: coachList(raw.completedCoachMarks),
+      dismissedCoachMarks: coachList(raw.dismissedCoachMarks),
+      updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
     };
   }
 
@@ -150,6 +163,7 @@
     let forcedReview = false;
 
     function saveProgress() {
+      progress.updatedAt = new Date().toISOString();
       persist(global.localStorage, PERMANENT_KEY, progress);
     }
 
@@ -535,8 +549,12 @@
         summary.append(row);
       }
       main.append(summary);
-      if (progress.finalization.error) {
-        const note = element("div", "onboarding-finalization-note", progress.finalization.error);
+      if (progress.finalization.safeErrorCode === "sync_failed") {
+        const note = element(
+          "div",
+          "onboarding-finalization-note",
+          "Первый поиск не завершён. Настройки сохранены; поиск можно безопасно повторить.",
+        );
         main.append(note);
       }
 
@@ -611,21 +629,25 @@
           return;
         }
         if (runSync && progress.finalization.syncStatus !== "succeeded") {
-          progress.finalization = { syncStatus: "running", syncCompletedAt: null, error: null };
+          progress.finalization = {
+            syncStatus: "not_started",
+            syncCompletedAt: null,
+            safeErrorCode: null,
+          };
           saveProgress();
           try {
             await api("/api/sync", { method: "POST", body: JSON.stringify({ score: true }) });
             progress.finalization = {
               syncStatus: "succeeded",
               syncCompletedAt: new Date().toISOString(),
-              error: null,
+              safeErrorCode: null,
             };
             saveProgress();
-          } catch (error) {
+          } catch (_error) {
             progress.finalization = {
               syncStatus: "failed",
-              syncCompletedAt: null,
-              error: `Первый поиск не завершён: ${String(error?.message || error)}`,
+              syncCompletedAt: new Date().toISOString(),
+              safeErrorCode: "sync_failed",
             };
             saveProgress();
             renderSummary();
@@ -639,14 +661,12 @@
             method: "POST",
             body: JSON.stringify(updatedConfig),
           });
-        } catch (error) {
-          progress.finalization.error = `Поиск завершён, но настройку не удалось сохранить: ${String(error?.message || error)}`;
-          saveProgress();
+        } catch (_error) {
           renderSummary();
+          setInlineError("Настройки подготовлены, но версию не удалось сохранить. Повторите завершение.");
           return;
         }
         progress.completed = true;
-        progress.finalization.error = null;
         saveProgress();
         session.forceReview = false;
         saveSession();
@@ -668,22 +688,38 @@
       }
     }
 
-    async function boot() {
-      progress = parseProgress();
-      session = parseSession();
-      await loadResources();
-      if (readiness === "loading" || readiness === "unknown") return readiness;
+    function resolvedOnboardingState() {
       const serverVersion = Number(resources.config.data.ui?.onboarding_version || 0);
-      const next = nextOnboardingState({
+      return nextOnboardingState({
         readiness,
         serverVersion,
         progress,
         session,
         resources,
       });
+    }
+
+    function applyOnboardingState(next, { reconcileOpenWizard = false } = {}) {
       forcedReview = next.forced === true;
-      if (next.kind === "step") openWizard(next.step);
-      else if (next.kind === "summary") openWizard("summary");
+      const step = next.kind === "step" ? next.step : (next.kind === "summary" ? "summary" : null);
+      if (step) {
+        if (panel && reconcileOpenWizard) renderStep(step);
+        else if (!panel) openWizard(step);
+      } else if (next.kind === "today" && panel && reconcileOpenWizard) {
+        overlays.closeBlocking();
+        panel = null;
+        currentStep = null;
+        renderReadiness();
+      }
+      return next;
+    }
+
+    async function boot() {
+      progress = parseProgress();
+      session = parseSession();
+      await loadResources();
+      if (readiness === "loading" || readiness === "unknown") return readiness;
+      const next = applyOnboardingState(resolvedOnboardingState());
       return next.kind;
     }
 
@@ -695,10 +731,34 @@
       return boot();
     }
 
-    global.addEventListener("storage", (event) => {
+    function onboardingProgressSignature(value) {
+      return JSON.stringify({
+        completed: value.completed,
+        completedSteps: value.completedSteps,
+        pendingResumeActivationId: value.pendingResumeActivationId,
+        finalization: value.finalization,
+      });
+    }
+
+    global.addEventListener("storage", async (event) => {
       if (event.key !== PERMANENT_KEY) return;
-      progress = parseProgress();
-      if (panel && currentStep) renderStep(currentStep);
+      const previousSignature = onboardingProgressSignature(progress);
+      const nextProgress = parseProgress();
+      progress = nextProgress;
+      if (previousSignature === onboardingProgressSignature(nextProgress)) return;
+      try {
+        await loadResources();
+        if (readiness === "loading" || readiness === "unknown") return;
+        applyOnboardingState(resolvedOnboardingState(), { reconcileOpenWizard: true });
+      } catch (error) {
+        notifications?.push({
+          type: "error",
+          scope: "onboarding-reconcile",
+          code: "resource-refresh-failed",
+          title: "Не удалось обновить состояние настройки",
+          message: String(error?.message || error),
+        });
+      }
     });
 
     return Object.freeze({
@@ -768,16 +828,47 @@
   }
 
   function guidanceProgress() {
-    const raw = safeJson(global.localStorage, GUIDANCE_KEY, null);
+    const onboarding = parseProgress();
+    const legacy = safeJson(global.localStorage, GUIDANCE_KEY, null);
+    const completed = onboarding.completedCoachMarks.length
+      ? onboarding.completedCoachMarks
+      : legacy?.completed;
+    const dismissed = onboarding.dismissedCoachMarks.length
+      ? onboarding.dismissedCoachMarks
+      : legacy?.dismissed;
     return {
       version: VERSION,
-      completed: Array.isArray(raw?.completed)
-        ? [...new Set(raw.completed.filter((id) => COACH_MARKS.some((mark) => mark.id === id)))]
+      completed: Array.isArray(completed)
+        ? [...new Set(completed.filter((id) => COACH_MARKS.some((mark) => mark.id === id)))]
         : [],
-      dismissed: Array.isArray(raw?.dismissed)
-        ? [...new Set(raw.dismissed.filter((id) => COACH_MARKS.some((mark) => mark.id === id)))]
+      dismissed: Array.isArray(dismissed)
+        ? [...new Set(dismissed.filter((id) => COACH_MARKS.some((mark) => mark.id === id)))]
         : [],
     };
+  }
+
+  function persistGuidance(next) {
+    const onboarding = parseProgress();
+    onboarding.completedCoachMarks = [...next.completed];
+    onboarding.dismissedCoachMarks = [...next.dismissed];
+    onboarding.updatedAt = new Date().toISOString();
+    persist(global.localStorage, PERMANENT_KEY, onboarding);
+    global.localStorage.removeItem(GUIDANCE_KEY);
+  }
+
+  function resetGuidance() {
+    const onboarding = parseProgress();
+    onboarding.completedCoachMarks = [];
+    onboarding.dismissedCoachMarks = [];
+    onboarding.updatedAt = new Date().toISOString();
+    persist(global.localStorage, PERMANENT_KEY, onboarding);
+    global.localStorage.removeItem(GUIDANCE_KEY);
+    const currentSession = parseSession();
+    persist(global.sessionStorage, SESSION_KEY, {
+      ...currentSession,
+      coachShownThisSession: false,
+      coachSnoozed: false,
+    });
   }
 
   function eligibleAnchor(selector) {
@@ -837,12 +928,12 @@
             completed = true;
             const latest = guidanceProgress();
             if (!latest.completed.includes(mark.id)) latest.completed.push(mark.id);
-            persist(global.localStorage, GUIDANCE_KEY, latest);
+            persistGuidance(latest);
             overlays.closeTop("complete");
           });
           skip.addEventListener("click", () => {
             completed = true;
-            persist(global.localStorage, GUIDANCE_KEY, {
+            persistGuidance({
               version: VERSION,
               completed: progressState.completed,
               dismissed: COACH_MARKS.map((candidate) => candidate.id),
@@ -866,6 +957,7 @@
     deriveReadiness,
     nextOnboardingState,
     parseProgress,
+    resetGuidance,
     createController,
     createGuidanceController,
     COACH_MARKS,

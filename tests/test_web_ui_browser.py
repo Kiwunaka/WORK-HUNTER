@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
-from work_hunter.models import Job, Resume
+from work_hunter.models import CalendarEvent, Job, Resume
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
 
@@ -265,6 +265,21 @@ def test_route_resolver_uses_first_recognized_value_and_loaded_source_keys(brows
     assert invalid["warnings"] == ["invalid_source"]
 
 
+def test_route_resolver_preserves_unknown_query_spelling_and_hash(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+
+    resolved = page.evaluate(
+        """() => WorkHunterUI.route.resolve(
+          "/jobs", "?filter=all&note=a%20b&note=a+b", "#part%20one"
+        )"""
+    )
+
+    assert resolved["canonicalUrl"] == (
+        "/jobs?filter=all&note=a%20b&note=a+b#part%20one"
+    )
+
+
 def test_popstate_reapplies_canonical_route_without_extra_history(browser_app):
     page, base_url, _ = browser_app
     page.goto(base_url + "/today", wait_until="domcontentloaded")
@@ -279,6 +294,109 @@ def test_popstate_reapplies_canonical_route_without_extra_history(browser_app):
 
     expect(page).to_have_url(base_url + "/analytics?tab=overview")
     assert page.evaluate("history.length") == initial_length + 1
+
+
+@pytest.mark.parametrize(
+    ("label", "canonical", "view_id"),
+    [
+        ("Сегодня", "/today", "view-today"),
+        ("Вакансии", "/jobs?filter=all", "view-inbox"),
+        ("Отклики", "/applications?tab=pipeline", "view-agent"),
+        ("Календарь", "/calendar", "view-calendar"),
+        ("Ассистент", "/assistant", "view-chat"),
+        ("Аналитика", "/analytics?tab=overview", "view-stats"),
+        ("Источники", "/sources", "view-sources"),
+        ("Настройки", "/settings?section=profile", "view-settings"),
+    ],
+)
+def test_primary_navigation_clicks_use_canonical_urls(
+    browser_app, label, canonical, view_id
+):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="networkidle")
+    page.evaluate("window.__WORK_HUNTER_TEST_LEGACY_ROOT__ = false")
+
+    page.locator(".sidebar").get_by_role("button", name=label, exact=True).click()
+
+    expect(page).to_have_url(base_url + canonical)
+    expect(page.locator(f"#{view_id}")).to_be_visible()
+
+
+def test_vacancy_saved_filter_and_job_deep_link_drive_rendered_state(browser_app):
+    page, base_url, app = browser_app
+    saved = app.storage.list_jobs(limit=1)[0]
+    app.storage.set_status(saved.id, "saved")
+    app.storage.upsert_job(
+        Job(source="browser-fixture", source_id="new-job", url="https://x/new", title="New Job")
+    )
+
+    page.goto(
+        f"{base_url}/jobs?filter=saved&job={saved.id}",
+        wait_until="networkidle",
+    )
+
+    expect(page.locator("#jobs-body tr")).to_have_count(1)
+    expect(page.locator("#jobs-body")).to_contain_text("Browser Fixture Job")
+    expect(page.locator("#jobs-body")).not_to_contain_text("New Job")
+    expect(page.locator("#job-detail h2")).to_have_text("Browser Fixture Job")
+
+
+def test_assistant_job_deep_link_attaches_the_requested_job(browser_app):
+    page, base_url, app = browser_app
+    job = app.storage.list_jobs(limit=1)[0]
+
+    page.goto(f"{base_url}/assistant?job={job.id}", wait_until="networkidle")
+
+    expect(page.locator("#chat-attach-job")).to_be_checked()
+    assert page.evaluate("state.chatJobId") == job.id
+
+
+def test_calendar_event_deep_link_opens_the_event_editor(browser_app):
+    page, base_url, app = browser_app
+    event_id = app.storage.save_event(
+        CalendarEvent(
+            title="Техническое интервью",
+            event_type="interview",
+            event_date="2026-07-15T12:00:00+03:00",
+            notes="Подготовить вопросы",
+        )
+    )
+
+    page.goto(f"{base_url}/calendar?event={event_id}", wait_until="networkidle")
+
+    expect(page.locator("#event-form")).to_be_visible()
+    expect(page.locator("#event-form-title")).to_have_text("Редактировать событие")
+    expect(page.locator("#event-title-input")).to_have_value("Техническое интервью")
+
+
+@pytest.mark.parametrize(
+    ("query", "panel"),
+    [("approval=7", "approvals"), ("run=9", "runs"), ("operation=11", "runs")],
+)
+def test_application_record_deep_links_select_the_matching_panel(
+    browser_app, query, panel
+):
+    page, base_url, _ = browser_app
+
+    page.goto(
+        f"{base_url}/applications?tab=agent&{query}",
+        wait_until="networkidle",
+    )
+
+    expect(page.locator(f".agent-tab[data-agent-panel='{panel}']")).to_have_class(
+        re.compile(r"\bactive\b")
+    )
+
+
+def test_loaded_sources_remove_an_invalid_pending_source(browser_app):
+    page, base_url, _ = browser_app
+
+    page.goto(
+        base_url + "/jobs?filter=all&source=missing-source",
+        wait_until="networkidle",
+    )
+
+    expect(page).to_have_url(base_url + "/jobs?filter=all")
 
 
 def test_static_and_dynamic_controls_work_without_inline_handlers(browser_app):
@@ -1503,6 +1621,128 @@ def test_onboarding_resume_activation_retry_does_not_create_duplicate(browser_ap
     assert "resume" in progress["completedSteps"]
 
 
+def test_onboarding_progress_rejects_raw_errors_and_unsupported_running_state(
+    browser_app,
+):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+
+    parsed = page.evaluate(
+        """
+        () => {
+          localStorage.setItem('work-hunter:onboarding:v2', JSON.stringify({
+            version: 2,
+            completed: false,
+            completedSteps: [],
+            pendingResumeActivationId: null,
+            finalization: {
+              syncStatus: 'running',
+              syncCompletedAt: null,
+              error: 'secret backend details'
+            }
+          }));
+          return WorkHunterUI.onboarding.parseProgress();
+        }
+        """
+    )
+
+    assert parsed["finalization"] == {
+        "syncStatus": "not_started",
+        "syncCompletedAt": None,
+        "safeErrorCode": None,
+    }
+    assert "secret backend details" not in json.dumps(parsed)
+
+
+def test_cross_tab_onboarding_completion_closes_an_obsolete_wizard(browser_app):
+    page, base_url, app = browser_app
+    page.goto(base_url + "/today?__first_run=1", wait_until="networkidle")
+    expect(page.locator("[data-onboarding-step='goal']")).to_be_visible()
+
+    config = app.config
+    config["profiles"]["default"]["desired_roles"] = ["Backend Developer"]
+    config["profiles"]["default"]["queries"] = ["Backend Developer"]
+    config["sources"]["hh"]["enabled"] = True
+    config["ui"]["onboarding_version"] = 2
+    app.save_config(config)
+    app.storage.save_resume(
+        Resume(
+            name="Cross-tab CV",
+            body="Python backend",
+            profile_id="default",
+            is_active=True,
+        )
+    )
+
+    page.evaluate(
+        """
+        () => {
+          const value = JSON.stringify({
+            version: 2,
+            completed: true,
+            completedSteps: ['goal', 'sources', 'resume'],
+            pendingResumeActivationId: null,
+            finalization: {
+              syncStatus: 'succeeded',
+              syncCompletedAt: new Date().toISOString(),
+              safeErrorCode: null
+            },
+            completedCoachMarks: [],
+            dismissedCoachMarks: [],
+            updatedAt: new Date().toISOString()
+          });
+          localStorage.setItem('work-hunter:onboarding:v2', value);
+          window.dispatchEvent(new StorageEvent('storage', {
+            key: 'work-hunter:onboarding:v2',
+            newValue: value
+          }));
+        }
+        """
+    )
+
+    expect(page.locator("[data-onboarding-step]")).to_have_count(0)
+
+
+def test_show_tips_again_preserves_onboarding_session_fields(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/settings?section=help", wait_until="networkidle")
+    page.evaluate(
+        """
+        () => {
+          const progress = WorkHunterUI.onboarding.parseProgress();
+          progress.completedCoachMarks = ['find-vacancies'];
+          progress.dismissedCoachMarks = ['live-safety'];
+          localStorage.setItem('work-hunter:onboarding:v2', JSON.stringify(progress));
+          sessionStorage.setItem('work-hunter:guidance-session:v2', JSON.stringify({
+            onboardingDeferred: true,
+            forceReview: true,
+            coachShownThisSession: true,
+            coachSnoozed: true
+          }));
+        }
+        """
+    )
+
+    page.locator("[data-action-id='guidance.restart']").click()
+
+    values = page.evaluate(
+        """
+        () => ({
+          session: JSON.parse(sessionStorage.getItem('work-hunter:guidance-session:v2')),
+          progress: WorkHunterUI.onboarding.parseProgress()
+        })
+        """
+    )
+    assert values["session"] == {
+        "onboardingDeferred": True,
+        "forceReview": True,
+        "coachShownThisSession": False,
+        "coachSnoozed": False,
+    }
+    assert values["progress"]["completedCoachMarks"] == []
+    assert values["progress"]["dismissedCoachMarks"] == []
+
+
 def test_today_fresh_matches_exclude_unscored_and_fall_back_to_fetched(browser_app):
     page, base_url, _ = browser_app
     page.goto(base_url + "/today?__today=1", wait_until="domcontentloaded")
@@ -1616,6 +1856,47 @@ def test_today_route_renders_bounded_real_sections(browser_app):
     )
 
 
+@pytest.mark.parametrize(
+    ("action_id", "expected_url"),
+    [
+        ("today.open-vacancy", "/jobs?filter=all&job=1"),
+        ("today.open-event", "/calendar?event=23"),
+        ("today.open-approval", "/applications?tab=agent&approval=31"),
+        ("today.focus.job", "/jobs?filter=all&job=1"),
+        ("today.focus.event", "/calendar?event=23"),
+        ("today.focus.approval", "/applications?tab=agent&approval=31"),
+    ],
+)
+def test_today_record_actions_keep_record_ids_in_canonical_urls(
+    browser_app, action_id, expected_url
+):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today?__today=1", wait_until="networkidle")
+    page.evaluate(
+        """
+        () => WorkHunterUI.today.render({
+          readiness: 'ready',
+          timeZone: 'UTC',
+          resourceStates: {},
+          focus: [
+            {kind:'job', id:1, title:'Focus vacancy', score:{total_score:91}},
+            {kind:'event', id:23, title:'Focus event'},
+            {kind:'approval', id:31, action_type:'apply'}
+          ],
+          freshMatches: [
+            {id:1, title:'Fresh vacancy', score:{total_score:91}}
+          ],
+          upcoming: [{id:23, title:'Upcoming event', event_date:'2026-07-15'}],
+          pendingDecision: {id:31, action_type:'apply'}
+        }, {navigate: navigateFromToday})
+        """
+    )
+
+    page.locator(f"[data-action-id='{action_id}']").click()
+
+    expect(page).to_have_url(base_url + expected_url)
+
+
 def test_vacancy_workspace_exposes_stable_capability_action_ids(browser_app):
     page, base_url, _ = browser_app
     page.goto(base_url + "/jobs", wait_until="networkidle")
@@ -1666,6 +1947,51 @@ def test_destination_subtabs_follow_canonical_urls(browser_app):
     page.goto(base_url + "/settings?section=help", wait_until="networkidle")
     expect(page.locator("[data-settings-panel='help']")).to_be_visible()
     expect(page.locator("[data-action-id='onboarding.restart']")).to_be_visible()
+
+
+@pytest.mark.parametrize(
+    ("url", "selector", "next_value", "expected_url"),
+    [
+        (
+            "/applications?tab=pipeline",
+            "[data-applications-tab='pipeline']",
+            "agent",
+            "/applications?tab=agent",
+        ),
+        (
+            "/analytics?tab=overview",
+            "[data-analytics-tab='overview']",
+            "trends",
+            "/analytics?tab=trends",
+        ),
+        (
+            "/settings?section=profile",
+            "[data-settings-tab='profile']",
+            "resumes",
+            "/settings?section=resumes",
+        ),
+    ],
+)
+def test_destination_tablists_support_arrow_key_navigation(
+    browser_app, url, selector, next_value, expected_url
+):
+    page, base_url, _ = browser_app
+    page.goto(base_url + url, wait_until="networkidle")
+    active = page.locator(selector)
+    active.focus()
+
+    page.keyboard.press("ArrowRight")
+
+    expect(page).to_have_url(base_url + expected_url)
+    expect(page.locator("[role='tab'][aria-selected='true']")).to_have_attribute(
+        "tabindex", "0"
+    )
+    assert page.evaluate(
+        """
+        expected => Object.values(document.activeElement?.dataset || {}).includes(expected)
+        """,
+        next_value,
+    ) is True
 
 
 @pytest.mark.parametrize(
@@ -1720,6 +2046,6 @@ def test_contextual_guidance_shows_one_mark_and_persists_completion(browser_app)
     page.locator("[data-coach-complete]").click()
     expect(page.locator("[data-coach-id]")).to_have_count(0)
     completed = page.evaluate(
-        "() => JSON.parse(localStorage.getItem('work-hunter:guidance:v2')).completed"
+        "() => WorkHunterUI.onboarding.parseProgress().completedCoachMarks"
     )
     assert completed == ["find-vacancies"]
