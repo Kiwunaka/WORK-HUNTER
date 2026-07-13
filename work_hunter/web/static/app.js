@@ -1985,6 +1985,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadEvents().catch(() => {});
   loadSearches().catch(() => {});
   startSearchAlerts();
+  window.appOnboarding = window.WorkHunterUI.onboarding.createController({
+    api,
+    notifications: window.appNotifications,
+    overlays: window.appOverlays,
+  });
+  window.appOnboarding.boot().catch((error) => {
+    notifyError("onboarding", error, "Не удалось проверить первоначальную настройку");
+  });
 });
 
 let editingResumeId = 0;

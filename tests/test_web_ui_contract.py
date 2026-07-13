@@ -349,6 +349,20 @@ def test_ui_uses_feedback_controller_instead_of_browser_alerts():
     assert not re.search(r"(?<![\w.])alert\(", app)
 
 
+def test_onboarding_asset_and_accessible_wizard_contract():
+    html = _read_static("index.html")
+    onboarding = _read_static("ui-onboarding.js")
+
+    assert html.index('/ui-feedback.js') < html.index('/ui-onboarding.js') < html.index('/app.js')
+    assert 'work-hunter:onboarding:v2' in onboarding
+    assert 'work-hunter:guidance-session:v2' in onboarding
+    assert "deriveReadiness" in onboarding
+    assert "createController" in onboarding
+    assert 'data-onboarding-step' in onboarding
+    assert 'id="onboarding-roles"' in onboarding
+    assert 'id="onboarding-resume-body"' in onboarding
+
+
 def test_static_and_dynamic_actions_avoid_inline_javascript():
     index = _read_static("index.html")
     app = _read_static("app.js")

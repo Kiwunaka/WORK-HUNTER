@@ -135,6 +135,16 @@ def browser_app(tmp_path):
                 context.route("**/*", keep_browser_requests_local)
                 context.on("request", lambda request: request_urls.append(request.url))
                 page = context.new_page()
+                page.add_init_script(
+                    """
+                    if (!location.search.includes('__first_run=1')) {
+                      sessionStorage.setItem(
+                        'work-hunter:guidance-session:v2',
+                        JSON.stringify({onboardingDeferred: true, forceReview: false})
+                      );
+                    }
+                    """
+                )
                 setattr(
                     page,
                     "expect_console_error",
@@ -1341,3 +1351,143 @@ def test_hh_lab_live_action_cancel_and_literal_confirmation(browser_app):
     assert len(mutations) == 1
     assert mutations[0]["confirm"] is True
     assert mutations[0]["body"] == {"token": "secret-value", "publish": True}
+
+
+def test_genuine_new_install_starts_onboarding_at_goal(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today?__first_run=1", wait_until="networkidle")
+
+    expect(page.locator("[data-onboarding-step='goal']")).to_be_visible()
+    expect(page.get_by_text("Шаг 1 из 3")).to_be_visible()
+    expect(page.locator("#onboarding-roles")).not_to_have_value("")
+
+
+def test_failed_readiness_request_never_opens_onboarding(browser_app):
+    page, base_url, _ = browser_app
+    page.expect_console_error(
+        "Failed to load resource: the server responded with a status of 500 (Internal Server Error)"
+    )
+    page.route(
+        "**/api/resumes?profile_id=*",
+        lambda route: route.fulfill(
+            status=500,
+            content_type="application/json",
+            body='{"error":"failed"}',
+        ),
+    )
+    page.goto(base_url + "/today?__first_run=1", wait_until="networkidle")
+
+    expect(page.locator("[data-readiness-state='unknown']")).to_be_visible()
+    expect(page.locator("[data-onboarding-step]")).to_have_count(0)
+
+
+def test_onboarding_deferral_survives_reload_in_same_tab(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today?__first_run=1", wait_until="networkidle")
+    page.locator("[data-onboarding-defer]").click()
+    expect(page.locator("[data-onboarding-step]")).to_have_count(0)
+
+    page.reload(wait_until="networkidle")
+    expect(page.locator("[data-onboarding-step]")).to_have_count(0)
+    assert page.evaluate(
+        "() => JSON.parse(sessionStorage.getItem('work-hunter:guidance-session:v2')).onboardingDeferred"
+    ) is True
+
+
+def test_onboarding_completes_three_steps_and_starts_first_search(browser_app):
+    page, base_url, _ = browser_app
+    sync_payloads: list[dict[str, object]] = []
+
+    def sync(route):
+        sync_payloads.append(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"status":"ok","added":0,"scored":0}',
+        )
+
+    page.route("**/api/sync", sync)
+    page.goto(base_url + "/today?__first_run=1", wait_until="networkidle")
+
+    page.locator("#onboarding-roles").fill("Python Developer\nBackend Engineer")
+    page.locator("#onboarding-skills").fill("Python, FastAPI, PostgreSQL")
+    page.locator("[data-onboarding-next]").click()
+    expect(page.locator("[data-onboarding-step='sources']")).to_be_visible()
+
+    page.locator("[data-onboarding-next]").click()
+    expect(page.locator("[data-onboarding-step='resume']")).to_be_visible()
+    page.locator("#onboarding-resume-name").fill("Основное резюме")
+    page.locator("#onboarding-resume-body").fill("Python developer with production experience")
+    page.locator("[data-onboarding-next]").click()
+    expect(page.locator("[data-onboarding-step='summary']")).to_be_visible()
+
+    page.locator("[data-onboarding-finish]").click()
+    expect(page.locator("[data-onboarding-step]")).to_have_count(0)
+    assert sync_payloads == [{"score": True}]
+    config = page.evaluate("() => fetch('/api/config').then(response => response.json())")
+    assert config["ui"]["onboarding_version"] == 2
+    resumes = page.evaluate(
+        "() => fetch('/api/resumes?profile_id=default').then(response => response.json())"
+    )
+    assert len(resumes) == 1
+    assert resumes[0]["is_active"] is True
+
+
+def test_onboarding_resume_activation_retry_does_not_create_duplicate(browser_app):
+    page, base_url, _ = browser_app
+    page.add_init_script(
+        """
+        if (location.search.includes('__first_run=1') && !localStorage.getItem('work-hunter:onboarding:v2')) {
+          localStorage.setItem('work-hunter:onboarding:v2', JSON.stringify({
+            version: 2, completed: false, completedSteps: ['goal', 'sources'],
+            pendingResumeActivationId: null,
+            finalization: {syncStatus: 'not_started', syncCompletedAt: null, error: null}
+          }));
+        }
+        """
+    )
+    created_requests = 0
+    fail_activation = True
+
+    def resumes(route):
+        nonlocal created_requests
+        if route.request.method == "POST":
+            created_requests += 1
+        route.continue_()
+
+    def activation(route):
+        nonlocal fail_activation
+        if fail_activation:
+            fail_activation = False
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"error":"activation_failed"}',
+            )
+            return
+        route.continue_()
+
+    page.route("**/api/resumes", resumes)
+    page.route("**/api/resumes/*/activate", activation)
+    page.expect_console_error(
+        "Failed to load resource: the server responded with a status of 500 (Internal Server Error)"
+    )
+    page.goto(base_url + "/today?__first_run=1", wait_until="networkidle")
+    expect(page.locator("[data-onboarding-step='resume']")).to_be_visible()
+    page.locator("#onboarding-resume-name").fill("Retry CV")
+    page.locator("#onboarding-resume-body").fill("Python backend experience")
+    page.locator("[data-onboarding-next]").click()
+    expect(page.locator("[data-onboarding-error]")).to_be_visible()
+    pending_id = page.evaluate(
+        "() => JSON.parse(localStorage.getItem('work-hunter:onboarding:v2')).pendingResumeActivationId"
+    )
+    assert isinstance(pending_id, int)
+
+    page.reload(wait_until="networkidle")
+    expect(page.locator("[data-onboarding-step='summary']")).to_be_visible()
+    assert created_requests == 1
+    progress = page.evaluate(
+        "() => JSON.parse(localStorage.getItem('work-hunter:onboarding:v2'))"
+    )
+    assert progress["pendingResumeActivationId"] is None
+    assert "resume" in progress["completedSteps"]
