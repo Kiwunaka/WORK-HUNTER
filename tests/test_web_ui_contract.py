@@ -363,6 +363,38 @@ def test_onboarding_asset_and_accessible_wizard_contract():
     assert 'id="onboarding-resume-body"' in onboarding
 
 
+def test_primary_navigation_has_exactly_eight_russian_destinations_and_local_icons():
+    index = _read_static("index.html")
+    nav = re.search(r"<nav[^>]*>(.*?)</nav>", index, re.DOTALL)
+    assert nav is not None
+    markup = nav.group(1)
+
+    assert len(re.findall(r'class="nav-button(?: active)?"', markup)) == 8
+    for label in (
+        "Сегодня",
+        "Вакансии",
+        "Отклики",
+        "Календарь",
+        "Ассистент",
+        "Аналитика",
+        "Источники",
+        "Настройки",
+    ):
+        assert f">{label}<" in markup or label in markup
+    assert markup.count("<svg") == 8
+    assert "http://" not in markup
+    assert "https://" not in markup
+
+
+def test_shell_uses_system_typography_and_no_emoji_action_icons():
+    index = _read_static("index.html")
+    app = _read_static("app.js")
+    css = _read_static("app.css")
+
+    assert 'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' in css
+    assert "📤" not in index + app
+
+
 def test_static_and_dynamic_actions_avoid_inline_javascript():
     index = _read_static("index.html")
     app = _read_static("app.js")

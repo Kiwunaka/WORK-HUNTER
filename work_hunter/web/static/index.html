@@ -17,17 +17,15 @@
         <span>smart job search</span>
       </div>
     </div>
-    <nav>
-      <button class="nav-button" data-view="today">Сегодня</button>
-      <button class="nav-button active" data-view="inbox">Вакансии</button>
-      <button class="nav-button" data-view="calendar">Календарь</button>
-      <button class="nav-button" data-view="favorites">Избранное</button>
-      <button class="nav-button" data-view="chat">AI Ассистент</button>
-      <button class="nav-button" data-view="agent">HH Агент</button>
-      <button class="nav-button" data-view="settings">Настройки</button>
-      <button class="nav-button" data-view="sources">Источники</button>
-      <button class="nav-button" data-view="stats">Статистика</button>
-      <button class="nav-button" data-view="trends">Тренды</button>
+    <nav aria-label="Основная навигация">
+      <button class="nav-button active" data-view="today"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9h-9V3Z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15V3.5Z"/></svg><span>Сегодня</span></button>
+      <button class="nav-button" data-view="inbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v11H4z"/><path d="M9 7.5V5h6v2.5M4 12h16"/></svg><span>Вакансии</span></button>
+      <button class="nav-button" data-view="agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="m7 9 5 3 5-3M8 16h4"/></svg><span>Отклики</span></button>
+      <button class="nav-button" data-view="calendar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v14H4zM4 10h16M8 3v5M16 3v5"/></svg><span>Календарь</span></button>
+      <button class="nav-button" data-view="chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8M8 13h5"/></svg><span>Ассистент</span></button>
+      <button class="nav-button" data-view="stats"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V9h3v10M10.5 19V5h3v14M16 19v-7h3v7"/></svg><span>Аналитика</span></button>
+      <button class="nav-button" data-view="sources"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8 7 6a3 3 0 0 0-4 4l3 3a3 3 0 0 0 4 0l1-1M15 16l2 2a3 3 0 0 0 4-4l-3-3a3 3 0 0 0-4 0l-1 1M8 16l8-8"/></svg><span>Источники</span></button>
+      <button class="nav-button" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="m19 13.5 2 1-2 3.5-2-.5a8 8 0 0 1-2 1.2L14.5 21h-5L9 18.7a8 8 0 0 1-2-1.2l-2 .5-2-3.5 2-1a8 8 0 0 1 0-3l-2-1L5 6l2 .5a8 8 0 0 1 2-1.2L9.5 3h5l.5 2.3a8 8 0 0 1 2 1.2l2-.5 2 3.5-2 1a8 8 0 0 1 0 3Z"/></svg><span>Настройки</span></button>
     </nav>
     <div class="theme-toggle">
       <button id="theme-toggle-button" title="Переключить тему">Тёмная</button>
@@ -145,43 +143,43 @@
             <div id="ai-panel-resume" class="ai-panel-content active">
               <div class="ai-sub-section">
                 <h4>Советы для резюме</h4>
-                <button data-ui-action="get-resume-tips">Получить советы</button>
+                <button data-ui-action="get-resume-tips" data-action-id="job.ai.resume-tips">Получить советы</button>
                 <div id="resume-tips-output" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>ATS-резюме</h4>
-                <button data-ui-action="get-ats-resume">Сгенерировать</button>
+                <button data-ui-action="get-ats-resume" data-action-id="job.ai.ats-resume">Сгенерировать</button>
                 <div id="ats-resume-output" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>ATS-аудит</h4>
                 <textarea id="audit-resume-input" rows="6" placeholder="Вставь своё резюме сюда..." style="width:100%;margin-bottom:4px;"></textarea>
-                <button data-ui-action="get-ats-audit">Проверить</button>
+                <button data-ui-action="get-ats-audit" data-action-id="job.ai.ats-audit">Проверить</button>
                 <div id="ats-audit-output" class="ai-output"></div>
               </div>
             </div>
             <div id="ai-panel-analysis" class="ai-panel-content">
               <div class="ai-sub-section">
                 <h4>AI-fit оценка</h4>
-                <button data-ui-action="get-ai-fit">Оценить fit</button>
+                <button data-ui-action="get-ai-fit" data-action-id="job.ai.fit">Оценить fit</button>
                 <div id="ai-fit-score" class="ai-fit-badge" style="display:none;"></div>
                 <div id="ai-fit-reasoning" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>Саммари вакансии</h4>
-                <button data-ui-action="get-summary">Сделать саммари</button>
+                <button data-ui-action="get-summary" data-action-id="job.ai.summary">Сделать саммари</button>
                 <div id="summary-output" class="ai-output"></div>
               </div>
               <div class="ai-sub-section">
                 <h4>Питч опыта (STAR)</h4>
-                <button data-ui-action="get-experience-pitch">Сгенерировать питч</button>
+                <button data-ui-action="get-experience-pitch" data-action-id="job.ai.experience-pitch">Сгенерировать питч</button>
                 <div id="pitch-output" class="ai-output"></div>
               </div>
             </div>
             <div id="ai-panel-interview" class="ai-panel-content">
               <div class="ai-sub-section">
                 <h4>Вопросы к собеседованию</h4>
-                <button data-ui-action="get-interview-questions">Сгенерировать вопросы</button>
+                <button data-ui-action="get-interview-questions" data-action-id="job.ai.interview">Сгенерировать вопросы</button>
                 <div id="interview-questions-output" class="ai-output"></div>
               </div>
             </div>
@@ -199,7 +197,7 @@
               <div class="ai-sub-section">
                 <h4>Мои заметки</h4>
                 <textarea id="job-notes-input" rows="8" placeholder="Заметки об этой вакансии..." style="width:100%;margin-bottom:4px;"></textarea>
-                <button data-ui-action="save-job-note">Сохранить заметки</button>
+                <button data-ui-action="save-job-note" data-action-id="job.note.save">Сохранить заметки</button>
               </div>
             </div>
           </section>

@@ -493,6 +493,9 @@ def test_dynamic_busy_button_restores_label_on_success_and_error(browser_app):
     page.on("dialog", lambda dialog: dialog.dismiss())
     page.goto(base_url, wait_until="networkidle")
     page.locator("#jobs-body tr").filter(has_text="Busy").click()
+    page.locator("#job-detail details").filter(has_text="Дополнительно").locator(
+        "summary"
+    ).click()
     button = page.get_by_role("button", name="Структура")
     original = button.text_content()
     button.click()
@@ -1607,3 +1610,36 @@ def test_today_route_renders_bounded_real_sections(browser_app):
     expect(page.locator("#today-fresh-matches")).to_contain_text(
         "Нет оценённых новых вакансий"
     )
+
+
+def test_vacancy_workspace_exposes_stable_capability_action_ids(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/jobs", wait_until="networkidle")
+    page.locator("#jobs-body tr").first.click()
+
+    action_ids = set(
+        page.locator("#job-detail [data-action-id], #ai-panels [data-action-id]")
+        .evaluate_all("nodes => nodes.map(node => node.dataset.actionId)")
+    )
+    assert {
+        "job.save",
+        "job.hide",
+        "job.applied",
+        "job.note.save",
+        "job.letter.local",
+        "job.letter.ai",
+        "job.description.fetch",
+        "job.hh.plan",
+        "job.hh.live",
+        "job.telegram.share",
+        "job.ai.classify",
+        "job.ai.structure",
+        "job.ai.gap",
+        "job.ai.fit",
+        "job.ai.ats-audit",
+        "job.ai.ats-resume",
+        "job.ai.summary",
+        "job.ai.resume-tips",
+        "job.ai.interview",
+        "job.ai.experience-pitch",
+    } <= action_ids

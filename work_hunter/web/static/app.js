@@ -44,15 +44,15 @@ function notifyError(scope, error, title = "Не удалось выполнит
 
 const ROUTES = {
   today: { path: "/today", title: "Сегодня", summary: "Главные действия, новые совпадения и ближайшие события.", actions: false },
-  inbox: { path: "/jobs", title: "Jobs", summary: "Sync sources, then sort by score.", actions: true },
-  calendar: { path: "/calendar", title: "Calendar", summary: "Interviews, follow-ups, and reminders.", actions: false },
-  favorites: { path: "/favorites", title: "Favorites", summary: "Saved vacancies and notes.", actions: false },
-  chat: { path: "/chat", title: "AI Assistant", summary: "Chat with optional selected-job context.", actions: false },
-  agent: { path: "/agent", title: "HH Agent", summary: "Local HH runs, approvals, research, and dry-run apply plans.", actions: false },
-  settings: { path: "/settings", title: "Settings", summary: "Profiles, HH auth, AI backend, resumes, and config.", actions: false },
-  sources: { path: "/sources", title: "Sources", summary: "Source health and last sync state.", actions: false },
-  stats: { path: "/stats", title: "Stats", summary: "Pipeline and score distribution.", actions: false },
-  trends: { path: "/trends", title: "Trends", summary: "Run market trend analysis explicitly from this page.", actions: false },
+  inbox: { path: "/jobs", title: "Вакансии", summary: "Поиск, оценка и подготовка точных откликов.", actions: true },
+  calendar: { path: "/calendar", title: "Календарь", summary: "Собеседования, напоминания и следующие шаги.", actions: false },
+  favorites: { path: "/favorites", title: "Сохранённые", summary: "Сохранённые вакансии и заметки.", actions: false },
+  chat: { path: "/chat", title: "Ассистент", summary: "Диалог с контекстом выбранной вакансии.", actions: false },
+  agent: { path: "/agent", title: "Отклики", summary: "Воронка, подтверждения и автоматизация HH.", actions: false },
+  settings: { path: "/settings", title: "Настройки", summary: "Профили, резюме, интеграции и внешний вид.", actions: false },
+  sources: { path: "/sources", title: "Источники", summary: "Состояние подключений и последняя синхронизация.", actions: false },
+  stats: { path: "/stats", title: "Аналитика", summary: "Воронка, распределение score и источники.", actions: false },
+  trends: { path: "/trends", title: "Тренды", summary: "Анализ рынка по загруженным вакансиям.", actions: false },
 };
 
 const PATH_TO_VIEW = Object.fromEntries(Object.entries(ROUTES).map(([view, route]) => [route.path, view]));
@@ -204,19 +204,29 @@ function renderDetail(job) {
     <h2>${escapeHtml(job.title)}</h2>
     <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(safeExternalUrl(job.url))}" target="_blank" rel="noreferrer">открыть</a></p>
     <div class="detail-actions">
-      <button data-ui-action="mark-selected" data-status="saved">Сохранить</button>
-      <button data-ui-action="mark-selected" data-status="hidden">Скрыть</button>
-      <button data-ui-action="mark-selected" data-status="applied">Откликнулся</button>
-      <button data-ui-action="prepare-letter">Подготовить письмо</button>
-      <button data-ui-action="prepare-letter-ai">AI письмо</button>
-      <button data-ui-action="fetch-full-description">Полное описание</button>
-      <button data-ui-action="apply-hh" data-dry-run="true">HH apply plan</button>
-      <button data-ui-action="apply-hh" data-dry-run="false" class="primary">Confirm HH apply</button>
-      <button data-ui-action="share-to-telegram">📤 Telegram</button>
-      <button data-ui-action="smart-classify">AI классификация</button>
-      <button data-ui-action="parse-job-structure">Структура</button>
-      <button data-ui-action="run-gap-analysis">Gap-анализ</button>
+      <button data-ui-action="mark-selected" data-status="saved" data-action-id="job.save">Сохранить</button>
+      <button data-ui-action="mark-selected" data-status="hidden" data-action-id="job.hide">Скрыть</button>
+      <button data-ui-action="mark-selected" data-status="applied" data-action-id="job.applied">Откликнулся</button>
     </div>
+    <details class="detail-disclosure">
+      <summary>Подготовить</summary>
+      <div class="detail-actions">
+        <button data-ui-action="prepare-letter" data-action-id="job.letter.local">Подготовить письмо</button>
+        <button data-ui-action="prepare-letter-ai" data-action-id="job.letter.ai">AI-письмо</button>
+        <button data-ui-action="fetch-full-description" data-action-id="job.description.fetch">Загрузить описание</button>
+      </div>
+    </details>
+    <details class="detail-disclosure">
+      <summary>Дополнительно</summary>
+      <div class="detail-actions">
+        <button data-ui-action="apply-hh" data-dry-run="true" data-action-id="job.hh.plan">План отклика HH</button>
+        <button data-ui-action="apply-hh" data-dry-run="false" data-action-id="job.hh.live" class="danger-action">Отправить в HH</button>
+        <button data-ui-action="share-to-telegram" data-action-id="job.telegram.share">Поделиться в Telegram</button>
+        <button data-ui-action="smart-classify" data-action-id="job.ai.classify">AI-классификация</button>
+        <button data-ui-action="parse-job-structure" data-action-id="job.ai.structure">Структура</button>
+        <button data-ui-action="run-gap-analysis" data-action-id="job.ai.gap">Gap-анализ</button>
+      </div>
+    </details>
     <div class="section-title">Score</div>
     <div class="chips">
       <span class="chip">total ${escapeHtml(String(score?.total_score ?? "-"))}</span>
