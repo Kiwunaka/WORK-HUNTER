@@ -186,7 +186,7 @@
 
   function createOverlayManager({ sheetRoot, popoverRoot }) {
     const state = { blocking: null, childPopover: null, base: null };
-    const appSurfaces = [...document.querySelectorAll(".sidebar, .shell")];
+    const appSurfaces = [...document.querySelectorAll(".sidebar, .shell, .mobile-appbar")];
 
     function restoreTriggerFocus(trigger) {
       if (trigger instanceof HTMLElement && trigger.isConnected && !trigger.closest("[inert]")) {
@@ -220,20 +220,22 @@
       });
     }
 
-    function closeChildPopover({ restoreFocus = true } = {}) {
+    function closeChildPopover({ restoreFocus = true, reason = "programmatic" } = {}) {
       const record = state.childPopover;
       if (!record) return false;
       record.layer.remove();
       state.childPopover = null;
+      record.onClose?.(reason);
       if (restoreFocus) restoreTriggerFocus(record.trigger);
       return true;
     }
 
-    function closeBase({ restoreFocus = true } = {}) {
+    function closeBase({ restoreFocus = true, reason = "programmatic" } = {}) {
       const record = state.base;
       if (!record) return false;
       record.layer.remove();
       state.base = null;
+      record.onClose?.(reason);
       if (restoreFocus) restoreTriggerFocus(record.trigger);
       return true;
     }
@@ -245,6 +247,7 @@
       record.layer.remove();
       state.blocking = null;
       setBaseInert(false);
+      record.onClose?.("programmatic");
       restoreTriggerFocus(record.trigger);
       return true;
     }
@@ -280,6 +283,17 @@
       const record = { ...descriptor, layer, panel };
       state.base = record;
       popoverRoot.replaceChildren(layer);
+      if (descriptor.anchor instanceof Element) {
+        const rect = descriptor.anchor.getBoundingClientRect();
+        const width = Math.min(360, Math.max(260, global.innerWidth - 24));
+        const left = Math.max(12, Math.min(global.innerWidth - width - 12, rect.left));
+        const below = rect.bottom + 10;
+        const top = below + 240 < global.innerHeight ? below : Math.max(12, rect.top - 230);
+        panel.style.position = "fixed";
+        panel.style.width = `${width}px`;
+        panel.style.left = `${left}px`;
+        panel.style.top = `${top}px`;
+      }
       focusInitial(record);
       return { accepted: true, kind: descriptor.kind };
     }
@@ -301,9 +315,9 @@
         : openBase(descriptor);
     }
 
-    function closeTop() {
-      if (state.childPopover) return closeChildPopover();
-      if (state.base) return closeBase();
+    function closeTop(reason = "programmatic") {
+      if (state.childPopover) return closeChildPopover({ reason });
+      if (state.base) return closeBase({ reason });
       if (state.blocking?.dismissible !== false) return closeBlocking();
       return false;
     }
@@ -313,7 +327,7 @@
     }
 
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && closeTop()) {
+      if (event.key === "Escape" && closeTop("escape")) {
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
@@ -340,12 +354,12 @@
     document.addEventListener("pointerdown", (event) => {
       const child = state.childPopover;
       if (child && !child.panel.contains(event.target) && !child.trigger?.contains?.(event.target)) {
-        closeChildPopover();
+        closeChildPopover({ reason: "outside" });
         return;
       }
       const base = state.base;
       if (base && !base.panel.contains(event.target) && !base.trigger?.contains?.(event.target)) {
-        closeBase();
+        closeBase({ reason: "outside" });
       }
     }, true);
 

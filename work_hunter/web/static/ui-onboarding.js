@@ -22,7 +22,12 @@
   }
 
   function defaultSession() {
-    return { onboardingDeferred: false, forceReview: false };
+    return {
+      onboardingDeferred: false,
+      forceReview: false,
+      coachShownThisSession: false,
+      coachSnoozed: false,
+    };
   }
 
   function safeJson(storage, key, fallback) {
@@ -63,6 +68,8 @@
     return {
       onboardingDeferred: raw?.onboardingDeferred === true,
       forceReview: raw?.forceReview === true,
+      coachShownThisSession: raw?.coachShownThisSession === true,
+      coachSnoozed: raw?.coachSnoozed === true,
     };
   }
 
@@ -708,6 +715,151 @@
     });
   }
 
+  const GUIDANCE_KEY = "work-hunter:guidance:v2";
+  const COACH_MARKS = Object.freeze([
+    {
+      id: "find-vacancies",
+      route: "today",
+      anchor: '[data-guide="find-vacancies"]',
+      title: "Начните с поиска",
+      message: "Work Hunter соберёт вакансии из включённых источников и рассчитает score.",
+      eligible: (context) => canFind(context),
+    },
+    {
+      id: "match-score",
+      route: "vacancies",
+      anchor: '[data-guide="match-score"]',
+      title: "Score показывает приоритет",
+      message: "Чем выше score, тем ближе вакансия к вашей цели и навыкам.",
+      eligible: (context) => hasScoredJob(context),
+    },
+    {
+      id: "vacancy-actions",
+      route: "vacancies",
+      anchor: '[data-guide="vacancy-actions"]',
+      title: "Фиксируйте решение",
+      message: "Сохраните, скройте или отметьте отклик — история останется в Work Hunter.",
+      eligible: (context) => hasStatusActions(context),
+    },
+    {
+      id: "live-safety",
+      route: "vacancies",
+      anchor: '[data-guide="live-hh-action"]',
+      title: "Реальные действия защищены",
+      message: "Перед отправкой в HH вы увидите цель, резюме, письмо и точные последствия.",
+      eligible: (context) => hasLivePlan(context),
+    },
+  ]);
+
+  function canFind(context) {
+    return context?.canFind === true;
+  }
+
+  function hasScoredJob(context) {
+    return context?.hasScoredJob === true;
+  }
+
+  function hasStatusActions(context) {
+    return context?.hasStatusActions === true;
+  }
+
+  function hasLivePlan(context) {
+    return context?.hasLivePlan === true;
+  }
+
+  function guidanceProgress() {
+    const raw = safeJson(global.localStorage, GUIDANCE_KEY, null);
+    return {
+      version: VERSION,
+      completed: Array.isArray(raw?.completed)
+        ? [...new Set(raw.completed.filter((id) => COACH_MARKS.some((mark) => mark.id === id)))]
+        : [],
+      dismissed: Array.isArray(raw?.dismissed)
+        ? [...new Set(raw.dismissed.filter((id) => COACH_MARKS.some((mark) => mark.id === id)))]
+        : [],
+    };
+  }
+
+  function eligibleAnchor(selector) {
+    const anchor = document.querySelector(selector);
+    if (!(anchor instanceof HTMLElement) || !anchor.isConnected || anchor.closest("[inert]")) return null;
+    const rect = anchor.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.top >= global.innerHeight) return null;
+    const x = Math.max(0, Math.min(global.innerWidth - 1, rect.left + rect.width / 2));
+    const y = Math.max(0, Math.min(global.innerHeight - 1, rect.top + rect.height / 2));
+    const topmost = document.elementFromPoint(x, y);
+    return topmost && (topmost === anchor || anchor.contains(topmost)) ? anchor : null;
+  }
+
+  function createGuidanceController({ overlays } = {}) {
+    function updateSession(patch) {
+      const current = safeJson(global.sessionStorage, SESSION_KEY, {});
+      persist(global.sessionStorage, SESSION_KEY, { ...current, ...patch });
+    }
+
+    function schedule(route, context = {}) {
+      const sessionState = safeJson(global.sessionStorage, SESSION_KEY, {});
+      if (sessionState.coachShownThisSession === true || sessionState.coachSnoozed === true) {
+        return { accepted: false, reason: "session_limit" };
+      }
+      const progressState = guidanceProgress();
+      const mark = COACH_MARKS.find((candidate) => (
+        candidate.route === route
+        && !progressState.completed.includes(candidate.id)
+        && !progressState.dismissed.includes(candidate.id)
+        && candidate.eligible(context) === true
+        && eligibleAnchor(candidate.anchor)
+      ));
+      if (!mark) return { accepted: false, reason: "no_eligible_mark" };
+      const anchor = eligibleAnchor(mark.anchor);
+      let completed = false;
+      const result = overlays.request({
+        kind: "coachMark",
+        label: mark.title,
+        trigger: anchor,
+        anchor,
+        onClose(reason) {
+          if (!completed && ["escape", "outside"].includes(reason)) {
+            updateSession({ coachSnoozed: true });
+          }
+        },
+        render(root) {
+          root.classList.add("coach-mark");
+          root.dataset.coachId = mark.id;
+          const eyebrow = element("div", "coach-mark-eyebrow", "Совет");
+          const title = element("h3", "", mark.title);
+          const message = element("p", "", mark.message);
+          const actions = element("div", "coach-mark-actions");
+          const skip = element("button", "", "Пропустить знакомство");
+          const done = element("button", "primary", "Понятно");
+          done.dataset.coachComplete = "";
+          done.addEventListener("click", () => {
+            completed = true;
+            const latest = guidanceProgress();
+            if (!latest.completed.includes(mark.id)) latest.completed.push(mark.id);
+            persist(global.localStorage, GUIDANCE_KEY, latest);
+            overlays.closeTop("complete");
+          });
+          skip.addEventListener("click", () => {
+            completed = true;
+            persist(global.localStorage, GUIDANCE_KEY, {
+              version: VERSION,
+              completed: progressState.completed,
+              dismissed: COACH_MARKS.map((candidate) => candidate.id),
+            });
+            overlays.closeTop("dismissed");
+          });
+          actions.append(skip, done);
+          root.append(eyebrow, title, message, actions);
+        },
+      });
+      if (result.accepted) updateSession({ coachShownThisSession: true });
+      return result;
+    }
+
+    return Object.freeze({ schedule, progress: guidanceProgress });
+  }
+
   UI.onboarding = Object.freeze({
     PERMANENT_KEY,
     SESSION_KEY,
@@ -715,5 +867,11 @@
     nextOnboardingState,
     parseProgress,
     createController,
+    createGuidanceController,
+    COACH_MARKS,
+    canFind,
+    hasScoredJob,
+    hasStatusActions,
+    hasLivePlan,
   });
 })(window);

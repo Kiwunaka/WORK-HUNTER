@@ -140,7 +140,12 @@ def browser_app(tmp_path):
                     if (!location.search.includes('__first_run=1')) {
                       sessionStorage.setItem(
                         'work-hunter:guidance-session:v2',
-                        JSON.stringify({onboardingDeferred: true, forceReview: false})
+                        JSON.stringify({
+                          onboardingDeferred: true,
+                          forceReview: false,
+                          coachShownThisSession: true,
+                          coachSnoozed: false
+                        })
                       );
                     }
                     if (!location.search.includes('__first_run=1') && !location.search.includes('__today=1')) {
@@ -1661,3 +1666,60 @@ def test_destination_subtabs_follow_canonical_urls(browser_app):
     page.goto(base_url + "/settings?section=help", wait_until="networkidle")
     expect(page.locator("[data-settings-panel='help']")).to_be_visible()
     expect(page.locator("[data-action-id='onboarding.restart']")).to_be_visible()
+
+
+@pytest.mark.parametrize(
+    ("width", "expected_mode"),
+    [(1440, "full"), (900, "compact"), (680, "mobile")],
+)
+def test_responsive_shell_modes_have_no_horizontal_overflow(
+    browser_app, width, expected_mode
+):
+    page, base_url, _ = browser_app
+    page.set_viewport_size({"width": width, "height": 844 if width == 680 else 900})
+    page.goto(base_url + "/today?__today=1", wait_until="networkidle")
+
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    ) is True
+    if expected_mode == "full":
+        expect(page.locator(".sidebar")).to_be_visible()
+        assert page.locator(".sidebar").bounding_box()["width"] >= 220
+    elif expected_mode == "compact":
+        expect(page.locator(".sidebar")).to_be_visible()
+        assert page.locator(".sidebar").bounding_box()["width"] <= 80
+    else:
+        expect(page.locator(".sidebar")).to_be_hidden()
+        expect(page.locator("#mobile-appbar")).to_be_visible()
+        page.locator("#mobile-menu-button").click()
+        expect(page.locator("[data-mobile-destination]")).to_have_count(8)
+
+
+def test_contextual_guidance_shows_one_mark_and_persists_completion(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today?__today=1", wait_until="networkidle")
+    result = page.evaluate(
+        """
+        () => {
+          localStorage.removeItem('work-hunter:guidance:v2');
+          const raw = JSON.parse(sessionStorage.getItem('work-hunter:guidance-session:v2') || '{}');
+          sessionStorage.setItem('work-hunter:guidance-session:v2', JSON.stringify({
+            ...raw, coachShownThisSession: false, coachSnoozed: false
+          }));
+          window.testGuidance = WorkHunterUI.onboarding.createGuidanceController({
+            overlays: window.appOverlays
+          });
+          return window.testGuidance.schedule('today', {
+            canFind: true, hasScoredJob: false, hasStatusActions: false, hasLivePlan: false
+          });
+        }
+        """
+    )
+    assert result["accepted"] is True
+    expect(page.locator("[data-coach-id='find-vacancies']")).to_be_visible()
+    page.locator("[data-coach-complete]").click()
+    expect(page.locator("[data-coach-id]")).to_have_count(0)
+    completed = page.evaluate(
+        "() => JSON.parse(localStorage.getItem('work-hunter:guidance:v2')).completed"
+    )
+    assert completed == ["find-vacancies"]

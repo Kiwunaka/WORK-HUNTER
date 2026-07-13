@@ -270,6 +270,7 @@
     find.type = "button";
     find.className = "primary";
     find.dataset.actionId = "today.find-vacancies";
+    find.dataset.guide = "find-vacancies";
     find.textContent = "Найти вакансии";
     find.addEventListener("click", () => navigate?.("inbox"));
     readinessRoot.append(readinessCopy, find);

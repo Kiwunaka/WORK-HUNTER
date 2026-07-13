@@ -445,6 +445,27 @@ def test_destination_subview_switchers_are_url_synchronized():
     assert 'window.history.pushState' in app
 
 
+def test_guidance_anchors_mobile_shell_and_reduced_motion_contract():
+    index = _read_static("index.html")
+    app = _read_static("app.js")
+    onboarding = _read_static("ui-onboarding.js")
+    today = _read_static("ui-today.js")
+    css = _read_static("app.css")
+    combined = index + app + today
+
+    for guide_id in (
+        "find-vacancies",
+        "match-score",
+        "vacancy-actions",
+        "live-hh-action",
+    ):
+        assert f'"{guide_id}"' in onboarding
+        assert f'data-guide="{guide_id}"' in combined or f'dataset.guide = "{guide_id}"' in combined
+    assert 'id="mobile-menu-button"' in index
+    assert "function openMobileMenu" in app
+    assert "@media (prefers-reduced-motion: reduce)" in css
+
+
 def test_static_and_dynamic_actions_avoid_inline_javascript():
     index = _read_static("index.html")
     app = _read_static("app.js")

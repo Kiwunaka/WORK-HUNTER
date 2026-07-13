@@ -167,10 +167,11 @@ function renderJobs() {
     bindJobRowActivation(tr, job);
     const score = job.score ? job.score.total_score : "-";
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
+    const scoreGuide = score === "-" ? "" : ' data-guide="match-score"';
     const checked = selectedJobIds.has(jobId) ? "checked" : "";
     tr.innerHTML = `
       <td><input type="checkbox" class="job-checkbox" data-job-id="${jobId}" data-record-action="toggle-job-select" data-record-id="${jobId}" ${checked}></td>
-      <td><span class="score${scoreClass}">${escapeHtml(String(score))}</span></td>
+      <td><span class="score${scoreClass}"${scoreGuide}>${escapeHtml(String(score))}</span></td>
       <td>
         <div class="title">${escapeHtml(job.title || "Без названия")}</div>
         <div class="meta">${escapeHtml(job.company || "Компания не указана")}</div>
@@ -203,7 +204,7 @@ function renderDetail(job) {
   $("#job-detail").innerHTML = `
     <h2>${escapeHtml(job.title)}</h2>
     <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(safeExternalUrl(job.url))}" target="_blank" rel="noreferrer">открыть</a></p>
-    <div class="detail-actions">
+    <div class="detail-actions" data-guide="vacancy-actions">
       <button data-ui-action="mark-selected" data-status="saved" data-action-id="job.save">Сохранить</button>
       <button data-ui-action="mark-selected" data-status="hidden" data-action-id="job.hide">Скрыть</button>
       <button data-ui-action="mark-selected" data-status="applied" data-action-id="job.applied">Откликнулся</button>
@@ -220,7 +221,7 @@ function renderDetail(job) {
       <summary>Дополнительно</summary>
       <div class="detail-actions">
         <button data-ui-action="apply-hh" data-dry-run="true" data-action-id="job.hh.plan">План отклика HH</button>
-        <button data-ui-action="apply-hh" data-dry-run="false" data-action-id="job.hh.live" class="danger-action">Отправить в HH</button>
+        <button data-ui-action="apply-hh" data-dry-run="false" data-action-id="job.hh.live" data-guide="live-hh-action" class="danger-action">Отправить в HH</button>
         <button data-ui-action="share-to-telegram" data-action-id="job.telegram.share">Поделиться в Telegram</button>
         <button data-ui-action="smart-classify" data-action-id="job.ai.classify">AI-классификация</button>
         <button data-ui-action="parse-job-structure" data-action-id="job.ai.structure">Структура</button>
@@ -246,6 +247,7 @@ function renderDetail(job) {
     <div id="action-output" class="meta"></div>
   `;
   setLetterValue(letter);
+  window.queueMicrotask(() => scheduleGuidance("vacancies"));
 }
 
 async function syncJobs() {
@@ -627,6 +629,7 @@ async function loadToday() {
     }),
     { navigate: navigateFromToday },
   );
+  window.queueMicrotask(() => scheduleGuidance("today"));
 }
 
 function updateChatContext() {
@@ -1245,6 +1248,60 @@ function setupDestinationPanels() {
     advancedSlot.append(apiLab);
     document.querySelector('.agent-tab[data-agent-panel="api-lab"]')?.remove();
   }
+}
+
+function setupNavigationAccessibility() {
+  document.querySelectorAll(".sidebar .nav-button").forEach((button) => {
+    const label = button.querySelector("span")?.textContent.trim() || button.dataset.view;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  });
+}
+
+function openMobileMenu() {
+  const trigger = $("#mobile-menu-button");
+  trigger?.setAttribute("aria-expanded", "true");
+  const result = window.appOverlays.request({
+    kind: "mobileMenu",
+    label: "Основная навигация",
+    trigger,
+    onClose() {
+      trigger?.setAttribute("aria-expanded", "false");
+    },
+    render(root) {
+      root.classList.add("mobile-menu-sheet");
+      const title = document.createElement("h2");
+      title.textContent = "Разделы";
+      const list = document.createElement("nav");
+      list.className = "mobile-menu-list";
+      list.setAttribute("aria-label", "Мобильная навигация");
+      document.querySelectorAll(".sidebar .nav-button").forEach((source) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.mobileDestination = source.dataset.view;
+        button.textContent = source.querySelector("span")?.textContent || source.getAttribute("aria-label");
+        button.addEventListener("click", () => {
+          window.appOverlays.closeBlocking();
+          activateView(source.dataset.view);
+        });
+        list.append(button);
+      });
+      root.append(title, list);
+    },
+  });
+  if (!result.accepted) trigger?.setAttribute("aria-expanded", "false");
+  return result;
+}
+
+function scheduleGuidance(route) {
+  if (!window.appGuidance) return;
+  const snapshot = window.appOnboarding?.snapshot?.();
+  window.appGuidance.schedule(route, {
+    canFind: snapshot?.readiness === "ready",
+    hasScoredJob: state.jobs.some((job) => Number.isFinite(job.score?.total_score)),
+    hasStatusActions: Boolean(state.selectedId && $("[data-guide='vacancy-actions']")),
+    hasLivePlan: Boolean(state.selectedId && $("[data-guide='live-hh-action']")),
+  });
 }
 
 async function loadAgentCockpit({ liveAuth = false } = {}) {
@@ -2113,12 +2170,14 @@ function handleDynamicRecordAction(event) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   setupDestinationPanels();
+  setupNavigationAccessibility();
   setupResumeBuilderDefaults();
   document.addEventListener("click", handleDelegatedUiAction);
   document.addEventListener("click", handleDynamicRecordAction);
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.addEventListener("click", () => activateView(button.dataset.view));
   });
+  $("#mobile-menu-button")?.addEventListener("click", openMobileMenu);
   $("#sync-button").addEventListener("click", syncJobs);
   $("#score-button").addEventListener("click", scoreJobs);
   $("#refresh-button").addEventListener("click", loadJobs);
@@ -2192,6 +2251,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.appOnboarding = window.WorkHunterUI.onboarding.createController({
     api,
     notifications: window.appNotifications,
+    overlays: window.appOverlays,
+  });
+  window.appGuidance = window.WorkHunterUI.onboarding.createGuidanceController({
     overlays: window.appOverlays,
   });
   activateView(routeViewFromPath(window.location.pathname), { push: false });
