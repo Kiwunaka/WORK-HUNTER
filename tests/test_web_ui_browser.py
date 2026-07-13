@@ -1030,3 +1030,90 @@ def test_agent_load_is_dry_until_explicit_live_auth_click(browser_app):
     ):
         page.locator("#agent-live-auth-button").click()
     assert sum("live_auth=true" in url for url in preflight_urls) == 1
+
+
+def test_error_toast_persists_and_deduplicates(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+
+    page.evaluate(
+        """
+        () => {
+          window.appNotifications.push({type:'error', scope:'sync', code:'offline', title:'Ошибка'});
+          window.appNotifications.push({type:'error', scope:'sync', code:'offline', title:'Ошибка'});
+        }
+        """
+    )
+
+    toast = page.locator("[data-toast-key='error:sync:offline']")
+    expect(toast).to_have_count(1)
+    expect(toast).to_contain_text("2")
+    assert page.evaluate("() => window.appNotifications.list()[0].persistent") is True
+
+
+def test_transient_toast_expires_and_stack_is_bounded(browser_app):
+    page, base_url, _ = browser_app
+    page.clock.install()
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+
+    page.evaluate(
+        """
+        () => {
+          for (let index = 0; index < 5; index += 1) {
+            window.appNotifications.push({
+              type: 'success', scope: 'test', code: String(index), title: `Готово ${index}`
+            });
+          }
+        }
+        """
+    )
+
+    expect(page.locator("[data-toast-key]")).to_have_count(4)
+    page.clock.fast_forward(5100)
+    expect(page.locator("[data-toast-key]")).to_have_count(0)
+
+
+def test_overlay_escape_is_lifo_and_restores_trigger_focus(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+
+    result = page.evaluate(
+        """
+        () => {
+          const trigger = document.createElement('button');
+          trigger.id = 'overlay-test-trigger';
+          trigger.textContent = 'Открыть';
+          document.body.append(trigger);
+          trigger.focus();
+          const sheet = window.appOverlays.request({
+            kind: 'sheet', trigger,
+            label: 'Тестовый лист',
+            render(root) {
+              const button = document.createElement('button');
+              button.textContent = 'Внутри';
+              button.dataset.initialFocus = 'true';
+              root.append(button);
+            }
+          });
+          const mobile = window.appOverlays.request({kind: 'mobileMenu', trigger, render() {}});
+          const child = window.appOverlays.request({
+            kind: 'childPopover', trigger: document.querySelector('[data-initial-focus]'),
+            label: 'Справка', render(root) { root.textContent = 'Подсказка'; }
+          });
+          return {sheet, mobile, child};
+        }
+        """
+    )
+
+    assert result["sheet"]["accepted"] is True
+    assert result["mobile"] == {"accepted": False, "reason": "blocking_occupied"}
+    assert result["child"]["accepted"] is True
+    expect(page.locator("#sheet-root [role='dialog']")).to_have_count(1)
+    expect(page.locator("#popover-root [role='dialog']")).to_have_count(1)
+
+    page.keyboard.press("Escape")
+    expect(page.locator("#popover-root [role='dialog']")).to_have_count(0)
+    expect(page.locator("#sheet-root [role='dialog']")).to_have_count(1)
+    page.keyboard.press("Escape")
+    expect(page.locator("#sheet-root [role='dialog']")).to_have_count(0)
+    assert page.evaluate("() => document.activeElement?.id") == "overlay-test-trigger"

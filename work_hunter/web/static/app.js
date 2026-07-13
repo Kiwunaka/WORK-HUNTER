@@ -26,6 +26,14 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 
+function notify(type, scope, code, title, message = "", action = null) {
+  return window.appNotifications?.push({ type, scope, code, title, message, action });
+}
+
+function notifyError(scope, error, title = "Не удалось выполнить действие") {
+  return notify("error", scope, "request-failed", title, String(error?.message || error));
+}
+
 const ROUTES = {
   inbox: { path: "/jobs", title: "Jobs", summary: "Sync sources, then sort by score.", actions: true },
   calendar: { path: "/calendar", title: "Calendar", summary: "Interviews, follow-ups, and reminders.", actions: false },
@@ -368,7 +376,7 @@ async function switchProfile(profileId) {
     renderProfileForm();
     $("#summary-line").textContent = `Профиль переключён на: ${profileId}. Синхронизируй и пересчитай score.`;
   } catch (err) {
-    alert("Ошибка переключения профиля: " + err.message);
+    notifyError("profile-switch", err, "Не удалось переключить профиль");
   }
 }
 
@@ -387,7 +395,7 @@ async function saveProfile() {
     $("#config-editor").value = JSON.stringify(state.config, null, 2);
     $("#summary-line").textContent = "Профиль сохранён. Синхронизируй источники и пересчитай score для обновления.";
   } catch (err) {
-    alert("Ошибка сохранения профиля: " + err.message);
+    notifyError("profile-save", err, "Не удалось сохранить профиль");
   }
 }
 
@@ -441,7 +449,7 @@ async function saveHhToken() {
 
   state.config = await api("/api/config", { method: "POST", body: JSON.stringify(state.config) });
   $("#config-editor").value = JSON.stringify(state.config, null, 2);
-  alert("Настройки HH сохранены в конфигурации.");
+  notify("success", "settings-hh", "saved", "Настройки HH сохранены");
 }
 
 async function saveAiSettings() {
@@ -461,7 +469,7 @@ async function saveAiSettings() {
 
   state.config = await api("/api/config", { method: "POST", body: JSON.stringify(state.config) });
   $("#config-editor").value = JSON.stringify(state.config, null, 2);
-  alert("AI настройки сохранены.");
+  notify("success", "settings-ai", "saved", "Настройки AI сохранены");
 }
 
 async function loadSources() {
@@ -816,7 +824,7 @@ async function saveJobNote() {
   if (!state.selectedId) return;
   const note = $("#job-notes-input").value;
   await api(`/api/jobs/${state.selectedId}/note`, { method: "POST", body: JSON.stringify({ body: note }) });
-  alert("Заметка сохранена.");
+  notify("success", "job-note", "saved", "Заметка сохранена");
 }
 
 async function loadJobNote() {
@@ -1744,7 +1752,7 @@ const dynamicRecordActions = Object.freeze({
 });
 
 function reportDynamicActionError(error) {
-  window.alert(`Ошибка: ${error?.message || error}`);
+  notifyError("dynamic-action", error);
 }
 
 function handleDynamicRecordAction(event) {
@@ -1878,7 +1886,7 @@ async function saveResume() {
     await api("/api/resumes", { method: "POST", body: JSON.stringify(body) });
     hideResumeForm();
     await loadResumes();
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { notifyError("resume-save", e, "Не удалось сохранить резюме"); }
 }
 
 async function loadResumes() {
@@ -1947,7 +1955,7 @@ async function saveEvent() {
     await api("/api/events", { method: "POST", body: JSON.stringify(body) });
     hideEventForm();
     await loadEvents();
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { notifyError("event-save", e, "Не удалось сохранить событие"); }
 }
 
 async function loadEvents() {
@@ -2032,7 +2040,7 @@ async function bulkAction(action) {
     clearBulkSelection();
     await loadJobs();
     $("#summary-line").textContent = `${action}: обработано.`;
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { notifyError("bulk-action", e); }
 }
 
 async function applySmartFilters() {
@@ -2107,7 +2115,7 @@ async function saveSearch() {
     await api("/api/saved-searches", { method: "POST", body: JSON.stringify(body) });
     hideSearchForm();
     await loadSearches();
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { notifyError("search-save", e, "Не удалось сохранить поиск"); }
 }
 
 async function loadSearches() {
@@ -2164,7 +2172,7 @@ async function parseJobStructure() {
     const output = $("#resume-tips-output");
     output.textContent = JSON.stringify(result, null, 2);
   } catch (e) {
-    alert("Ошибка: " + e.message);
+    notifyError("job-structure", e, "Не удалось разобрать вакансию");
   } finally {
     setBusy('[data-ui-action="parse-job-structure"]', false);
   }
@@ -2174,7 +2182,10 @@ async function runGapAnalysis() {
   if (!state.selectedId) return;
   const resumes = await api("/api/resumes");
   const active = resumes.find(r => r.is_active);
-  if (!active) { alert("Сначала создай и активируй резюме в настройках."); return; }
+  if (!active) {
+    notify("warning", "gap-analysis", "resume-required", "Нужно активное резюме", "Создай и активируй резюме в настройках.");
+    return;
+  }
   setBusy('[data-ui-action="run-gap-analysis"]', true);
   try {
     const result = await api(`/api/jobs/${state.selectedId}/gap-analysis`, {
@@ -2182,7 +2193,7 @@ async function runGapAnalysis() {
     });
     $("#resume-tips-output").innerHTML = renderMarkdown(result.content);
   } catch (e) {
-    alert("Ошибка: " + e.message);
+    notifyError("gap-analysis", e, "Не удалось выполнить gap-анализ");
   } finally {
     setBusy('[data-ui-action="run-gap-analysis"]', false);
   }
@@ -2190,19 +2201,22 @@ async function runGapAnalysis() {
 
 async function scoreAtsResume() {
   const text = $("#resume-body-input")?.value || $("#audit-resume-input")?.value;
-  if (!text) { alert("Вставь текст резюме."); return; }
+  if (!text) {
+    notify("warning", "ats-score", "resume-text-required", "Добавь текст резюме");
+    return;
+  }
   try {
     const result = await api("/api/resumes/ats-score", { method: "POST", body: JSON.stringify({ resume_text: text }) });
-    alert(`ATS Score: ${result.score}/100\nПроблемы: ${(result.issues||[]).join(", ")}`);
-  } catch (e) { alert("Ошибка: " + e.message); }
+    notify("info", "ats-score", "result", `ATS Score: ${result.score}/100`, (result.issues || []).join(", "));
+  } catch (e) { notifyError("ats-score", e, "Не удалось оценить резюме"); }
 }
 
 async function smartClassify() {
   if (!state.selectedId) return;
   try {
     const result = await api(`/api/jobs/${state.selectedId}/smart-classify`, { method: "POST", body: "{}" });
-    alert(JSON.stringify(result, null, 2));
-  } catch (e) { alert("Ошибка: " + e.message); }
+    notify("info", "smart-classify", "result", "Классификация готова", JSON.stringify(result));
+  } catch (e) { notifyError("smart-classify", e, "Не удалось классифицировать вакансию"); }
 }
 
 async function getInterviewPrep(stage) {
@@ -2213,14 +2227,14 @@ async function getInterviewPrep(stage) {
     });
     $("#ai-fit-reasoning").innerHTML = renderMarkdown(result.content);
     switchAiTab("interview");
-  } catch (e) { alert("Ошибка: " + e.message); }
+  } catch (e) { notifyError("interview-prep", e, "Не удалось подготовить материалы"); }
 }
 
 async function getBehaviorSuggestions() {
   try {
     const result = await api("/api/behavior/suggest", { method: "POST", body: "{}" });
-    alert(result.content);
-  } catch (e) { alert("Ошибка: " + e.message); }
+    notify("info", "behavior-suggestions", "result", "Рекомендации готовы", result.content);
+  } catch (e) { notifyError("behavior-suggestions", e, "Не удалось получить рекомендации"); }
 }
 
 async function loadGhostJobs() {

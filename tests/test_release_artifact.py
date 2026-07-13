@@ -16,7 +16,15 @@ import work_hunter
 
 
 ROOT = Path(__file__).resolve().parents[1]
-STATIC_FILES = {"app.css", "app.js", "index.html", "manifest.json", "sw.js", "ui-core.js"}
+STATIC_FILES = {
+    "app.css",
+    "app.js",
+    "index.html",
+    "manifest.json",
+    "sw.js",
+    "ui-core.js",
+    "ui-feedback.js",
+}
 MIGRATION_FILES = {"0001_backbone.sql"}
 
 
@@ -212,7 +220,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
         assert work_hunter.__version__ == "1.0.0"
         package = resources.files("work_hunter")
         static = package.joinpath("web", "static")
-        for name in ("app.css", "app.js", "index.html", "manifest.json", "sw.js", "ui-core.js"):
+        for name in ("app.css", "app.js", "index.html", "manifest.json", "sw.js", "ui-core.js", "ui-feedback.js"):
             resource = static.joinpath(name)
             assert resource.is_file()
             assert resource.read_bytes()

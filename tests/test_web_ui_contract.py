@@ -330,6 +330,25 @@ def test_ui_static_assets_have_no_remote_runtime_dependencies():
         assert forbidden not in combined
 
 
+def test_feedback_roots_and_live_regions_are_local_and_accessible():
+    html = _read_static("index.html")
+
+    assert 'id="toast-region"' in html
+    assert 'aria-live="polite"' in html
+    assert 'id="toast-alert-region"' in html
+    assert 'aria-live="assertive"' in html
+    assert 'id="sheet-root"' in html
+    assert 'id="popover-root"' in html
+    assert html.index('/ui-core.js') < html.index('/ui-feedback.js') < html.index('/app.js')
+
+
+def test_ui_uses_feedback_controller_instead_of_browser_alerts():
+    app = _read_static("app.js")
+
+    assert "window.alert(" not in app
+    assert not re.search(r"(?<![\w.])alert\(", app)
+
+
 def test_static_and_dynamic_actions_avoid_inline_javascript():
     index = _read_static("index.html")
     app = _read_static("app.js")
