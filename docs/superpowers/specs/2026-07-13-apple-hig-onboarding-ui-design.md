@@ -122,7 +122,7 @@ Take the first three after sorting. Within category 2, tasks sort before Calenda
 
 The Upcoming region contains the next two valid Calendar events in the half-open interval `[now, startOfLocalDay(today + 31 days))`, ordered by parsed event time then numeric ID ascending. Construct the upper bound with local calendar-date arithmetic so daylight-saving changes do not add or remove a calendar day. Past, invalid, and more distant events remain in Calendar but do not appear on Today.
 
-Fresh matches require `status == "new"` and a finite numeric total score. They sort by total score descending, timestamp descending, and ID descending. Timestamp is parsed `published_at` when valid; otherwise parsed `fetched_at` when valid; otherwise invalid and after every valid timestamp. Unscored jobs remain in Vacancies and can produce a score/readiness action, but never enter Fresh matches. There is no separate `unseen` concept in this redesign.
+Fresh matches require `status == "new"` and a finite numeric total score. They sort by total score descending, timestamp descending, and ID descending. Timestamp is parsed `published_at` when valid; otherwise parsed `fetched_at` when valid; otherwise invalid and after every valid timestamp. Unscored jobs remain in Vacancies and never enter Today until the ordinary Score action produces a finite score. There is no separate `unseen` concept in this redesign.
 
 Each Today input is a `ResourceState<T>` with `status` (`loading`, `ready`, or `error`), optional `data`, optional safe error metadata, optional `updatedAt`, and `stale: boolean`. Source loaders derive `stale` from backend-reported last-sync/error state; other resources default it to `false`. The Today composer also requires an injected `now` instant and IANA timezone string; production supplies the browser values and tests supply fixed values. The composer receives these inputs, not bare arrays or a hidden global clock, so loading, genuine empty, stale, failed, and time-dependent results cannot be confused.
 
@@ -140,7 +140,7 @@ The three core conditions are: at least one non-empty desired role or search que
 
 Readiness is separate from first-run confirmation. Add `ui.onboarding_version` to the config schema with new-install default `0`. The config loader must inspect the raw saved config before applying defaults: when a legacy config lacks this key, persist `ui.onboarding_version=2`; a newly initialized config already contains `0`. Thus a genuine new install reviews all three steps even though default roles and sources are prefilled, while an existing installation is not forced to reconfirm unchanged configuration. A legacy installation that is actually incomplete still opens the missing core step because domain readiness remains authoritative.
 
-Normalize the supported legacy flat profile before onboarding reads or writes it. When raw `config.profile` is an object, deep-copy it into a deterministic target without overwriting a named profile: use `default` when absent; reuse `default` when it is deeply equal; otherwise use the first free ID in `legacy`, `legacy-2`, `legacy-3`, and so on. Replace `config.profile` with that target ID and preserve every other named profile. Persist this migration atomically with the onboarding-version migration. If the normalized active profile ID is missing from `config.profiles`, readiness is `unknown` with a Settings recovery action; onboarding never invents a write target.
+Normalize the supported legacy flat profile before onboarding reads or writes it. When raw `config.profile` is an object, deep-copy it into a deterministic target without overwriting a named profile: use `default` when absent; reuse `default` when it is structurally JSON-equal with object-key order ignored and array order preserved; otherwise use the first free ID in `legacy`, `legacy-2`, `legacy-3`, and so on. Replace `config.profile` with that target ID and preserve every other named profile. Persist this migration atomically with the onboarding-version migration. If the normalized active profile ID is missing from `config.profiles`, readiness is `unknown` with a Settings recovery action; onboarding never invents a write target.
 
 The wizard never auto-opens while readiness is `loading` or `unknown`. `unknown` renders a Today readiness error with Retry. At stable boot, open the wizard when either `ui.onboarding_version < 2` or readiness is `incomplete`, unless onboarding was deferred for the current tab session. If version is below 2, start at the first step not present in `completedSteps`, even when its prefilled domain condition is already satisfied. If version is 2 and readiness is incomplete, start at the first missing domain condition. If product data later stops satisfying a completed step, readiness returns to `incomplete`; presentation progress never overrides domain truth.
 
@@ -153,6 +153,7 @@ Permanent presentation state is JSON in `localStorage["work-hunter:onboarding:v2
   "version": 2,
   "completed": false,
   "completedSteps": ["goal"],
+  "pendingResumeActivationId": null,
   "finalization": {
     "syncStatus": "not_started",
     "syncCompletedAt": null,
@@ -190,7 +191,7 @@ Finalization field transitions are atomic per local-storage write:
 
 Malformed, wrong-version, or wrong-shape values are ignored and replaced with defaults; they never change product configuration. Permanent changes are reconciled across tabs through the `storage` event. The one-new-mark limit is per tab session. Settings → **Run introduction again** resets the permanent presentation state, sets `forceReview=true` in the current tab, and opens Goal with current values prefilled; it does not lower the server onboarding version or delete product configuration. Completing this voluntary review clears `forceReview`. Settings also exposes **Show tips again**, which resets only `completedCoachMarks`, `dismissedCoachMarks`, `coachMarkShown`, and `snoozedCoachMarks`; it does not change `onboardingDeferred`, `forceReview`, completed steps, or finalization state.
 
-**Set up later** sets `onboardingDeferred=true` in session storage and closes the wizard until that tab session ends; it does not complete or skip any step. There is no per-step skip for the three core requirements. Only optional HH setup can be skipped. Completion requires all three domain readiness conditions.
+**Set up later** sets `onboardingDeferred=true`, sets `forceReview=false`, and closes the wizard until that tab session ends; it does not complete or skip any core step. A voluntarily restarted review therefore stays closed until the user explicitly runs it again. There is no per-step skip for the three core requirements. Only optional HH setup can be skipped. Completion requires all three domain readiness conditions.
 
 `completed=true` is written only after all three core conditions are verified and the server has successfully persisted `ui.onboarding_version=2`. On every boot, a stored `completed=true` is ignored when the server version is below 2 or readiness is not `ready`.
 
@@ -203,9 +204,10 @@ Malformed, wrong-version, or wrong-shape values are ignored and replaced with de
 | Stable boot, version 2 and readiness `ready` | Render Today, then schedule guidance |
 | Stable boot, version below 2 and not deferred | Open first locally unconfirmed step, beginning with Goal on a new install |
 | Stable boot, readiness `incomplete` and not deferred | Open first missing core step regardless of stored presentation completion |
-| `forceReview=true` and readiness is stable | Open Goal with current values, regardless of server version; clear the flag only on completed review or explicit session deferral |
+| `forceReview=true`, readiness is stable, fewer than three completed steps | Open the first locally unconfirmed step with current values, regardless of server version |
 | All three completed steps, version below 2 | Open Summary and branch on persisted `finalization.syncStatus`; never wrap back to Goal |
-| **Set up later** | Set session deferral, close sheet, keep readiness action visible |
+| `forceReview=true` and all three completed steps | Open Summary regardless of server version; **Finish review** sets `forceReview=false`, writes local `completed=true`, and closes without a config-version write or required sync |
+| **Set up later** | Set session deferral, clear `forceReview`, close sheet, keep readiness action visible |
 | Step submit | Disable all submit paths for that step, show busy state, send one request |
 | Step request success | Reload affected resource, verify the domain condition, record step completion, advance |
 | Step request failure or failed verification | Stay on the step, preserve input, restore controls, show inline error and Retry |
@@ -248,9 +250,10 @@ Reload inference is `remote` when `remote_only` is true, otherwise `hybrid` when
 ### Step 3 — Resume and first search
 
 - Extend the read endpoint non-breakingly: bare `GET /api/resumes` keeps its legacy default-profile behavior, while onboarding calls `GET /api/resumes?profile_id=<activeProfileId>`. The server validates that ID against normalized `config.profiles` and calls `list_resumes(profile_id)`. Readiness requires one returned resume with `profile_id == activeProfileId` and `is_active == true`; other-profile resumes are not loaded or shown in onboarding.
-- Select a returned resume and activate it through `POST /api/resumes/{id}/activate`, or render the existing local resume fields inside the onboarding sheet and create it through one `POST /api/resumes` with `profile_id=activeProfileId` and `is_active=false`, followed by `POST /api/resumes/{newId}/activate`. Verify via the profile-scoped GET that exactly the chosen resume is active before completion.
+- Select a returned resume and activate it through `POST /api/resumes/{id}/activate`, or render the existing local resume fields inside the onboarding sheet and create it through one `POST /api/resumes` with `profile_id=activeProfileId` and `is_active=false`, followed by `POST /api/resumes/{newId}/activate`. Before activation, persist the selected or newly returned ID as `pendingResumeActivationId`. Verify via the profile-scoped GET that exactly that resume is active before completion, then clear the pending ID.
 - Show a readiness summary.
 - Resume name and non-empty body are required. Submit is locked until its request settles. A successful create is followed by resume reload and explicit activation verification before the step completes.
+- If create succeeds but activation/verification fails, remain on Step 3 and Retry only `POST /api/resumes/{pendingResumeActivationId}/activate`; never repeat create while the pending ID exists. After reload, reconcile the pending ID against the profile-scoped GET: complete when it is active, offer activation Retry when it exists but is inactive, or clear it and restore create/select when it no longer exists.
 - Finish with **Find first vacancies**, which sends one `POST /api/sync` with `{"score": true}` and follows the final-sync transitions above.
 - Failure to sync does not roll back completed settings or create a duplicate resume; show an inline error with Retry.
 
@@ -375,7 +378,9 @@ canExecute: boolean
 updatedDescriptor: complete LiveActionDescriptor when status is changed; absent otherwise
 ```
 
-`status=changed` requires a complete `updatedDescriptor`, `canExecute=false`, and the current fingerprint. If the descriptor is absent or invalid, treat the result as `error`, keep the old reviewed descriptor visible, clear acknowledgement, and block execution. Conversely, any changed fingerprint, target row, risk flag, auth summary, or capability summary must return `status=changed`; an `executable` result with changed reviewed content is invalid and blocks.
+Validation status precedence is exact: return `error` when validation cannot produce a trustworthy result; otherwise `auth_required` when auth is not ready; otherwise `capability_lost` when capability is unavailable; otherwise `blocked` when blockers exist; otherwise `changed` when reviewed descriptor content or fingerprint changed; otherwise `executable`. Auth and capability summaries are transient validation evidence, not fields of `LiveActionDescriptor`, so their loss uses the dedicated statuses and never requires a replacement descriptor.
+
+`status=changed` requires a complete `updatedDescriptor`, `canExecute=false`, and the current fingerprint. If the descriptor is absent or invalid, treat the result as `error`, keep the old reviewed descriptor visible, clear acknowledgement, and block execution. Any changed consequence, fingerprint, target row, preview, or risk flag must return `status=changed`; an `executable` result with changed reviewed descriptor content is invalid and blocks.
 
 `canExecute` may be true only when status is `executable`, auth is ready, capability is available, blockers are empty, and the fingerprint exactly matches the acknowledged descriptor. A missing/duplicate required row key or missing revalidation function blocks the UI before confirmation. The destructive button remains disabled until the acknowledgement is selected. On click, call `revalidate()` first with the button busy. A valid changed result replaces the displayed descriptor, clears acknowledgement, and requires review again. Auth loss, capability loss, blocker, or validation error sends no mutation. Only a matching executable result calls `execute(confirm: true)`. The client sends the JSON boolean `true`, never a truthy string. A blocked/error response from the authoritative service guard stays in the sheet and never displays success. Cancelling or closing sends neither validation nor mutation.
 
@@ -413,10 +418,11 @@ No component owns both server data mutation policy and UI confirmation. Confirma
 2. Load config/profile, resumes, source status, jobs, calendar/tasks, and agent approvals independently into `ResourceState` values with settled results and timestamps.
 3. Render available regions immediately; skeleton only the regions still loading.
 4. Derive the Today view model and onboarding readiness only after inspecting each resource status; errors produce `unknown`, not missing data.
-5. If readiness is `incomplete` and not deferred for the session, open the first incomplete onboarding step. `loading` and `unknown` never open it automatically.
-6. Otherwise render Today and schedule the next eligible contextual coach mark after its anchor exists.
-7. Mutations flow through existing API helpers. UI components emit typed success, warning, or error events to the notification center.
-8. A successful mutation refreshes only affected view models. A failure preserves the user's input and offers a local retry.
+5. While readiness is `loading`, open no onboarding UI. When it is `unknown`, render the recovery error and open no onboarding UI.
+6. When readiness is stable and onboarding is deferred, render Today without opening the wizard; schedule guidance only if readiness is `ready`.
+7. Otherwise apply the Wizard state-transition table in this precedence: `forceReview`, server version below 2, domain readiness incomplete, then ready. Fewer than three completed review steps open the first local step; three completed steps open Summary regardless of server version. A version-2 incomplete configuration opens the first missing domain step. Only version 2 plus ready state and no forced review proceeds directly to Today/guidance.
+8. Mutations flow through existing API helpers. UI components emit typed success, warning, or error events to the notification center.
+9. A successful mutation refreshes only affected view models. A failure preserves the user's input and offers a local retry.
 
 ## Visual and Responsive Rules
 
@@ -477,7 +483,7 @@ No component owns both server data mutation policy and UI confirmation. Confirma
 - A failed core readiness request reports `unknown` and never opens onboarding.
 - Ready existing configuration skips the wizard.
 - Set up later survives reload in the same tab, does not mark a step complete, and leaves a Today readiness action; a new tab/session may show the wizard.
-- Run introduction again resets only presentation progress.
+- Run introduction again resets only presentation progress. A version-2 forced review resumes at its first incomplete step or Summary, **Finish review** clears the flag without sync/version save, and Set up later clears the forced review.
 - Permanent progress synchronizes across tabs without sharing per-tab one-mark limits.
 - Coach marks follow the state table, at most one new mark per session, defer missing anchors, and stay completed or dismissed.
 - Keyboard focus, Escape, outside click, and focus restoration work for each overlay type.
@@ -486,6 +492,7 @@ No component owns both server data mutation policy and UI confirmation. Confirma
 - Resume activation does not auto-close the wizard. Sync failure plus reload returns to Summary; **Continue to Today** persists version 2 without repeating sync.
 - Successful sync plus failed version save persists `syncStatus=succeeded`; reload offers only Finish setup and cannot repeat sync. Retry/reset/success/failure transitions clear or replace finalization timestamp/error exactly as specified.
 - Source toggles, temporary health failure, active HH account secret preservation/clear, profile-scoped resume GET, inactive create, activation, and exact current-profile readiness follow their defined paths.
+- Create-success/activation-failure persists `pendingResumeActivationId`; retry and reload never create a duplicate and clear the ID only after verified activation or record disappearance.
 - Success toast expires; actionable error remains and Retry runs only the failed operation.
 - One failed boot request does not prevent other Today regions from rendering.
 - Live HH action sends no request on Cancel and sends literal `confirm: true` only after acknowledgement.
