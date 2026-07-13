@@ -8,15 +8,345 @@
   <style>html{color-scheme:light}body{margin:0}section{min-height:1px}</style>
 </head>
 <body>
-  <header><a href="#overview">К обзору</a></header>
+  <a class="skip-link" href="#overview">К содержанию</a>
+  <header class="site-header">
+    <a class="wordmark" href="#overview" aria-label="К началу">К/Г · 67H</a>
+    <nav class="dossier-nav" aria-label="Разделы досье">
+      <a href="#overview" data-nav-target="overview">Обзор</a>
+      <a href="#story" data-nav-target="story">Сюжет</a>
+      <a href="#ledger" data-nav-target="ledger">Реакции</a>
+      <a href="#polls" data-nav-target="polls">Опросы</a>
+      <a href="#jokes" data-nav-target="jokes">Шутки</a>
+      <a href="#gems" data-nav-target="gems">Граали</a>
+      <a href="#method" data-nav-target="method">Метод</a>
+    </nav>
+  </header>
+
   <main>
-    <section id="overview"><h1>Чат как тестовый полигон</h1></section>
-    <section id="story"><h2>Что происходило</h2></section>
-    <section id="ledger"><h2>Реестр реакций</h2></section>
-    <section id="polls"><h2>Опросы</h2></section>
-    <section id="jokes"><h2>Шутки</h2></section>
-    <section id="gems"><h2>Граали</h2></section>
-    <section id="method"><h2>Метод</h2></section>
+    <section class="section opening-dossier" id="overview" aria-labelledby="overview-title">
+      <div class="page-shell">
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <p class="folio">Чат Котенков и Горь · архив 07/26</p>
+            <h1 id="overview-title">Чат как<br>тестовый полигон</h1>
+            <p class="date-range">11 июля, 00:00 — 13 июля, 19:03 MSK</p>
+            <p class="dek">67 часов внутри AI-гонки: модели, геополитика, опросы, харнессы и шутки, которые собрали больше внимания, чем некоторые большие тезисы.</p>
+          </div>
+
+          <aside class="tldr double-bezel" aria-labelledby="tldr-title">
+            <div class="double-bezel__core">
+              <p class="eyebrow" id="tldr-title">TL;DR / 01</p>
+              <p><strong>Главная линия — не одна модель, а среда вокруг неё.</strong> AI-2040 дал крупнейший всплеск реакций; опросы превратили серьёзные темы в коллективный тест; ближе к финалу разговор сместился к харнессам, удалённой работе и человеческим ограничениям.</p>
+              <p>Всего <strong>758</strong> сообщений получили хотя бы одну реакцию. При этом только <strong>85</strong> канальных публикаций забрали <strong>40,2%</strong> всех реакций — внимание было крайне неравномерным.</p>
+            </div>
+          </aside>
+        </div>
+
+        <div class="hero-metrics" aria-label="Ключевые показатели">
+          <div class="mega-metric">
+            <strong class="metric-value" data-metric="messages" data-value="2743">2 743</strong>
+            <span>сообщения</span>
+          </div>
+          <div class="mega-metric mega-metric--ink">
+            <strong class="metric-value" data-metric="reactions" data-value="5088">5 088</strong>
+            <span>реакций</span>
+          </div>
+          <dl class="fact-strip">
+            <div><dt>Охват</dt><dd data-metric="hours" data-value="67.04">67,04 часа</dd></div>
+            <div><dt>Участники</dt><dd data-metric="sender-ids" data-value="268">268 sender ID</dd></div>
+            <div><dt>Ответы</dt><dd data-metric="replies" data-value="1858">1 858 reply-сообщений</dd></div>
+          </dl>
+        </div>
+
+        <div class="overview-plates" aria-label="Срез активности">
+          <article class="data-plate data-plate--wide">
+            <header><p class="eyebrow">Пульс / сутки</p><h2>Пик пришёлся на 12 июля</h2></header>
+            <ol class="static-series daily-series">
+              <li data-day="2026-07-11" data-value="930"><span>11 июля</span><strong>930</strong></li>
+              <li data-day="2026-07-12" data-value="1073"><span>12 июля</span><strong>1 073</strong></li>
+              <li data-day="2026-07-13" data-value="740"><span>13 июля*</span><strong>740</strong></li>
+            </ol>
+            <p class="plate-note">* Неполный день, до 19:03 MSK. Шкала всех дневных баров: 0–1 100.</p>
+          </article>
+
+          <article class="data-plate data-plate--compact">
+            <header><p class="eyebrow">След реакции</p><h2>Реакция была у каждого четвёртого сообщения</h2></header>
+            <p class="ratio-statement"><strong data-metric="reacted" data-value="758">758</strong> с реакциями · 27,6%</p>
+            <p><span data-metric="unreacted" data-value="1985">1 985</span> без реакций · 72,4%</p>
+          </article>
+
+          <article class="data-plate data-plate--contrast">
+            <header><p class="eyebrow">Асимметрия внимания</p><h2>3,1% сообщений забрали 40,2% реакций</h2></header>
+            <dl class="channel-split">
+              <div><dt>Канальные сообщения</dt><dd><span data-metric="channel-messages" data-value="85">85</span> / <span data-metric="native-messages" data-value="2658">2 658</span> нативных</dd></div>
+              <div><dt>Реакции на них</dt><dd><span data-metric="channel-reactions" data-value="2047">2 047</span> / <span data-metric="native-reactions" data-value="3041">3 041</span> на нативных</dd></div>
+            </dl>
+          </article>
+        </div>
+
+        <p class="scope-note">Экспорт содержит текст и метаданные; <span data-metric="photos" data-value="313">313 фото</span>, <span data-metric="stickers" data-value="58">58 стикеров</span> и <span data-metric="animations" data-value="22">22 анимации</span> отсутствуют как просматриваемые медиа.</p>
+      </div>
+    </section>
+
+    <section class="section story-section" id="story" aria-labelledby="story-title">
+      <div class="page-shell">
+        <header class="section-heading">
+          <p class="section-index">02 / Сюжет</p>
+          <h2 id="story-title">Шесть поворотов за 67 часов</h2>
+          <p>Разговор шёл не по прямой: от настроек моделей — к политическому сценарию, затем через опросы и соревнования к инфраструктуре ежедневной работы.</p>
+        </header>
+
+        <ol class="chapter-line">
+          <li class="chapter" data-reveal>
+            <span class="chapter-no">01</span>
+            <div>
+              <p class="eyebrow">Модели и лимиты</p>
+              <h3>Стартовать с medium/high, повышать — только по задаче</h3>
+              <p>Практический консенсус: не платить максимальной глубиной рассуждений за каждую мелочь; режим должен следовать сложности, а не привычке.</p>
+              <a class="message-link" data-message-id="497642" href="https://t.me/c/1778093200/497642" target="_blank" rel="noopener noreferrer"><span>Открыть #497642</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+            </div>
+          </li>
+          <li class="chapter chapter--wide" data-reveal>
+            <span class="chapter-no">02</span>
+            <div>
+              <p class="eyebrow">AI-2040</p>
+              <h3>Самый большой пост стал стресс-тестом геополитики</h3>
+              <p>Сценарий про координацию США и Китая, аудит чипов, контролируемые дата-центры и UBI вызвал главную волну реакций. Возражения били по стимулам государств и инженерной реализуемости контроля.</p>
+              <div class="link-cluster" aria-label="Сообщения главы AI-2040">
+                <a data-message-id="497797" href="https://t.me/c/1778093200/497797" target="_blank" rel="noopener noreferrer">497797</a>
+                <a data-message-id="497798" href="https://t.me/c/1778093200/497798" target="_blank" rel="noopener noreferrer">497798</a>
+                <a data-message-id="497840" href="https://t.me/c/1778093200/497840" target="_blank" rel="noopener noreferrer">497840</a>
+                <a data-message-id="497855" href="https://t.me/c/1778093200/497855" target="_blank" rel="noopener noreferrer">497855</a>
+              </div>
+            </div>
+          </li>
+          <li class="chapter chapter--signal" data-reveal>
+            <span class="chapter-no">03</span>
+            <div>
+              <p class="eyebrow">Пол модели</p>
+              <h3>9 183 голоса — и немедленный комедийный хвост</h3>
+              <p>Опрос дал 72,6% за исключительно мужское восприятие модели, а лучшие ответы превратили антропоморфизацию в два самых реактивных текстовых гэгa.</p>
+              <div class="link-cluster">
+                <a data-message-id="498677" href="https://t.me/c/1778093200/498677" target="_blank" rel="noopener noreferrer">498677</a>
+                <a data-message-id="498680" href="https://t.me/c/1778093200/498680" target="_blank" rel="noopener noreferrer">498680</a>
+                <a data-message-id="498682" href="https://t.me/c/1778093200/498682" target="_blank" rel="noopener noreferrer">498682</a>
+              </div>
+            </div>
+          </li>
+          <li class="chapter" data-reveal>
+            <span class="chapter-no">04</span>
+            <div>
+              <p class="eyebrow">AtCoder</p>
+              <h3>Соревнования стали более жёсткой уликой, чем бенчмарки</h3>
+              <p>В посте система уровня около GPT-5.6 выиграла оба раунда и лидировала на 1 997 из 2 000 heuristic-тестов — заявление из чата, не внешняя верификация.</p>
+              <a class="message-link" data-message-id="499375" href="https://t.me/c/1778093200/499375" target="_blank" rel="noopener noreferrer"><span>Открыть #499375</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+            </div>
+          </li>
+          <li class="chapter chapter--wide" data-reveal>
+            <span class="chapter-no">05</span>
+            <div>
+              <p class="eyebrow">Открытые веса</p>
+              <h3>Большинство ждёт первый запрет от США</h3>
+              <p>После исключения варианта «посмотреть результаты» 52,9% содержательных ответов ставят на США, 27,6% — на Китай, 19,4% не ждут запрета вовсе.</p>
+              <a class="message-link" data-message-id="499557" href="https://t.me/c/1778093200/499557" target="_blank" rel="noopener noreferrer"><span>Открыть #499557</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+            </div>
+          </li>
+          <li class="chapter chapter--dark" data-reveal>
+            <span class="chapter-no">06</span>
+            <div>
+              <p class="eyebrow">Харнессы и безопасность</p>
+              <h3>Одна модель — разные результаты, цена и глубина</h3>
+              <p>Финал ушёл в практику: Claude Code копает глубже, Codex бережнее расходует время; рядом — SSH/tmux, handoff на телефон и «context bombs» как новый класс риска.</p>
+              <div class="link-cluster">
+                <a data-message-id="500156" href="https://t.me/c/1778093200/500156" target="_blank" rel="noopener noreferrer">500156</a>
+                <a data-message-id="500250" href="https://t.me/c/1778093200/500250" target="_blank" rel="noopener noreferrer">500250</a>
+                <a data-message-id="499892" href="https://t.me/c/1778093200/499892" target="_blank" rel="noopener noreferrer">499892</a>
+                <a data-message-id="500369" href="https://t.me/c/1778093200/500369" target="_blank" rel="noopener noreferrer">500369</a>
+              </div>
+            </div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section ledger-section" id="ledger" aria-labelledby="ledger-title">
+      <div class="page-shell">
+        <header class="section-heading section-heading--inverse">
+          <p class="section-index">03 / Реестр</p>
+          <h2 id="ledger-title">Десять сообщений забрали почти половину реакций</h2>
+          <p>2 472 из 5 088 реакций пришлись на этот топ-10. Высокая реактивность здесь означает внимание, а не обязательно согласие.</p>
+        </header>
+
+        <div class="reaction-composition" aria-labelledby="composition-title">
+          <h3 id="composition-title">Состав реакций топ-10</h3>
+          <ul class="composition-key">
+            <li data-reaction="😁" data-value="530"><span>😁</span><strong>530 · 21,4%</strong></li>
+            <li data-reaction="🤡" data-value="505"><span>🤡</span><strong>505 · 20,4%</strong></li>
+            <li data-reaction="🤔" data-value="301"><span>🤔</span><strong>301 · 12,2%</strong></li>
+            <li data-reaction="👍" data-value="287"><span>👍</span><strong>287 · 11,6%</strong></li>
+            <li data-reaction="🤯" data-value="196"><span>🤯</span><strong>196 · 7,9%</strong></li>
+            <li data-reaction="❤‍🔥" data-value="183"><span>❤‍🔥</span><strong>183 · 7,4%</strong></li>
+            <li data-reaction="other" data-value="470"><span>Прочие</span><strong>470 · 19,0%</strong></li>
+          </ul>
+        </div>
+
+        <ol class="ledger-list">
+          <li class="ledger-row ledger-row--paired" data-message-id="497797" data-reactions="419" data-reveal>
+            <span class="ledger-rank">01</span><div class="ledger-copy"><p class="eyebrow">AI-2040 · часть 1</p><h3>419 реакций</h3><p>Главный сигнал: 🤡 213</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/497797" target="_blank" rel="noopener noreferrer"><span>Открыть #497797</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row ledger-row--paired" data-message-id="497798" data-reactions="369" data-reveal>
+            <span class="ledger-rank">02</span><div class="ledger-copy"><p class="eyebrow">AI-2040 · часть 2</p><h3>369 реакций</h3><p>Главный сигнал: 🤡 178</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/497798" target="_blank" rel="noopener noreferrer"><span>Открыть #497798</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row ledger-row--joke" data-message-id="498680" data-reactions="329" data-reveal>
+            <span class="ledger-rank">03</span><div class="ledger-copy"><p class="eyebrow">«Мне русские модели сами пишут»</p><h3>329 реакций</h3><p>Главный сигнал: 😁 313</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/498680" target="_blank" rel="noopener noreferrer"><span>Открыть #498680</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row" data-message-id="497477" data-reactions="307" data-reveal>
+            <span class="ledger-rank">04</span><div class="ledger-copy"><p class="eyebrow">Иск Apple к OpenAI</p><h3>307 реакций</h3><p>Главный сигнал: 🤯 136</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/497477" target="_blank" rel="noopener noreferrer"><span>Открыть #497477</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row" data-message-id="499982" data-reactions="261" data-reveal>
+            <span class="ledger-rank">05</span><div class="ledger-copy"><p class="eyebrow">Суперфорекастер о сроках GPT-6</p><h3>261 реакция</h3><p>Главный сигнал: 🤔 156</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/499982" target="_blank" rel="noopener noreferrer"><span>Открыть #499982</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row" data-message-id="499375" data-reactions="210" data-reveal>
+            <span class="ledger-rank">06</span><div class="ledger-copy"><p class="eyebrow">Модель на AtCoder</p><h3>210 реакций</h3><p>Главный сигнал: ❤‍🔥 104</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/499375" target="_blank" rel="noopener noreferrer"><span>Открыть #499375</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row" data-message-id="498677" data-reactions="174" data-reveal>
+            <span class="ledger-rank">07</span><div class="ledger-copy"><p class="eyebrow">Опрос о поле модели</p><h3>174 реакции</h3><p>Главный сигнал: 🤔 89</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/498677" target="_blank" rel="noopener noreferrer"><span>Открыть #498677</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row" data-message-id="499557" data-reactions="168" data-reveal>
+            <span class="ledger-rank">08</span><div class="ledger-copy"><p class="eyebrow">Опрос о запрете открытых весов</p><h3>168 реакций</h3><p>Главный сигнал: 🤡 92</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/499557" target="_blank" rel="noopener noreferrer"><span>Открыть #499557</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row ledger-row--joke" data-message-id="498682" data-reactions="148" data-reveal>
+            <span class="ledger-rank">09</span><div class="ledger-copy"><p class="eyebrow">«После третьего сообщения кинула бы в ЧС»</p><h3>148 реакций</h3><p>Главный сигнал: 😁 141</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/498682" target="_blank" rel="noopener noreferrer"><span>Открыть #498682</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+          <li class="ledger-row ledger-row--joke" data-message-id="497823" data-reactions="87" data-reveal>
+            <span class="ledger-rank">10</span><div class="ledger-copy"><p class="eyebrow">«Папа, а что ты делал, когда рождался AGI?»</p><h3>87 реакций</h3><p>😁 76 · 🤣 9</p></div>
+            <a class="message-link" href="https://t.me/c/1778093200/497823" target="_blank" rel="noopener noreferrer"><span>Открыть #497823</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section polls-section" id="polls" aria-labelledby="polls-title">
+      <div class="page-shell">
+        <header class="section-heading">
+          <p class="section-index">04 / Опросы</p>
+          <h2 id="polls-title">Опросы работали как рентген группы</h2>
+          <p>Сначала — коллективная антропоморфизация модели. Затем — ожидания регулирования открытых весов. В обоих случаях важен знаменатель.</p>
+        </header>
+
+        <div class="poll-grid">
+          <article class="poll-plate double-bezel" data-message-id="498677">
+            <div class="double-bezel__core">
+              <p class="eyebrow">Poll 01 · <span data-metric="gender-voters" data-value="9183">9 183</span> голоса</p>
+              <h3>Какого пола для вас модель?</h3>
+              <p class="poll-lead"><strong>72,6%</strong> — исключительно мужского; <strong>80,0%</strong> — мужского в той или иной форме.</p>
+              <ol class="poll-options">
+                <li data-poll="gender" data-option="0" data-value="6663"><span>Исключительно мужского</span><strong>6 663</strong></li>
+                <li data-poll="gender" data-option="1" data-value="680"><span>В основном мужского</span><strong>680</strong></li>
+                <li data-poll="gender" data-option="2" data-value="311"><span>50/50</span><strong>311</strong></li>
+                <li data-poll="gender" data-option="3" data-value="255"><span>В основном женского</span><strong>255</strong></li>
+                <li data-poll="gender" data-option="4" data-value="236"><span>Исключительно женского</span><strong>236</strong></li>
+                <li data-poll="gender" data-option="5" data-value="1038"><span>Паркет или кафель</span><strong>1 038</strong></li>
+              </ol>
+              <p class="poll-note">Женское в любой форме — 5,3%; шутливый вариант — 11,3%. 50/50 показан отдельно.</p>
+              <a class="message-link" href="https://t.me/c/1778093200/498677" target="_blank" rel="noopener noreferrer"><span>Открыть опрос #498677</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+            </div>
+          </article>
+
+          <article class="poll-plate poll-plate--blue double-bezel" data-message-id="499557">
+            <div class="double-bezel__core">
+              <p class="eyebrow">Poll 02 · 6 066 голосов</p>
+              <h3>Кто первым ограничит открытые веса?</h3>
+              <p class="poll-lead"><strong>52,9%</strong> содержательных ответов — США; <strong>27,6%</strong> — Китай; <strong>19,4%</strong> — никогда.</p>
+              <ol class="poll-options">
+                <li data-poll="weights" data-option="0" data-value="1143"><span>США до конца 2026</span><strong>1 143</strong></li>
+                <li data-poll="weights" data-option="1" data-value="656"><span>Китай до конца 2026</span><strong>656</strong></li>
+                <li data-poll="weights" data-option="2" data-value="834"><span>США до июня 2027</span><strong>834</strong></li>
+                <li data-poll="weights" data-option="3" data-value="408"><span>Китай до июня 2027</span><strong>408</strong></li>
+                <li data-poll="weights" data-option="4" data-value="283"><span>США после июня 2027</span><strong>283</strong></li>
+                <li data-poll="weights" data-option="5" data-value="115"><span>Китай после июня 2027</span><strong>115</strong></li>
+                <li data-poll="weights" data-option="6" data-value="830"><span>Никогда</span><strong>830</strong></li>
+                <li data-poll="weights" data-option="7" data-value="1797"><span>Посмотреть результаты</span><strong>1 797</strong></li>
+              </ol>
+              <p class="poll-note">Содержательный знаменатель: <span data-metric="weights-substantive" data-value="4269">4 269</span>; вариант «посмотреть результаты» исключён.</p>
+              <a class="message-link" href="https://t.me/c/1778093200/499557" target="_blank" rel="noopener noreferrer"><span>Открыть опрос #499557</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section jokes-section" id="jokes" aria-labelledby="jokes-title">
+      <div class="page-shell">
+        <header class="section-heading section-heading--jokes">
+          <p class="section-index">05 / Joke index</p>
+          <h2 id="jokes-title">Лучшие шутки — по смеху, а не по вкусу редактора</h2>
+          <p>Joke score = сумма 😁 + 🤣 + 😂. Канальные посты и однословные ответы исключены.</p>
+        </header>
+
+        <div class="joke-wall">
+          <article class="joke-card joke-card--hero" data-message-id="498680" data-joke-score="313" data-reactions="329" data-reveal><p class="joke-score">313 / 329</p><blockquote>Мне русские модели сами пишут, я не пишу первый</blockquote><a href="https://t.me/c/1778093200/498680" target="_blank" rel="noopener noreferrer">Открыть #498680 ↗</a></article>
+          <article class="joke-card joke-card--offset" data-message-id="498682" data-joke-score="141" data-reactions="148" data-reveal><p class="joke-score">141 / 148</p><blockquote>Если писать ей как девушке -&nbsp; после второго сообщения она бы не отвечала. После третьего кинула бы в чс</blockquote><a href="https://t.me/c/1778093200/498682" target="_blank" rel="noopener noreferrer">Открыть #498682 ↗</a></article>
+          <article class="joke-card joke-card--ink" data-message-id="497823" data-joke-score="85" data-reactions="87" data-reveal><p class="joke-score">85 / 87</p><blockquote>— Папа, а что ты делал, когда рождался AGI?<br>— Мониторил ситуацию<br>— Fucking legend</blockquote><a href="https://t.me/c/1778093200/497823" target="_blank" rel="noopener noreferrer">Открыть #497823 ↗</a></article>
+          <article class="joke-card" data-message-id="497511" data-joke-score="47" data-reactions="47" data-reveal><p class="joke-score">47 / 47</p><blockquote>«Абсолютно все в этой комнате было ворованное, и даже воздух был какой-то спертый»</blockquote><a href="https://t.me/c/1778093200/497511" target="_blank" rel="noopener noreferrer">Открыть #497511 ↗</a></article>
+          <article class="joke-card joke-card--small" data-message-id="498690" data-joke-score="25" data-reactions="25" data-reveal><p class="joke-score">25 / 25</p><blockquote>Называю все модели Игорь. Запрещаю делать rm fm</blockquote><a href="https://t.me/c/1778093200/498690" target="_blank" rel="noopener noreferrer">Открыть #498690 ↗</a></article>
+          <article class="joke-card joke-card--blue" data-message-id="498732" data-joke-score="25" data-reactions="25" data-reveal><p class="joke-score">25 / 25</p><blockquote>Вместо «как дела» пишу «кд», сэкономленное время посвящаю саморазвитию</blockquote><a href="https://t.me/c/1778093200/498732" target="_blank" rel="noopener noreferrer">Открыть #498732 ↗</a></article>
+          <article class="joke-card joke-card--wide" data-message-id="497480" data-joke-score="22" data-reactions="23" data-reveal><p class="joke-score">22 / 23</p><blockquote>А в чем прикол воровать у эпла их документацию? Типа дизайн доки? Или что? Почему тогда у приложения все равно такой уебский интерфейс? Непонятно…</blockquote><a href="https://t.me/c/1778093200/497480" target="_blank" rel="noopener noreferrer">Открыть #497480 ↗</a></article>
+          <article class="joke-card joke-card--signal" data-message-id="498722" data-joke-score="19" data-reactions="19" data-reveal><p class="joke-score">19 / 19</p><blockquote>Ого, что ты делаешь с 0,12 сэкономленных секунд?</blockquote><a href="https://t.me/c/1778093200/498722" target="_blank" rel="noopener noreferrer">Открыть #498722 ↗</a></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section gems-section" id="gems" aria-labelledby="gems-title">
+      <div class="page-shell">
+        <header class="section-heading">
+          <p class="section-index">06 / Hidden diamonds</p>
+          <h2 id="gems-title">Граали лежали ниже линии внимания</h2>
+          <p>Восемь практических находок получили не больше девяти реакций на основное сообщение. Здесь низкий счёт — часть аргумента, а не признак слабого материала.</p>
+        </header>
+
+        <div class="gem-layout">
+          <div class="gem-catalog">
+            <article class="gem-card" data-category="workflow" data-message-id="500156" data-reactions="9" data-reveal><p class="eyebrow">Workflow · 9 + 8 реакций</p><h3>Харнесс меняет модель</h3><p>Один Sol Max: Claude Code копает глубже, но в этом тесте съел около 5× времени и токенов. Использовать для действительно сложного.</p><div class="link-pair"><a href="https://t.me/c/1778093200/500156" target="_blank" rel="noopener noreferrer">500156</a><a data-message-id="500250" data-reactions="8" href="https://t.me/c/1778093200/500250" target="_blank" rel="noopener noreferrer">500250</a></div></article>
+            <article class="gem-card" data-category="infrastructure" data-message-id="499892" data-reactions="0" data-reveal><p class="eyebrow">Infrastructure · 0 + 1 реакция</p><h3>Удалённый Codex без разрыва сессии</h3><p>SSH + tmux дают постоянную рабочую сессию и нормальный handoff между приложением, терминалом и телефоном.</p><div class="link-pair"><a href="https://t.me/c/1778093200/499892" target="_blank" rel="noopener noreferrer">499892</a><a data-message-id="499896" data-reactions="1" href="https://t.me/c/1778093200/499896" target="_blank" rel="noopener noreferrer">499896</a></div></article>
+            <article class="gem-card" data-category="workflow" data-message-id="498539" data-reactions="0" data-reveal><p class="eyebrow">Workflow · 0 реакций</p><h3>Разделить оркестрацию и ревью</h3><p>Opus/Fable — для оркестрации; Codex — для подробной проверки плана. Не одна модель на весь pipeline.</p><a href="https://t.me/c/1778093200/498539" target="_blank" rel="noopener noreferrer">Открыть #498539 ↗</a></article>
+            <article class="gem-card gem-card--accent" data-category="method" data-message-id="498540" data-reactions="5" data-reveal><p class="eyebrow">Method · 5 реакций</p><h3>Самый дешёвый достаточный метод</h3><p>ML лучше AI, эвристики лучше ML, regex лучше эвристик — когда более простой инструмент действительно решает задачу.</p><a href="https://t.me/c/1778093200/498540" target="_blank" rel="noopener noreferrer">Открыть #498540 ↗</a></article>
+            <article class="gem-card" data-category="method" data-message-id="498794" data-reactions="8" data-reveal><p class="eyebrow">Method · 8 реакций</p><h3>90 минут видео → 15 минут монтажа</h3><p>Около двух часов работы и одна замеченная ошибка в аудиосклейке: полезный реальный замер, а не демо на идеальных данных.</p><a href="https://t.me/c/1778093200/498794" target="_blank" rel="noopener noreferrer">Открыть #498794 ↗</a></article>
+            <article class="gem-card" data-category="method" data-message-id="497846" data-reactions="3" data-reveal><p class="eyebrow">Method · 3 + 1 реакция</p><h3>Автоматизация чаще упирается в данные</h3><p>Хорошие данные и простые алгоритмы делают основную работу; AI нередко лишь пишет код для уже известных систем.</p><div class="link-pair"><a href="https://t.me/c/1778093200/497846" target="_blank" rel="noopener noreferrer">497846</a><a data-message-id="498345" data-reactions="1" href="https://t.me/c/1778093200/498345" target="_blank" rel="noopener noreferrer">498345</a></div></article>
+            <article class="gem-card" data-category="method" data-message-id="500329" data-reactions="3" data-reveal><p class="eyebrow">Method · 3 реакции</p><h3>Инструкция не равна исполнению</h3><p>Ассистенты оптимизируют формулировку, не учитывая, способен ли человек реально пройти предложенный процесс.</p><a href="https://t.me/c/1778093200/500329" target="_blank" rel="noopener noreferrer">Открыть #500329 ↗</a></article>
+            <article class="gem-card gem-card--theory" data-category="theory" data-message-id="498087" data-reactions="1" data-reveal><p class="eyebrow">Theory · 1 реакция</p><h3>Контроль AI-2040 требует слишком сильных допущений</h3><p>Развёрнутая критика механизмов контроля: стимулы государств, проверяемость и инженерные обходы важнее красивой схемы координации.</p><a href="https://t.me/c/1778093200/498087" target="_blank" rel="noopener noreferrer">Открыть #498087 ↗</a></article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section method-section" id="method" aria-labelledby="method-title">
+      <div class="page-shell">
+        <header class="section-heading section-heading--inverse">
+          <p class="section-index">07 / Метод</p>
+          <h2 id="method-title">Что посчитано — и чего здесь нет</h2>
+        </header>
+        <div class="method-grid">
+          <article><span class="method-no">01</span><h3>Реакции</h3><p>Суммированы все экспортированные emoji, custom emoji и paid reactions. Голоса в опросах в реакционные суммы не входят.</p></article>
+          <article><span class="method-no">02</span><h3>Канальный перекос</h3><p>Канальным считается сообщение, чей <code>from_id</code> начинается с <code>channel</code>. Сравниваются отдельно доля сообщений и доля реакций.</p></article>
+          <article><span class="method-no">03</span><h3>Шутки</h3><p>Joke score — сумма 😁, 🤣 и 😂. Исключены канальные публикации, однословные ответы и шутки, которым нужен отсутствующий родитель.</p></article>
+          <article><span class="method-no">04</span><h3>Ограничения</h3><p>Медиа не встроены, внешние утверждения не фактчекались, а время интерпретировано как Europe/Moscow, потому что в экспорте нет явного offset.</p></article>
+        </div>
+        <footer class="source-footer">
+          <p>Источник: Telegram Desktop export · Чат Котенков и Горь · chat ID 1778093200 · snapshot 13.07.2026.</p>
+          <a class="back-to-top" href="#overview">К началу ↑</a>
+        </footer>
+      </div>
+    </section>
   </main>
   <div id="copy-status" role="status" aria-live="polite"></div>
 </body>
