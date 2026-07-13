@@ -228,12 +228,75 @@ def test_mask_secrets():
 def test_default_config_includes_opencode_and_research_defaults():
     cfg = default_config()
 
+    assert cfg["ui"]["onboarding_version"] == 0
     assert cfg["ai"]["backend"] == "direct"
     assert cfg["ai"]["opencode_transport"] == "cli"
     assert cfg["ai"]["opencode_command"] == "opencode"
     assert cfg["ai"]["opencode_agent"] == "work-hunter-ai"
     assert cfg["ai"]["opencode_server_url"] == "http://127.0.0.1:4096"
     assert cfg["research"]["max_results"] == 200
+
+
+@pytest.mark.parametrize(
+    ("profiles", "expected_profile"),
+    [
+        ({}, "default"),
+        ({"default": {"queries": ["go"]}}, "legacy"),
+        (
+            {
+                "default": {"queries": ["go"]},
+                "legacy": {"queries": ["rust"]},
+                "legacy-2": {"queries": ["java"]},
+            },
+            "legacy-3",
+        ),
+    ],
+)
+def test_load_config_migrates_flat_profile_without_overwriting_named_profiles(
+    tmp_path, profiles, expected_profile
+):
+    path = tmp_path / "config.json"
+    raw = {
+        "profile": {
+            "name": "Кандидат",
+            "queries": ["python"],
+            "desired_roles": ["backend"],
+        },
+        "profiles": profiles,
+        "ui": {"host": "127.0.0.1", "port": 8787},
+    }
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    loaded = load_config(path)
+
+    assert loaded["profile"] == expected_profile
+    assert loaded["profiles"][expected_profile]["queries"] == ["python"]
+    assert loaded["ui"]["onboarding_version"] == 2
+    for profile_id, profile in profiles.items():
+        assert loaded["profiles"][profile_id]["queries"] == profile["queries"]
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["profile"] == expected_profile
+    assert persisted["ui"]["onboarding_version"] == 2
+
+
+def test_load_config_reuses_structurally_equal_default_profile(tmp_path):
+    path = tmp_path / "config.json"
+    flat_profile = {"desired_roles": ["backend"], "queries": ["python"]}
+    path.write_text(
+        json.dumps(
+            {
+                "profile": {"queries": ["python"], "desired_roles": ["backend"]},
+                "profiles": {"default": flat_profile},
+                "ui": {"host": "127.0.0.1", "port": 8787},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_config(path)
+
+    assert loaded["profile"] == "default"
+    assert set(loaded["profiles"]) == {"default"}
 
 
 def test_default_config_includes_hh_transport_defaults():

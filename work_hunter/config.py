@@ -18,6 +18,7 @@ from .sources.public_boards import PUBLIC_BOARD_SOURCE_NAMES, public_board_defau
 
 CONFIG_FILENAME = "work_hunter_config.json"
 DATA_DIRNAME = ".work-hunter"
+CURRENT_UI_ONBOARDING_VERSION = 2
 MASK = "***"
 SENSITIVE_EXACT = {"token", "password", "secret", "api_key", "key"}
 SENSITIVE_SUFFIXES = ("_token", "_password", "_secret", "_api_key", "_key")
@@ -194,6 +195,7 @@ def default_config() -> dict[str, Any]:
         "ui": {
             "host": "127.0.0.1",
             "port": 8787,
+            "onboarding_version": 0,
         },
     }
 
@@ -413,13 +415,51 @@ def clear_config_secret_value(
     return cleared
 
 
+def _migrate_ui_config_document(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    migrated = copy.deepcopy(raw)
+    changed = False
+    profiles = migrated.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {}
+        migrated["profiles"] = profiles
+        changed = True
+
+    flat_profile = migrated.get("profile")
+    if isinstance(flat_profile, dict):
+        if "default" not in profiles or profiles.get("default") == flat_profile:
+            target = "default"
+        else:
+            suffix = 1
+            target = "legacy"
+            while target in profiles:
+                suffix += 1
+                target = f"legacy-{suffix}"
+        profiles[target] = copy.deepcopy(flat_profile)
+        migrated["profile"] = target
+        changed = True
+
+    ui = migrated.get("ui")
+    if not isinstance(ui, dict):
+        ui = {}
+        migrated["ui"] = ui
+        changed = True
+    if "onboarding_version" not in ui:
+        ui["onboarding_version"] = CURRENT_UI_ONBOARDING_VERSION
+        changed = True
+    return migrated, changed
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     path = Path(path)
     if not path.exists():
         return default_config()
     with path.open("r", encoding="utf-8") as fh:
         loaded = json.load(fh)
-    return _deep_merge(default_config(), loaded)
+    migrated, changed = _migrate_ui_config_document(loaded)
+    config = _deep_merge(default_config(), migrated)
+    if changed:
+        save_config(path, config)
+    return config
 
 
 def merge_config_snapshot_changes(
