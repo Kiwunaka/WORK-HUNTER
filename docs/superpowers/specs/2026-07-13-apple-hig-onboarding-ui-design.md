@@ -45,22 +45,33 @@ The persistent navigation contains eight destinations.
 | Sources | Source connectivity, capability, last sync, errors | `/sources` |
 | Settings | Profiles, resumes, AI, HH auth, notifications, appearance, help | `/settings`; HH API Lab and low-frequency operator tools live under an Advanced subsection |
 
-Legacy routes use `history.replaceState` so browser history does not contain a redundant redirect entry. The mapping is exact:
+Canonical destination paths are `/today`, `/jobs`, `/applications`, `/calendar`, `/assistant`, `/analytics`, `/sources`, and `/settings`. Legacy routes use `history.replaceState` so browser history does not contain a redundant redirect entry. The mapping is exact:
 
-| Incoming path | Canonical state |
+| Incoming path | Canonical output URL |
 |---|---|
-| `/` or `/today` | Today |
-| `/jobs` | Vacancies; preserve recognized `source`, `min_score`, `status`, and `job` query values |
-| `/favorites` | Vacancies with `filter=saved`; merge recognized incoming query values |
-| `/calendar` | Calendar; preserve an `event` query value |
-| `/chat` | Assistant; preserve a `job` query value |
-| `/agent` | Applications with `tab=agent`; preserve recognized `approval`, `run`, and `operation` query values |
-| `/settings` | Settings; preserve recognized `section` query values |
-| `/sources` | Sources |
-| `/stats` | Analytics with `tab=overview` |
-| `/trends` | Analytics with `tab=trends` |
+| `/` or `/today` | `/today` |
+| `/jobs` | `/jobs` with valid recognized query values |
+| `/favorites` | `/jobs?filter=saved` plus valid recognized query values |
+| `/calendar` | `/calendar` with a valid `event` value |
+| `/chat` or `/assistant` | `/assistant` with a valid `job` value |
+| `/agent` | `/applications?tab=agent` plus valid record query values |
+| `/applications` | `/applications` with valid `tab` and record query values |
+| `/settings` | `/settings` with a valid `section` value |
+| `/sources` | `/sources` |
+| `/stats` | `/analytics?tab=overview` |
+| `/trends` | `/analytics?tab=trends` |
+| `/analytics` | `/analytics` with a valid `tab` value |
 
-Unknown query keys and hash fragments remain in the URL but do not affect UI state. Invalid recognized identifiers are removed and reported through a non-blocking warning toast. The router never converts an invalid identifier into a different valid record.
+Recognized query values are:
+
+- Vacancies: `filter` is `all` or `saved`; `source` is a loaded source key; `min_score` is an integer from 0–100; `status` is `new`, `saved`, `hidden`, `applied`, or `ghosted`; `job` is a positive safe integer.
+- Calendar: `event` is a positive safe integer.
+- Assistant: `job` is a positive safe integer.
+- Applications: `tab` is `pipeline`, `agent`, or `automation`; `approval`, `run`, and `operation` are positive safe integers.
+- Analytics: `tab` is `overview` or `trends`.
+- Settings: `section` is `profile`, `resumes`, `search`, `hh`, `ai`, `notifications`, `appearance`, `help`, or `advanced`.
+
+When a path has no explicit `tab`, `filter`, or `section`, use the first value listed above. Preserve unknown query keys and hash fragments verbatim but ignore them for UI state. Remove invalid recognized values and report one non-blocking warning toast. Serialize recognized values in the order shown above, followed by unknown keys in their original order. `popstate` re-runs the same parser without adding or replacing a history entry. The router never converts an invalid identifier into a different valid record.
 
 ### Capability inventory
 
@@ -96,12 +107,18 @@ The primary action is **Find vacancies**. The screen must not invent metrics or 
 Focus actions are selected in this priority order:
 
 1. pending live-action approvals, oldest creation time first;
-2. overdue then due-today tasks or events, earliest due time first;
+2. open tasks overdue by no more than 30 local calendar days, then open tasks due today, earliest due time first; calendar events are eligible here only when scheduled today and are never carried forward after their date;
 3. `new` vacancies with score at least 70, highest score first;
 4. incomplete readiness actions in the order goal, source, resume;
 5. source failures, most recent failure first.
 
-Take the first three after sorting. Ties use the stable numeric record ID ascending. Fresh matches use `status == "new"`, then total score descending, `published_at` or `fetched_at` descending, and ID descending. There is no separate `unseen` concept in this redesign.
+Approval eligibility requires `status == "pending"`; task eligibility requires `status == "open"`. Use the browser's local timezone for Today boundaries. Parse timestamps with offsets as absolute instants converted to local time; parse a date-only `YYYY-MM-DD` as that local calendar date; exclude missing or invalid timestamps from Today and show their record in Calendar/Applications with a date warning. Tasks more than 30 local days overdue stay in Calendar but do not monopolize Focus.
+
+Take the first three after sorting. Numeric records use ID ascending for ties. Synthetic readiness actions use the fixed goal/source/resume order. Source failures use source key ascending after failure time. These category-specific keys resolve every tie; no cross-category tie occurs because category priority is primary.
+
+The Upcoming region contains the next two valid Calendar events at or after the current local instant and no later than 30 local days ahead, ordered by parsed event time then numeric ID ascending. Past, invalid, and more distant events remain in Calendar but do not appear on Today.
+
+Fresh matches use `status == "new"`, then total score descending, `published_at` or `fetched_at` descending, and ID descending. Invalid vacancy timestamps sort after valid timestamps and still use ID descending. There is no separate `unseen` concept in this redesign.
 
 Each Today input is a `ResourceState<T>` with `status` (`loading`, `ready`, or `error`), optional `data`, optional safe error metadata, optional `updatedAt`, and `stale: boolean`. Source loaders derive `stale` from backend-reported last-sync/error state; other resources default it to `false`. The composer receives these resource states, not bare arrays, so loading, genuine empty, stale, and failed inputs cannot be confused.
 
@@ -117,7 +134,9 @@ Readiness begins as `loading`. It becomes:
 
 The three core conditions are: at least one non-empty desired role or search query, at least one enabled source, and one active resume. HH authentication and AI credentials are recommendations, not readiness requirements.
 
-The wizard never auto-opens while readiness is `loading` or `unknown`. `unknown` renders a Today readiness error with Retry. `incomplete` opens the first incomplete step unless onboarding was deferred for the current tab session. If the product data later stops satisfying a completed step, readiness returns to `incomplete`; presentation progress never overrides domain truth.
+Readiness is separate from first-run confirmation. Add `ui.onboarding_version` to the config schema with new-install default `0`. The config loader must inspect the raw saved config before applying defaults: when a legacy config lacks this key, persist `ui.onboarding_version=2`; a newly initialized config already contains `0`. Thus a genuine new install reviews all three steps even though default roles and sources are prefilled, while an existing installation is not forced to reconfirm unchanged configuration. A legacy installation that is actually incomplete still opens the missing core step because domain readiness remains authoritative.
+
+The wizard never auto-opens while readiness is `loading` or `unknown`. `unknown` renders a Today readiness error with Retry. At stable boot, open the wizard when either `ui.onboarding_version < 2` or readiness is `incomplete`, unless onboarding was deferred for the current tab session. If version is below 2, start at the first step not present in `completedSteps`, even when its prefilled domain condition is already satisfied. If version is 2 and readiness is incomplete, start at the first missing domain condition. If product data later stops satisfying a completed step, readiness returns to `incomplete`; presentation progress never overrides domain truth.
 
 ### Persistence schema
 
@@ -139,14 +158,17 @@ Current-tab state is JSON in `sessionStorage["work-hunter:guidance-session:v2"]`
 ```json
 {
   "onboardingDeferred": false,
+  "forceReview": false,
   "coachMarkShown": false,
   "snoozedCoachMarks": []
 }
 ```
 
-Malformed, wrong-version, or wrong-shape values are ignored and replaced with defaults; they never change product configuration. Permanent changes are reconciled across tabs through the `storage` event. The one-new-mark limit is per tab session. Settings → **Run introduction again** clears both keys in the current tab, writes the default permanent state for other tabs, and leaves domain configuration untouched.
+Malformed, wrong-version, or wrong-shape values are ignored and replaced with defaults; they never change product configuration. Permanent changes are reconciled across tabs through the `storage` event. The one-new-mark limit is per tab session. Settings → **Run introduction again** resets the permanent presentation state, sets `forceReview=true` in the current tab, and opens Goal with current values prefilled; it does not lower the server onboarding version or delete product configuration. Completing this voluntary review clears `forceReview`. Settings also exposes **Show tips again**, which resets only coach-mark arrays and session guidance state.
 
 **Set up later** sets `onboardingDeferred=true` in session storage and closes the wizard until that tab session ends; it does not complete or skip any step. There is no per-step skip for the three core requirements. Only optional HH setup can be skipped. Completion requires all three domain readiness conditions.
+
+`completed=true` is written only after all three core conditions are verified and the server has successfully persisted `ui.onboarding_version=2`. On every boot, a stored `completed=true` is ignored when the server version is below 2 or readiness is not `ready`.
 
 ### Wizard state transitions
 
@@ -154,14 +176,19 @@ Malformed, wrong-version, or wrong-shape values are ignored and replaced with de
 |---|---|
 | Boot, readiness `loading` | Render shell and section skeletons; do not open a sheet |
 | Readiness `unknown` | Render Today readiness error with Retry; do not infer missing configuration |
-| Readiness `ready` | Mark wizard completed, render Today, then schedule guidance |
-| Readiness `incomplete` and not deferred | Open first incomplete step |
+| Stable boot, version 2 and readiness `ready` | Render Today, then schedule guidance |
+| Stable boot, version below 2 and not deferred | Open first locally unconfirmed step, beginning with Goal on a new install |
+| Stable boot, readiness `incomplete` and not deferred | Open first missing core step regardless of stored presentation completion |
+| `forceReview=true` and readiness is stable | Open Goal with current values, regardless of server version; clear the flag only on completed review or explicit session deferral |
 | **Set up later** | Set session deferral, close sheet, keep readiness action visible |
 | Step submit | Disable all submit paths for that step, show busy state, send one request |
 | Step request success | Reload affected resource, verify the domain condition, record step completion, advance |
 | Step request failure or failed verification | Stay on the step, preserve input, restore controls, show inline error and Retry |
-| Final sync success | Mark completed, close sheet, route to Today, show success toast |
-| Final sync failure | Keep completed settings, stay on the summary with Retry and **Continue to Today**; only the latter or a later successful sync closes the wizard |
+| Resume activation makes readiness `ready` | Stay on the wizard summary; readiness changes never auto-close an already open wizard |
+| Final sync success | Persist `ui.onboarding_version=2`; after that save succeeds, write local `completed=true`, close, route to Today, show success toast |
+| Final sync failure | Keep completed settings, stay on the summary with Retry and **Continue to Today** |
+| **Continue to Today** after sync failure | Persist `ui.onboarding_version=2` without repeating sync; after that save succeeds, write local `completed=true`, close, and show a persistent sync-failure toast with Retry |
+| Persisting version 2 fails | Stay on summary, preserve sync result, and Retry only the config-version save; never repeat a successful sync |
 
 ### Step 1 — Search goal
 
@@ -173,7 +200,15 @@ Collect and save only the minimum useful profile fields through the existing con
 
 The screen explains that detailed skills, exclusions, and locations can be edited later.
 
-Validation requires a trimmed role/query, a recognized work-format value, and a non-negative integer salary. Submit updates the in-memory masked config snapshot and sends one `POST /api/config`. Only a 2xx response followed by a successful config reload can complete the step. A rapid double click cannot create a second request.
+Let `profileId = config.profile` and `profile = config.profiles[profileId]`. The role field writes the same trimmed value to `profile.title`, `profile.queries = [value]`, and `profile.desired_roles = [value]`. Salary writes `profile.salary_min` as a non-negative integer.
+
+Work format has exactly three UI values and maps to existing fields:
+
+- `remote`: set `profile.remote_only=true`; preserve `profile.locations`.
+- `hybrid`: set `profile.remote_only=false`; ensure one case-insensitive `remote` entry exists in `profile.locations`, preserving other entries and order.
+- `office`: set `profile.remote_only=false`; remove case-insensitive `remote` entries from `profile.locations`, preserving other entries and order.
+
+Reload inference is `remote` when `remote_only` is true, otherwise `hybrid` when locations contains `remote`, otherwise `office`. Validation requires a trimmed role/query, one of the three exact format values, and a non-negative safe integer salary. Submit updates the in-memory masked config snapshot and sends one `POST /api/config`. Only a 2xx response followed by a successful reload whose active profile equals these mappings can complete the step. A rapid double click cannot create a second request.
 
 ### Step 2 — Sources and HH
 
@@ -201,7 +236,7 @@ After the setup sheet, define exactly four ordered coach marks and show no more 
 3. Save, hide, or move a vacancy into Applications.
 4. Review the safety sheet before a real HH action.
 
-The scheduler scans the ordered list and chooses the first mark whose prerequisite is satisfied and whose anchor is visible on the current route. An unavailable anchor remains pending; it is neither completed nor dismissed and does not prevent a later currently eligible mark from appearing. Once any new mark has appeared, `coachMarkShown=true` prevents another new mark in that tab session.
+The scheduler scans the ordered list and chooses the first mark whose prerequisite is satisfied and whose anchor is visible on the current route. Visible means connected, not `hidden` or inert, intersecting the viewport, and not covered at its center point according to `document.elementFromPoint`. An unavailable or covered anchor remains pending; it is neither completed nor dismissed and does not prevent a later currently eligible mark from appearing. Once any new mark has appeared, `coachMarkShown=true` prevents another new mark in that tab session.
 
 Coach-mark actions have explicit semantics:
 
@@ -247,7 +282,7 @@ Use for onboarding steps, multi-field configuration, and decisions that must be 
 
 ### Overlay arbitration
 
-The overlay manager owns one blocking sheet and one optional child popover.
+The overlay manager owns one blocking sheet, one optional child popover, and at most one base-layer educational/context overlay (`coachMark` or base popover). Hover/focus tooltips are ephemeral but are suppressed on a coach-mark anchor while its coach mark is visible.
 
 | Request | Arbitration rule |
 |---|---|
@@ -256,22 +291,44 @@ The overlay manager owns one blocking sheet and one optional child popover.
 | Open help from inside a sheet | Open one child popover anchored inside that sheet; a new popover replaces the old popover only |
 | Close a sheet | Close its child popover first, then restore focus to the sheet trigger if it still exists |
 | Request a safety sheet while another sheet exists | Reject and show a warning toast; live action controls are not rendered inside onboarding/configuration sheets |
+| Open a sheet or mobile menu while a coach mark is visible | Close and snooze the coach mark for the current session, then open the sheet/menu |
+| Open a base popover while a coach mark is visible | Close and snooze the coach mark, then open the popover |
+| Schedule a coach mark while a sheet, mobile menu, or base popover is visible | Defer it until the base layer is clear and the anchor passes visibility checks |
+| Coach-mark anchor becomes covered, inert, disconnected, or off-screen | Close it without permanent completion and re-evaluate on a later stable render |
 | Toast while any overlay exists | Allow it; toast never steals focus or changes overlay ownership |
 
-The onboarding resume form is rendered inside the onboarding sheet rather than opening the ordinary resume sheet. No flow depends on nested blocking sheets.
+Escape closes only the topmost dismissible layer: child popover, then base coach mark/popover, then blocking sheet/mobile menu. The onboarding resume form is rendered inside the onboarding sheet rather than opening the ordinary resume sheet. No flow depends on nested blocking sheets.
 
 ### Live-action safety sheet
 
-Every real HH mutation opens a dedicated confirmation sheet before the request is sent. It shows:
+Every real HH mutation opens a dedicated confirmation sheet built from a typed `LiveActionDescriptor`:
 
-- vacancy and company;
-- selected resume;
-- cover-letter presence and length;
-- the exact live consequence;
-- risk flags or blockers;
-- an explicit acknowledgement control.
+```text
+operationType: apply | reply | campaign | cleanup | resume_account | api_lab
+title: user-facing action name
+consequence: exact live consequence
+targetRows: ordered safe label/value summaries
+preview: optional masked message/filter/body preview
+riskFlags: stable safe codes and user-facing descriptions
+acknowledgement: exact checkbox label
+confirmLabel: exact button label
+fingerprint: stable identifier for the reviewed plan/state
+revalidate(): read-only or dry-run validation result
+execute(confirm: true): live request result
+```
 
-The destructive button remains disabled until the acknowledgement is selected. The client sends the JSON boolean `true`, never a truthy string. The service and transport guards remain authoritative. Cancelling or closing the sheet sends no mutation request.
+Required operation-specific rows are:
+
+| Type | Required summary |
+|---|---|
+| Apply | Vacancy/company, resume, letter presence and length |
+| Reply | Negotiation/employer, message recipient and masked preview |
+| Campaign | Run ID, candidate item count, filters, resume |
+| Cleanup | Object type, exact count, selection criteria |
+| Resume/account | Resume/account identifier and field/action change summary |
+| API Lab mutation | HTTP method, normalized path, masked params/body |
+
+A missing required row or missing revalidation function blocks the UI before confirmation. The destructive button remains disabled until the acknowledgement is selected. On click, call `revalidate()` first with the button busy. Auth loss, capability loss, changed fingerprint, a new blocker, or validation failure sends no mutation; update the sheet with the new state and require a fresh acknowledgement. Only a matching successful validation calls `execute(confirm: true)`. The client sends the JSON boolean `true`, never a truthy string. A blocked/error response from the authoritative service guard stays in the sheet and never displays success. Cancelling or closing sends neither validation nor mutation.
 
 ### Inline error
 
@@ -291,12 +348,15 @@ The implementation keeps data operations separate from presentation behavior.
 | Today composer | Derive readiness and ordered daily actions while preserving loading/error/stale distinctions | `ResourceState` values for profile, sources, resumes, jobs, tasks, events, approvals → section view models |
 | Onboarding controller | Determine the current step, persist presentation progress, call existing config/resume/sync APIs | readiness plus local progress → sheet state and save actions |
 | Guidance controller | Schedule eligible coach marks and permanent dismissals | current route, anchors, progress → at most one visible coach mark |
-| Overlay manager | Enforce the sheet/child-popover arbitration table, focus handling, Escape behavior, and restoration | overlay requests plus current owner → accepted/rejected lifecycle result |
+| Overlay manager | Enforce sheet, child-popover, coach-mark, base-popover, mobile-menu, focus, and Escape arbitration | overlay requests plus current owner → accepted/rejected lifecycle result |
 | Notification center | Queue, deduplicate, announce, expire, and action toasts | typed notification events → visible toast stack |
+| Live-action registry | Build and validate operation-specific safety descriptors without owning server policy | domain action key/state → complete `LiveActionDescriptor` or blocked UI result |
 | View loaders | Load each route or panel independently and expose loading/error/retry state | API functions → section state |
 | Existing domain actions | Sync, score, update status, prepare letters, applications, HH operations | unchanged API contracts and safety guards |
 
 No component owns both server data mutation policy and UI confirmation. Confirmation improves user understanding; server guards enforce safety.
+
+`ResourceState<T>` is a discriminated union: `loading` carries no data/error, `ready` requires `data` and may carry `updatedAt`/`stale`, and `error` requires safe error metadata and may carry last-known data explicitly marked stale. Consumers must exhaustively branch on status.
 
 ## Data Flow
 
@@ -319,7 +379,9 @@ No component owns both server data mutation policy and UI confirmation. Confirma
 - At viewport widths of 961 px and above, use the full 232 px sidebar.
 - From 721–960 px, use a 72 px icon sidebar with accessible names and hover/focus tooltips.
 - At 720 px and below, replace the sidebar with a compact top app bar and menu sheet; stack Today regions into one column, keep the primary action visible, and prevent horizontal scrolling.
-- Long tables may use a focused mobile row/list representation, but data and actions remain equivalent.
+- At 680×844, the Today title, readiness state, and **Find vacancies** action must all appear within the first 600 CSS pixels of document content without scrolling horizontally.
+- Long tables may use a mobile row/list representation. Each mobile vacancy row must expose score, role, company, status, and salary/location summary; every desktop row/detail action remains reachable through the row or a labeled **Actions** menu using the same stable action identifier.
+- At every acceptance viewport, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`. Every visible interactive element's bounding box must fit within the viewport width, and opening the mobile menu must make all eight destinations keyboard reachable.
 
 ## Accessibility
 
@@ -349,13 +411,17 @@ No component owns both server data mutation policy and UI confirmation. Confirma
 ### Contract tests
 
 - Exact canonical route, recognized-query, invalid-identifier, and legacy redirect mapping.
+- `popstate` rehydrates canonical state without adding history, including Applications and Analytics tabs.
+- New default config contains onboarding version 0; loading a legacy raw config without the key persists version 2 before default merge hides the distinction.
 - Presence of the eight navigation destinations and Today regions.
+- Deterministic Focus/Fresh/Upcoming ordering covers status filters, invalid dates, browser-local boundaries, more-than-30-day overdue records, and every category tie key.
 - Local-only assets, system font stack, responsive rules, dialog semantics, toast live region, and reduced-motion support.
 - No production `window.alert` or `window.confirm` remains for application feedback or live-action authorization.
 
 ### Browser tests
 
 - Incomplete first launch opens the correct step and resumes it after reload.
+- A genuine new install with prefilled default goals/sources still begins at Goal and requires confirmation of all three steps.
 - A failed core readiness request reports `unknown` and never opens onboarding.
 - Ready existing configuration skips the wizard.
 - Set up later survives reload in the same tab, does not mark a step complete, and leaves a Today readiness action; a new tab/session may show the wizard.
@@ -364,11 +430,13 @@ No component owns both server data mutation policy and UI confirmation. Confirma
 - Coach marks follow the state table, at most one new mark per session, defer missing anchors, and stay completed or dismissed.
 - Keyboard focus, Escape, outside click, and focus restoration work for each overlay type.
 - Overlay conflicts follow the arbitration table; rapid double submission produces one request.
+- Resume activation does not auto-close the wizard. Sync failure plus reload returns to Summary; **Continue to Today** persists version 2 without repeating sync.
 - Success toast expires; actionable error remains and Retry runs only the failed operation.
 - One failed boot request does not prevent other Today regions from rendering.
 - Live HH action sends no request on Cancel and sends literal `confirm: true` only after acknowledgement.
+- Apply, reply, campaign, cleanup, resume/account, and API Lab descriptors render their required summaries. Changed fingerprint or lost auth/capability during revalidation sends no mutation.
 - Today, Vacancies, Applications, and Settings retain core workflows after navigation reorganization.
-- Viewports 1440×900, 900×900, and 680×844 cover full sidebar, compact sidebar, and single-column modes with no clipped primary content or horizontal overflow.
+- Viewports 1440×900, 900×900, and 680×844 cover full sidebar, compact sidebar, and single-column modes. Assert the scroll-width and first-600-pixel rules, all eight mobile destinations, and equality of stable vacancy action identifiers between desktop and mobile presentations.
 
 ### Safety regression
 
