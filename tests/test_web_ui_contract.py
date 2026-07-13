@@ -8,7 +8,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from work_hunter.models import Job, JobScore
+from work_hunter.models import Job, JobScore, Resume
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import _compute_stats, _job_json, make_handler
 
@@ -47,6 +47,14 @@ def _post_json(base: str, path: str, body: dict) -> tuple[int, dict]:
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _get_json(base: str, path: str) -> tuple[int, object]:
+    try:
+        status, _, body = _get_text(base, path)
+        return status, json.loads(body)
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
@@ -202,6 +210,51 @@ def test_resume_api_rejects_invalid_ats_score(tmp_path):
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def test_resume_api_filters_by_valid_profile_and_preserves_default_route(tmp_path):
+    app = WorkHunter(tmp_path)
+    app.config["profiles"]["backend"] = {
+        **app.config["profiles"]["default"],
+        "name": "Backend",
+    }
+    app.save_config(app.config)
+    app.storage.save_resume(Resume(name="Default CV", body="A", profile_id="default"))
+    app.storage.save_resume(Resume(name="Backend CV", body="B", profile_id="backend"))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        default_status, default_payload = _get_json(base, "/api/resumes")
+        backend_status, backend_payload = _get_json(
+            base, "/api/resumes?profile_id=backend"
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert default_status == 200
+    assert [item["name"] for item in default_payload] == ["Default CV"]
+    assert backend_status == 200
+    assert [item["name"] for item in backend_payload] == ["Backend CV"]
+
+
+def test_resume_api_rejects_unknown_profile(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        status, payload = _get_json(base, "/api/resumes?profile_id=missing")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert status == 400
+    assert payload == {"error": "invalid_profile"}
 
 
 def test_resume_api_rejects_missing_update_target(tmp_path):

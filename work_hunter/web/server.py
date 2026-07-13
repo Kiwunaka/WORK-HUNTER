@@ -218,7 +218,15 @@ def make_handler(root: Path):
                 return
             if path == "/api/resumes":
                 app = WorkHunter(root)
-                resumes = app.storage.list_resumes()
+                query = parse_qs(parsed.query)
+                profile_id = _str_arg(query, "profile_id") or "default"
+                profiles = app.config.get("profiles") or {}
+                if profile_id not in profiles:
+                    self._send_json(
+                        {"error": "invalid_profile"}, HTTPStatus.BAD_REQUEST
+                    )
+                    return
+                resumes = app.storage.list_resumes(profile_id=profile_id)
                 self._send_json([r.to_dict() for r in resumes])
                 return
             if path == "/api/hh/resumes":
