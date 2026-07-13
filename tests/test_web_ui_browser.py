@@ -1117,3 +1117,227 @@ def test_overlay_escape_is_lifo_and_restores_trigger_focus(browser_app):
     page.keyboard.press("Escape")
     expect(page.locator("#sheet-root [role='dialog']")).to_have_count(0)
     assert page.evaluate("() => document.activeElement?.id") == "overlay-test-trigger"
+
+
+@pytest.mark.parametrize(
+    "operation_type",
+    ["apply", "reply", "campaign", "cleanup", "resume_account", "api_lab"],
+)
+def test_live_action_descriptor_requires_operation_rows(browser_app, operation_type):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+
+    result = page.evaluate(
+        "type => WorkHunterUI.feedback.validateLiveDescriptor({operationType:type,targetRows:[]})",
+        operation_type,
+    )
+
+    assert result == {"valid": False, "code": "missing_required_rows"}
+
+
+def test_live_action_cancel_sends_neither_validation_nor_mutation(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+    page.evaluate(
+        """
+        () => {
+          window.liveCalls = {validate: 0, execute: 0};
+          WorkHunterUI.feedback.openLiveAction({
+            operationType: 'cleanup', title: 'Очистить?', consequence: 'Удалит записи',
+            targetRows: [
+              {key:'object_type', label:'Тип', safeValue:'черновики'},
+              {key:'count', label:'Количество', safeValue:'2'},
+              {key:'criteria', label:'Условие', safeValue:'старше 30 дней'}
+            ],
+            riskFlags: [], acknowledgement: 'Я проверил условия', confirmLabel: 'Удалить',
+            fingerprint: 'cleanup-v1',
+            revalidate: async () => { window.liveCalls.validate += 1; },
+            execute: async () => { window.liveCalls.execute += 1; }
+          });
+        }
+        """
+    )
+
+    page.locator("[data-live-cancel]").click()
+    expect(page.locator("[data-live-action]")).to_have_count(0)
+    assert page.evaluate("() => window.liveCalls") == {"validate": 0, "execute": 0}
+
+
+def test_live_action_changed_descriptor_requires_fresh_acknowledgement(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+    page.evaluate(
+        """
+        () => {
+          window.liveExecuted = 0;
+          function descriptor(fingerprint, consequence) {
+            return {
+              operationType: 'cleanup', title: 'Очистить?', consequence,
+              targetRows: [
+                {key:'object_type', label:'Тип', safeValue:'черновики'},
+                {key:'count', label:'Количество', safeValue: fingerprint === 'v1' ? '2' : '3'},
+                {key:'criteria', label:'Условие', safeValue:'старше 30 дней'}
+              ],
+              riskFlags: [], acknowledgement: 'Я проверил условия', confirmLabel: 'Удалить',
+              fingerprint,
+              revalidate: async () => fingerprint === 'v1' ? {
+                status:'changed', fingerprint:'v2', auth:{status:'ready'},
+                capability:{available:true, code:'ok'}, blockers:[], riskFlags:[],
+                canExecute:false, updatedDescriptor: descriptor('v2', 'Удалит три записи')
+              } : {
+                status:'executable', fingerprint:'v2', auth:{status:'ready'},
+                capability:{available:true, code:'ok'}, blockers:[], riskFlags:[], canExecute:true
+              },
+              execute: async () => { window.liveExecuted += 1; }
+            };
+          }
+          WorkHunterUI.feedback.openLiveAction(descriptor('v1', 'Удалит две записи'));
+        }
+        """
+    )
+
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-consequence]")).to_have_text("Удалит три записи")
+    expect(page.locator("[data-live-ack]")).not_to_be_checked()
+    expect(page.locator("[data-live-confirm]")).to_be_disabled()
+    assert page.evaluate("() => window.liveExecuted") == 0
+
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-action]")).to_have_count(0)
+    assert page.evaluate("() => window.liveExecuted") == 1
+
+
+def test_live_action_missing_changed_replacement_blocks_execution(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+    page.evaluate(
+        """
+        () => {
+          window.liveExecuted = 0;
+          WorkHunterUI.feedback.openLiveAction({
+            operationType:'resume_account', title:'Обновить?', consequence:'Изменит резюме',
+            targetRows:[
+              {key:'resume_or_account', label:'Аккаунт', safeValue:'основной'},
+              {key:'changes', label:'Изменения', safeValue:'публикация'}
+            ],
+            riskFlags:[], acknowledgement:'Я проверил', confirmLabel:'Обновить', fingerprint:'v1',
+            revalidate:async () => ({
+              status:'changed', fingerprint:'v2', auth:{status:'ready'},
+              capability:{available:true, code:'ok'}, blockers:[], riskFlags:[], canExecute:false
+            }),
+            execute:async () => { window.liveExecuted += 1; }
+          });
+        }
+        """
+    )
+
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-status]")).to_contain_text("повторить")
+    expect(page.locator("[data-live-confirm]")).to_be_disabled()
+    assert page.evaluate("() => window.liveExecuted") == 0
+
+
+@pytest.mark.parametrize("blocked_by", ["auth", "capability"])
+def test_live_action_auth_or_capability_loss_never_executes(browser_app, blocked_by):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+    page.evaluate(
+        """
+        blockedBy => {
+          window.liveExecuted = 0;
+          WorkHunterUI.feedback.openLiveAction({
+            operationType:'resume_account', title:'Обновить?', consequence:'Изменит резюме',
+            targetRows:[
+              {key:'resume_or_account', label:'Аккаунт', safeValue:'основной'},
+              {key:'changes', label:'Изменения', safeValue:'публикация'}
+            ],
+            riskFlags:[], acknowledgement:'Я проверил', confirmLabel:'Обновить', fingerprint:'v1',
+            revalidate:async () => ({
+              status: blockedBy === 'auth' ? 'auth_required' : 'capability_lost',
+              fingerprint:'v1',
+              auth:{status: blockedBy === 'auth' ? 'expired' : 'ready'},
+              capability:{available: blockedBy !== 'capability', code:'lost'},
+              blockers:[], riskFlags:[], canExecute:false
+            }),
+            execute:async () => { window.liveExecuted += 1; }
+          });
+        }
+        """,
+        blocked_by,
+    )
+
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-action]")).to_have_count(1)
+    assert page.evaluate("() => window.liveExecuted") == 0
+
+
+def test_live_action_executes_only_with_literal_true(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+    page.evaluate(
+        """
+        () => {
+          window.liveConfirmValue = null;
+          WorkHunterUI.feedback.openLiveAction({
+            operationType:'cleanup', title:'Очистить?', consequence:'Удалит записи',
+            targetRows:[
+              {key:'object_type', label:'Тип', safeValue:'черновики'},
+              {key:'count', label:'Количество', safeValue:'2'},
+              {key:'criteria', label:'Условие', safeValue:'старше 30 дней'}
+            ],
+            riskFlags:[], acknowledgement:'Я проверил', confirmLabel:'Удалить', fingerprint:'v1',
+            revalidate:async () => ({
+              status:'executable', fingerprint:'v1', auth:{status:'ready'},
+              capability:{available:true, code:'ok'}, blockers:[], riskFlags:[], canExecute:true
+            }),
+            execute:async confirm => { window.liveConfirmValue = confirm; return {status:'ok'}; }
+          });
+        }
+        """
+    )
+
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-action]")).to_have_count(0)
+    assert page.evaluate("() => window.liveConfirmValue") is True
+
+
+def test_hh_lab_live_action_cancel_and_literal_confirmation(browser_app):
+    page, base_url, _ = browser_app
+    mutations: list[dict[str, object]] = []
+
+    def capture_mutation(route):
+        mutations.append(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"status":"ok"}',
+        )
+
+    page.route("**/api/hh/lab/call", capture_mutation)
+    page.goto(base_url + "/agent", wait_until="domcontentloaded")
+    page.locator(".agent-tab[data-agent-panel='api-lab']").click()
+    page.locator("#hh-lab-method").select_option("POST")
+    page.locator("#hh-lab-path").fill("/resumes/123/publish")
+    page.locator("#hh-lab-body").fill('{"token":"secret-value","publish":true}')
+
+    page.locator("#hh-lab-run-button").click()
+    expect(page.locator("[data-live-action='api_lab']")).to_be_visible()
+    expect(page.locator("[data-live-action='api_lab']")).not_to_contain_text(
+        "secret-value"
+    )
+    page.locator("[data-live-cancel]").click()
+    assert mutations == []
+
+    page.locator("#hh-lab-run-button").click()
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-action]")).to_have_count(0)
+
+    assert len(mutations) == 1
+    assert mutations[0]["confirm"] is True
+    assert mutations[0]["body"] == {"token": "secret-value", "publish": True}

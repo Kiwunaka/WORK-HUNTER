@@ -129,6 +129,47 @@
 .overlay-popover { width: min(360px, 100%); max-height: min(520px, calc(100vh - 48px)); border-radius: 12px; padding: 16px; }
 .has-blocking-overlay { overflow: hidden; }
 
+.live-action-sheet { display: grid; gap: 16px; }
+.live-action-eyebrow {
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.live-action-sheet h2 { font-size: 22px; line-height: 1.2; }
+.live-action-consequence { margin: -8px 0 0; color: var(--ink-secondary); font-size: 14px; }
+.live-action-rows {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.35fr) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.live-action-rows dt,
+.live-action-rows dd { padding: 9px 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.live-action-rows dt { background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; }
+.live-action-rows dd { margin: 0; color: var(--ink); }
+.live-action-rows > :nth-last-child(-n + 2) { border-bottom: 0; }
+.live-action-preview { max-height: 152px; overflow: auto; padding: 12px; border-radius: 10px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.live-action-risks { display: grid; gap: 6px; padding: 10px 12px 10px 28px; border-radius: 10px; background: rgba(255, 149, 0, 0.1); color: #7a4a00; }
+.live-action-status { min-height: 18px; margin: 0; color: var(--red); }
+.live-action-ack {
+  grid-template-columns: 20px 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  font-size: 13px;
+}
+.live-action-ack input { width: 18px; height: 18px; padding: 0; }
+.live-action-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.live-action-confirm { background: var(--red); border-color: transparent; color: #fff; font-weight: 650; }
+.live-action-confirm:hover:not(:disabled) { background: #d92d24; }
+.live-action-confirm:disabled { opacity: 0.45; cursor: not-allowed; }
+
 @media (max-width: 720px) {
   .overlay-backdrop { padding: 0; align-items: end; }
   .overlay-sheet { width: 100%; max-height: 88vh; border-radius: 18px 18px 0 0; padding: 20px; }

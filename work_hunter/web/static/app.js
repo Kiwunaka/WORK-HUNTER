@@ -25,6 +25,14 @@ const state = {
 };
 
 const $ = (selector) => document.querySelector(selector);
+const {
+  openLiveAction,
+  stableActionFingerprint,
+  maskForUi,
+  validateApplyMutation,
+  validateResumeAccountMutation,
+  validateLabMutation,
+} = window.WorkHunterUI.feedback;
 
 function notify(type, scope, code, title, message = "", action = null) {
   return window.appNotifications?.push({ type, scope, code, title, message, action });
@@ -298,42 +306,86 @@ async function prepareLetterAi() {
   }
 }
 
+function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
+  const job = state.jobs.find((item) => Number(item.id) === Number(jobId)) || {};
+  const review = {
+    jobId,
+    resumeId: plan.resume_id,
+    letter,
+    vacancy: job.title || `#${jobId}`,
+    company: job.company || "Не указана",
+  };
+  const fingerprint = stableActionFingerprint(review);
+  let descriptor;
+  descriptor = {
+    operationType: "apply",
+    title: "Отправить отклик на HH?",
+    consequence: "HH отправит реальный отклик от вашего аккаунта. Отменить его после отправки может быть невозможно.",
+    targetRows: [
+      { key: "vacancy", label: "Вакансия", safeValue: review.vacancy },
+      { key: "company", label: "Компания", safeValue: review.company },
+      { key: "resume", label: "Резюме", safeValue: `#${plan.resume_id}` },
+      { key: "letter", label: "Письмо", safeValue: letter ? `${letter.length} символов` : "Без письма" },
+    ],
+    preview: letter || null,
+    riskFlags: [{ code: "external_mutation", safeMessage: "Действие изменит данные внешнего аккаунта HH." }],
+    acknowledgement: "Я проверил вакансию, резюме и текст письма",
+    confirmLabel: "Отправить отклик",
+    fingerprint,
+    trigger,
+    revalidate: async () => validateApplyMutation(descriptor, async () => {
+      const currentPlan = await api(`/api/jobs/${jobId}/apply-plan`, {
+        method: "POST",
+        body: JSON.stringify({ letter }),
+      });
+      if (currentPlan.status !== "ready") {
+        return {
+          status: "blocked",
+          fingerprint,
+          blockers: [{ code: currentPlan.status || "not_ready", safeMessage: currentPlan.message || "Отклик сейчас недоступен." }],
+          canExecute: false,
+        };
+      }
+      const updatedDescriptor = buildApplyMutationDescriptor({ jobId, letter, plan: currentPlan, trigger });
+      if (updatedDescriptor.fingerprint !== fingerprint) {
+        return { status: "changed", fingerprint: updatedDescriptor.fingerprint, updatedDescriptor, canExecute: false };
+      }
+      return { status: "executable", fingerprint, canExecute: true };
+    }),
+    execute: async (confirm) => {
+      const result = await api(`/api/jobs/${jobId}/confirm-apply`, {
+        method: "POST",
+        body: JSON.stringify({ confirm: confirm === true, resume_id: plan.resume_id, letter }),
+      });
+      $("#action-output").textContent = JSON.stringify(result, null, 2);
+      if (result?.status === "applied") {
+        await loadJobs();
+        await selectJob(jobId);
+      }
+      return result;
+    },
+  };
+  return descriptor;
+}
+
 async function applyHh(dryRun = true) {
   if (!state.selectedId) return;
-
+  const jobId = state.selectedId;
   const letter = getLetterValue();
-  if (dryRun) {
-    const result = await api(`/api/jobs/${state.selectedId}/apply-plan`, {
-      method: "POST",
-      body: JSON.stringify({ letter }),
-    });
-    $("#action-output").textContent = JSON.stringify(result, null, 2);
-    return;
-  }
-
-  if (!confirm("This will send a real HH application from your account. Continue?")) {
-    return;
-  }
-
-  const plan = await api(`/api/jobs/${state.selectedId}/apply-plan`, {
+  const plan = await api(`/api/jobs/${jobId}/apply-plan`, {
     method: "POST",
     body: JSON.stringify({ letter }),
   });
-  if (plan.status !== "ready") {
-    $("#action-output").textContent = JSON.stringify(plan, null, 2);
-    return;
-  }
+  $("#action-output").textContent = JSON.stringify(plan, null, 2);
+  if (dryRun || plan.status !== "ready") return;
 
-  const result = await api(`/api/jobs/${state.selectedId}/confirm-apply`, {
-    method: "POST",
-    body: JSON.stringify({ confirm: true, resume_id: plan.resume_id, letter }),
+  const descriptor = buildApplyMutationDescriptor({
+    jobId,
+    letter,
+    plan,
+    trigger: document.activeElement,
   });
-  $("#action-output").textContent = JSON.stringify(result, null, 2);
-
-  if (result && result.status === "applied") {
-    await loadJobs();
-    await selectJob(state.selectedId);
-  }
+  openLiveAction(descriptor);
 }
 
 async function loadProfile() {
@@ -1363,22 +1415,72 @@ function writeHhLabOutput(payload) {
 
 const HH_LAB_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-function confirmHhLabMutation(payload) {
-  if (!HH_LAB_MUTATING_METHODS.has(payload.method.toUpperCase())) return true;
-  if (!window.confirm(`HH API mutation: ${payload.method} ${payload.path}. Continue?`)) return false;
-  return window.confirm("Final confirmation: this can change your HH account.");
+function currentHhLabPayload() {
+  return {
+    method: $("#hh-lab-method").value,
+    path: $("#hh-lab-path").value.trim(),
+    params: parseHhLabJson("#hh-lab-params", {}),
+    body: parseHhLabJson("#hh-lab-body", null),
+  };
+}
+
+function buildLabMutationDescriptor(payload, trigger = document.activeElement) {
+  const reviewed = {
+    method: payload.method.toUpperCase(),
+    path: payload.path,
+    params: payload.params,
+    body: payload.body,
+  };
+  const fingerprint = stableActionFingerprint(reviewed);
+  let descriptor;
+  descriptor = {
+    operationType: "api_lab",
+    title: "Выполнить изменяющий запрос к HH?",
+    consequence: `${reviewed.method} ${reviewed.path} может изменить данные вашего HH-аккаунта.`,
+    targetRows: [
+      { key: "method", label: "Метод", safeValue: reviewed.method },
+      { key: "path", label: "Путь", safeValue: reviewed.path },
+      { key: "params", label: "Параметры", safeValue: maskForUi(reviewed.params) },
+      { key: "body", label: "Тело", safeValue: maskForUi(reviewed.body) },
+    ],
+    riskFlags: [{ code: "api_lab", safeMessage: "API Lab обходит обычные продуктовые сценарии. Проверьте метод, путь и тело." }],
+    acknowledgement: "Я проверил метод, путь, параметры и тело запроса",
+    confirmLabel: "Выполнить запрос",
+    fingerprint,
+    trigger,
+    revalidate: async () => validateLabMutation(descriptor, () => {
+      let current;
+      try {
+        current = currentHhLabPayload();
+      } catch (error) {
+        return { status: "error", safeMessage: String(error?.message || error), canExecute: false };
+      }
+      const updatedDescriptor = buildLabMutationDescriptor(current, trigger);
+      if (updatedDescriptor.fingerprint !== fingerprint) {
+        return { status: "changed", fingerprint: updatedDescriptor.fingerprint, updatedDescriptor, canExecute: false };
+      }
+      return { status: "executable", fingerprint, canExecute: true };
+    }),
+    execute: async (confirm) => {
+      const request = { ...reviewed, confirm: confirm === true };
+      writeHhLabOutput({ status: "running", request: { ...request, body: maskForUi(request.body) } });
+      const result = await api("/api/hh/lab/call", { method: "POST", body: JSON.stringify(request) });
+      writeHhLabOutput(result);
+      await loadAgentOperations();
+      return result;
+    },
+  };
+  return descriptor;
 }
 
 async function runHhLabCall() {
   try {
-    const payload = {
-      method: $("#hh-lab-method").value,
-      path: $("#hh-lab-path").value.trim(),
-      params: parseHhLabJson("#hh-lab-params", {}),
-      body: parseHhLabJson("#hh-lab-body", null),
-    };
-    if (!confirmHhLabMutation(payload)) return;
-    if (HH_LAB_MUTATING_METHODS.has(payload.method.toUpperCase())) payload.confirm = true;
+    const payload = currentHhLabPayload();
+    if (HH_LAB_MUTATING_METHODS.has(payload.method.toUpperCase())) {
+      const descriptor = buildLabMutationDescriptor(payload, $("#hh-lab-run-button"));
+      openLiveAction(descriptor);
+      return;
+    }
     writeHhLabOutput({ status: "running", request: payload });
     const result = await api("/api/hh/lab/call", { method: "POST", body: JSON.stringify(payload) });
     writeHhLabOutput(result);
@@ -1430,15 +1532,7 @@ async function deleteHhLabSnippet(name) {
   await loadHhLabSnippets();
 }
 
-async function runAgentOperation(operation, button = null) {
-  const params = {};
-  if (operation === "update-resumes") {
-    if (!window.confirm("Update your HH resumes now?")) {
-      $("#agent-operation-note").textContent = `${operation}: cancelled`;
-      return;
-    }
-    params.confirm = true;
-  }
+async function executeAgentOperation(operation, params = {}, button = null) {
   if (button) button.disabled = true;
   $("#agent-operation-note").textContent = `${operation}: running`;
   try {
@@ -1448,11 +1542,59 @@ async function runAgentOperation(operation, button = null) {
     });
     $("#agent-operation-note").textContent = `${operation}: ${result.result?.status || "ok"}`;
     await Promise.all([loadAgentPreflight(), loadAgentDigest(), loadAgentOperations(), loadAgentApprovals()]);
+    return result;
   } catch (err) {
     $("#agent-operation-note").textContent = `${operation}: ${err.message}`;
+    throw err;
   } finally {
     if (button) button.disabled = false;
   }
+}
+
+function buildResumeAccountMutationDescriptor(operation, button) {
+  const fingerprint = stableActionFingerprint({ operation, profile: state.profile?.active || "default" });
+  let descriptor;
+  descriptor = {
+    operationType: "resume_account",
+    title: "Обновить резюме в HH?",
+    consequence: "HH обновит данные резюме в вашем внешнем аккаунте.",
+    targetRows: [
+      { key: "resume_or_account", label: "Аккаунт", safeValue: state.profile?.active || "default" },
+      { key: "changes", label: "Изменение", safeValue: "Обновление HH-резюме" },
+    ],
+    riskFlags: [{ code: "external_mutation", safeMessage: "Изменения будут видны в HH." }],
+    acknowledgement: "Я проверил аккаунт и понимаю последствия обновления",
+    confirmLabel: "Обновить резюме",
+    fingerprint,
+    trigger: button,
+    revalidate: async () => validateResumeAccountMutation(descriptor, async () => {
+      const preflight = await api("/api/agent/preflight?live_auth=true");
+      const authorized = preflight.auth?.authorized === true;
+      const available = preflight.capabilities?.api_token === true;
+      const blockers = preflight.agent?.paused
+        ? [{ code: "agent_paused", safeMessage: preflight.agent.pause_reason || "HH-агент приостановлен." }]
+        : [];
+      return {
+        status: "executable",
+        fingerprint,
+        auth: { status: authorized ? "ready" : "missing", safeMessage: "Сначала проверьте авторизацию HH." },
+        capability: { available, code: available ? "ok" : "missing_api_token", safeMessage: "Нет доступа к HH API." },
+        blockers,
+        canExecute: authorized && available && blockers.length === 0,
+      };
+    }),
+    execute: async (confirm) => executeAgentOperation(operation, { confirm: confirm === true }, button),
+  };
+  return descriptor;
+}
+
+async function runAgentOperation(operation, button = null) {
+  if (operation === "update-resumes") {
+    const descriptor = buildResumeAccountMutationDescriptor(operation, button);
+    openLiveAction(descriptor);
+    return;
+  }
+  return executeAgentOperation(operation, {}, button);
 }
 
 function agentResearchPayload() {
@@ -1917,10 +2059,42 @@ async function activateResume(id) {
 }
 
 async function deleteResume(id) {
-  if (!confirm("Удалить резюме?")) return;
   const resumeId = requirePositiveInteger(id, "resume id");
-  await api(`/api/resumes/${resumeId}/delete`, { method: "POST", body: "{}" });
-  await loadResumes();
+  const resume = state.resumes.find((item) => Number(item.id) === resumeId);
+  const fingerprint = stableActionFingerprint({ resumeId, name: resume?.name || "" });
+  let descriptor;
+  descriptor = {
+    operationType: "resume_account",
+    title: "Удалить резюме?",
+    consequence: "Резюме будет удалено из Work Hunter. Это действие нельзя отменить.",
+    targetRows: [
+      { key: "resume_or_account", label: "Резюме", safeValue: resume?.name || `#${resumeId}` },
+      { key: "changes", label: "Изменение", safeValue: "Удаление локального резюме" },
+    ],
+    riskFlags: [{ code: "destructive", safeMessage: "Удаление необратимо." }],
+    acknowledgement: "Я понимаю, что резюме будет удалено без возможности восстановления",
+    confirmLabel: "Удалить резюме",
+    fingerprint,
+    trigger: document.activeElement,
+    revalidate: async () => validateResumeAccountMutation(descriptor, async () => {
+      const profileId = encodeURIComponent(state.profile?.active || "default");
+      const current = await api(`/api/resumes?profile_id=${profileId}`);
+      const exists = current.some((item) => Number(item.id) === resumeId);
+      return {
+        status: exists ? "executable" : "blocked",
+        fingerprint,
+        blockers: exists ? [] : [{ code: "missing_resume", safeMessage: "Резюме уже удалено." }],
+        canExecute: exists,
+      };
+    }),
+    execute: async (confirm) => {
+      if (confirm !== true) return { status: "blocked", message: "Подтверждение не получено." };
+      const result = await api(`/api/resumes/${resumeId}/delete`, { method: "POST", body: "{}" });
+      await loadResumes();
+      return result;
+    },
+  };
+  openLiveAction(descriptor);
 }
 
 let editingEventId = 0;

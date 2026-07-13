@@ -378,23 +378,30 @@ def test_ui_contract_keeps_trends_explicit_and_bulk_selection_stable():
     assert "/api/agent/preflight?live_auth=true" in app
 
 
-def test_hh_api_lab_mutations_require_double_confirmation():
+def test_hh_api_lab_mutations_use_typed_safety_sheet():
     app = _read_static("app.js")
 
     assert 'const HH_LAB_MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);' in app
-    assert "function confirmHhLabMutation(payload)" in app
-    assert "if (!confirmHhLabMutation(payload)) return;" in app
-    assert "payload.confirm = true;" in app
-    assert "Final confirmation: this can change your HH account." in app
+    assert "function buildLabMutationDescriptor" in app
+    assert 'operationType: "api_lab"' in app
+    assert "openLiveAction(descriptor)" in app
+    assert "execute: async (confirm)" in app
 
 
 def test_agent_resume_update_ui_sends_literal_confirmation():
     app = _read_static("app.js")
 
     assert 'operation === "update-resumes"' in app
-    assert "Update your HH resumes now?" in app
-    assert "params.confirm = true;" in app
+    assert 'operationType: "resume_account"' in app
+    assert "confirm === true" in app
     assert "JSON.stringify({ operation, params })" in app
+
+
+def test_live_mutations_do_not_use_browser_confirmation():
+    app = _read_static("app.js")
+
+    assert "window.confirm(" not in app
+    assert not re.search(r"(?<![\w.])confirm\(", app)
 
 
 def test_resume_edit_and_ghost_actions_keep_explicit_record_identity():

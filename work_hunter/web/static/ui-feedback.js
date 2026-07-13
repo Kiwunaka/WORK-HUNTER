@@ -361,7 +361,336 @@
     });
   }
 
-  UI.feedback = Object.freeze({ createNotificationCenter, createOverlayManager, notificationKey });
+  const LIVE_ROW_KEYS = Object.freeze({
+    apply: ["vacancy", "company", "resume", "letter"],
+    reply: ["negotiation", "employer", "recipient", "message"],
+    campaign: ["run", "count", "filters", "resume"],
+    cleanup: ["object_type", "count", "criteria"],
+    resume_account: ["resume_or_account", "changes"],
+    api_lab: ["method", "path", "params", "body"],
+  });
+
+  function stableSerialize(value, seen = new WeakSet()) {
+    if (value === null || typeof value !== "object") {
+      if (typeof value === "function" || typeof value === "undefined") return null;
+      return value;
+    }
+    if (seen.has(value)) return "[circular]";
+    seen.add(value);
+    if (Array.isArray(value)) return value.map((item) => stableSerialize(item, seen));
+    const result = {};
+    for (const key of Object.keys(value).sort()) {
+      if (["trigger", "revalidate", "execute"].includes(key)) continue;
+      result[key] = stableSerialize(value[key], seen);
+    }
+    return result;
+  }
+
+  function stableActionFingerprint(value) {
+    const serialized = JSON.stringify(stableSerialize(value));
+    let hash = 2166136261;
+    for (let index = 0; index < serialized.length; index += 1) {
+      hash ^= serialized.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `wh-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
+
+  function maskForUi(value) {
+    const secretKey = /(authorization|password|secret|token|cookie|credential)/i;
+    function mask(item, key = "", seen = new WeakSet()) {
+      if (secretKey.test(key) && item !== null && item !== "") return "••••••";
+      if (typeof item === "string") return item.length > 280 ? `${item.slice(0, 277)}…` : item;
+      if (item === null || typeof item !== "object") return item;
+      if (seen.has(item)) return "[circular]";
+      seen.add(item);
+      if (Array.isArray(item)) return item.map((part) => mask(part, key, seen));
+      return Object.fromEntries(Object.entries(item).map(([name, part]) => [name, mask(part, name, seen)]));
+    }
+    const masked = mask(value);
+    if (typeof masked === "string") return masked;
+    const text = JSON.stringify(masked);
+    return text.length > 600 ? `${text.slice(0, 597)}…` : text;
+  }
+
+  function validateLiveDescriptor(descriptor) {
+    const required = LIVE_ROW_KEYS[descriptor?.operationType];
+    if (!required) return { valid: false, code: "unknown_operation" };
+    const rows = Array.isArray(descriptor.targetRows) ? descriptor.targetRows : [];
+    const keys = rows.map((row) => row?.key);
+    if (new Set(keys).size !== keys.length || required.some((key) => !keys.includes(key))) {
+      return { valid: false, code: "missing_required_rows" };
+    }
+    if (rows.some((row) => !row || typeof row.label !== "string" || !("safeValue" in row))) {
+      return { valid: false, code: "invalid_target_row" };
+    }
+    if (typeof descriptor.revalidate !== "function" || typeof descriptor.execute !== "function") {
+      return { valid: false, code: "missing_action_boundary" };
+    }
+    if (!descriptor.fingerprint || !descriptor.title || !descriptor.consequence) {
+      return { valid: false, code: "missing_review_content" };
+    }
+    return { valid: true, code: "ok" };
+  }
+
+  function validationError(code, message) {
+    return {
+      status: "error",
+      code,
+      message,
+      canExecute: false,
+      updatedDescriptor: null,
+    };
+  }
+
+  function normalizeLiveValidation(descriptor, raw) {
+    if (!raw || typeof raw !== "object") {
+      return validationError("invalid_validation", "Не удалось подтвердить актуальность действия.");
+    }
+    const auth = raw.auth || { status: "error" };
+    const capability = raw.capability || { available: false, code: "unknown" };
+    const blockers = Array.isArray(raw.blockers) ? raw.blockers : [];
+
+    if (raw.status === "error") {
+      return validationError("validation_error", raw.safeMessage || "Проверка завершилась ошибкой.");
+    }
+    if (auth.status !== "ready") {
+      return { ...raw, status: "auth_required", canExecute: false };
+    }
+    if (capability.available !== true) {
+      return { ...raw, status: "capability_lost", canExecute: false };
+    }
+    if (blockers.length) {
+      return { ...raw, status: "blocked", canExecute: false };
+    }
+    if (raw.status === "changed" || raw.fingerprint !== descriptor.fingerprint) {
+      const replacement = raw.updatedDescriptor;
+      const replacementCheck = validateLiveDescriptor(replacement);
+      if (!replacementCheck.valid || replacement.fingerprint !== raw.fingerprint) {
+        return validationError(
+          "invalid_changed_descriptor",
+          "Данные изменились, но новое описание недоступно. Закрой лист и попробуй повторить.",
+        );
+      }
+      return { ...raw, status: "changed", canExecute: false };
+    }
+    if (raw.status !== "executable" || raw.canExecute !== true) {
+      return validationError("not_executable", "Действие не прошло повторную проверку.");
+    }
+    if (raw.updatedDescriptor) {
+      return validationError("unexpected_descriptor", "Проверка вернула несогласованные данные.");
+    }
+    return { ...raw, status: "executable", canExecute: true };
+  }
+
+  function validationMessage(result) {
+    if (result.message) return result.message;
+    if (result.status === "auth_required") return result.auth?.safeMessage || "Требуется повторная авторизация HH.";
+    if (result.status === "capability_lost") return result.capability?.safeMessage || "Эта операция больше недоступна.";
+    if (result.status === "blocked") return result.blockers?.map((item) => item.safeMessage).filter(Boolean).join(" · ") || "Операция заблокирована.";
+    if (result.status === "changed") return "Данные изменились. Проверь обновлённое описание и подтверди заново.";
+    return "Проверено. Выполняю действие…";
+  }
+
+  function openLiveAction(initialDescriptor) {
+    const check = validateLiveDescriptor(initialDescriptor);
+    if (!check.valid) {
+      global.appNotifications?.push({
+        type: "error",
+        scope: "live-action",
+        code: check.code,
+        title: "Небезопасное действие заблокировано",
+        message: check.code,
+      });
+      return { accepted: false, reason: check.code };
+    }
+
+    let descriptor = initialDescriptor;
+    let panel = null;
+    let submitting = false;
+    let blocked = false;
+
+    function render(root) {
+      panel = root;
+      root.replaceChildren();
+      root.dataset.liveAction = descriptor.operationType;
+      root.classList.add("live-action-sheet");
+
+      const eyebrow = document.createElement("div");
+      eyebrow.className = "live-action-eyebrow";
+      eyebrow.textContent = "Реальное действие HH";
+      const title = document.createElement("h2");
+      title.textContent = descriptor.title;
+      const consequence = document.createElement("p");
+      consequence.className = "live-action-consequence";
+      consequence.dataset.liveConsequence = "";
+      consequence.textContent = descriptor.consequence;
+
+      const rows = document.createElement("dl");
+      rows.className = "live-action-rows";
+      for (const row of descriptor.targetRows) {
+        const term = document.createElement("dt");
+        term.textContent = row.label;
+        const detail = document.createElement("dd");
+        detail.textContent = String(row.safeValue ?? "—");
+        rows.append(term, detail);
+      }
+
+      let preview = null;
+      if (descriptor.preview) {
+        preview = document.createElement("pre");
+        preview.className = "live-action-preview";
+        preview.textContent = maskForUi(descriptor.preview);
+      }
+
+      const risks = document.createElement("ul");
+      risks.className = "live-action-risks";
+      for (const risk of descriptor.riskFlags || []) {
+        const item = document.createElement("li");
+        item.textContent = risk.safeMessage || risk.description || risk.code;
+        risks.append(item);
+      }
+
+      const status = document.createElement("p");
+      status.className = "live-action-status";
+      status.dataset.liveStatus = "";
+      status.setAttribute("role", "status");
+
+      const acknowledgement = document.createElement("label");
+      acknowledgement.className = "live-action-ack";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.liveAck = "";
+      checkbox.dataset.initialFocus = "true";
+      const acknowledgementText = document.createElement("span");
+      acknowledgementText.textContent = descriptor.acknowledgement || "Я проверил цель и последствия действия";
+      acknowledgement.append(checkbox, acknowledgementText);
+
+      const actions = document.createElement("div");
+      actions.className = "live-action-actions";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.dataset.liveCancel = "";
+      cancel.textContent = "Отмена";
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.className = "live-action-confirm";
+      confirm.dataset.liveConfirm = "";
+      confirm.textContent = descriptor.confirmLabel || "Выполнить";
+      confirm.disabled = true;
+      actions.append(cancel, confirm);
+
+      checkbox.addEventListener("change", () => {
+        confirm.disabled = blocked || submitting || !checkbox.checked;
+      });
+      cancel.addEventListener("click", () => global.appOverlays?.closeBlocking());
+      confirm.addEventListener("click", async () => {
+        if (submitting || blocked || !checkbox.checked) return;
+        submitting = true;
+        confirm.disabled = true;
+        const idleLabel = confirm.textContent;
+        confirm.textContent = "Проверяю…";
+        status.textContent = "Сверяю авторизацию, возможность операции и выбранные данные…";
+        try {
+          const validation = normalizeLiveValidation(descriptor, await descriptor.revalidate());
+          status.textContent = validationMessage(validation);
+          if (validation.status === "changed") {
+            descriptor = validation.updatedDescriptor;
+            submitting = false;
+            blocked = false;
+            render(root);
+            const changedStatus = root.querySelector("[data-live-status]");
+            if (changedStatus) changedStatus.textContent = validationMessage(validation);
+            return;
+          }
+          if (validation.status !== "executable" || validation.canExecute !== true) {
+            submitting = false;
+            blocked = true;
+            checkbox.checked = false;
+            confirm.textContent = idleLabel;
+            return;
+          }
+          confirm.textContent = descriptor.confirmLabel ? `${descriptor.confirmLabel}…` : "Выполняю…";
+          const result = await descriptor.execute(true);
+          if (result?.status === "blocked" || result?.status === "error") {
+            submitting = false;
+            blocked = true;
+            checkbox.checked = false;
+            confirm.textContent = idleLabel;
+            status.textContent = result.message || result.error || "Сервис заблокировал действие.";
+            return;
+          }
+          global.appNotifications?.push({
+            type: "success",
+            scope: "live-action",
+            code: descriptor.operationType,
+            title: "Действие выполнено",
+          });
+          global.appOverlays?.closeBlocking();
+        } catch (error) {
+          submitting = false;
+          blocked = true;
+          checkbox.checked = false;
+          confirm.textContent = idleLabel;
+          status.textContent = String(error?.message || error);
+        }
+      });
+
+      root.append(eyebrow, title, consequence, rows);
+      if (preview) root.append(preview);
+      if (risks.childElementCount) root.append(risks);
+      root.append(status, acknowledgement, actions);
+    }
+
+    return global.appOverlays?.request({
+      kind: "sheet",
+      label: initialDescriptor.title,
+      trigger: initialDescriptor.trigger || document.activeElement,
+      render,
+    }) || { accepted: false, reason: "overlay_unavailable" };
+  }
+
+  async function runValidationAdapter(descriptor, check) {
+    try {
+      const evidence = typeof check === "function" ? await check() : (check || {});
+      return {
+        status: evidence.status || "executable",
+        fingerprint: evidence.fingerprint || descriptor.fingerprint,
+        auth: evidence.auth || { status: "ready" },
+        capability: evidence.capability || { available: true, code: "ok" },
+        blockers: evidence.blockers || [],
+        riskFlags: evidence.riskFlags || descriptor.riskFlags || [],
+        canExecute: evidence.canExecute ?? true,
+        ...(evidence.updatedDescriptor ? { updatedDescriptor: evidence.updatedDescriptor } : {}),
+      };
+    } catch (error) {
+      return { status: "error", safeMessage: String(error?.message || error), canExecute: false };
+    }
+  }
+
+  const validateApplyMutation = runValidationAdapter;
+  const validateReplyMutation = runValidationAdapter;
+  const validateCampaignMutation = runValidationAdapter;
+  const validateCleanupMutation = runValidationAdapter;
+  const validateResumeAccountMutation = runValidationAdapter;
+  const validateLabMutation = runValidationAdapter;
+
+  UI.feedback = Object.freeze({
+    createNotificationCenter,
+    createOverlayManager,
+    notificationKey,
+    validateLiveDescriptor,
+    normalizeLiveValidation,
+    openLiveAction,
+    stableActionFingerprint,
+    maskForUi,
+    validateApplyMutation,
+    validateReplyMutation,
+    validateCampaignMutation,
+    validateCleanupMutation,
+    validateResumeAccountMutation,
+    validateLabMutation,
+  });
 
   const toastRoot = document.querySelector("#toast-region");
   const sheetRoot = document.querySelector("#sheet-root");
