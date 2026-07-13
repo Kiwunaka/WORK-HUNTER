@@ -16,11 +16,15 @@ from work_hunter.web.server import _compute_stats, _job_json, make_handler
 STATIC_DIR = Path(__file__).resolve().parents[1] / "work_hunter" / "web" / "static"
 UI_ROUTES = [
     "/",
+    "/today",
     "/jobs",
+    "/applications",
     "/calendar",
     "/favorites",
     "/chat",
+    "/assistant",
     "/agent",
+    "/analytics",
     "/settings",
     "/sources",
     "/stats",
@@ -96,7 +100,13 @@ def test_ui_deep_links_and_static_assets_are_served(tmp_path):
             assert status == 200
             assert "text/html" in content_type
             assert "<title>Work Hunter</title>" in body
+            assert '<script src="/ui-core.js"></script>' in body
             assert '<script src="/app.js"></script>' in body
+
+        core_status, core_type, core_body = _get_text(base, "/ui-core.js")
+        assert core_status == 200
+        assert "javascript" in core_type
+        assert "WorkHunterUI" in core_body
 
         js_status, js_type, js_body = _get_text(base, "/app.js")
         assert js_status == 200
@@ -287,6 +297,7 @@ def test_resume_api_rejects_missing_update_target(tmp_path):
 def test_ui_static_contract_has_routes_and_no_duplicate_ids():
     index = _read_static("index.html")
     app = _read_static("app.js")
+    core = _read_static("ui-core.js")
     ids = re.findall(r'\bid="([^"]+)"', index)
 
     duplicates = sorted({item for item in ids if ids.count(item) > 1})
@@ -295,8 +306,11 @@ def test_ui_static_contract_has_routes_and_no_duplicate_ids():
     assert 'id="letter-box"' not in app
     assert 'id="ai-letter-box" data-letter-box' in index
     assert 'id="detail-letter-box" data-letter-box' in app
-    for path in UI_ROUTES[1:]:
+    legacy_routes = ["/jobs", "/calendar", "/favorites", "/chat", "/agent", "/settings", "/sources", "/stats", "/trends"]
+    for path in legacy_routes:
         assert f'path: "{path}"' in app
+    for path in ["/today", "/applications", "/assistant", "/analytics"]:
+        assert f'"{path}"' in core
     assert "window.history.pushState" in app
     assert "window.addEventListener(\"popstate\"" in app
 

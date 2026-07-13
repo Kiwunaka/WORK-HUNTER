@@ -207,6 +207,62 @@ def test_ui_loads_without_browser_errors(browser_app):
         page.evaluate("window.clearInterval(window.__readinessInterval)")
 
 
+@pytest.mark.parametrize(
+    ("incoming", "canonical"),
+    [
+        ("/", "/today"),
+        ("/favorites?filter=all&x=1#saved", "/jobs?filter=saved&x=1#saved"),
+        ("/chat?job=7", "/assistant?job=7"),
+        ("/agent", "/applications?tab=agent"),
+        ("/stats", "/analytics?tab=overview"),
+        ("/trends", "/analytics?tab=trends"),
+        ("/jobs?filter=all&min_score=070", "/jobs?filter=all"),
+    ],
+)
+def test_ui_routes_canonicalize_legacy_paths(browser_app, incoming, canonical):
+    page, base_url, _ = browser_app
+
+    page.goto(base_url + incoming, wait_until="domcontentloaded")
+
+    expect(page).to_have_url(base_url + canonical)
+
+
+def test_route_resolver_uses_first_recognized_value_and_loaded_source_keys(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+
+    valid = page.evaluate(
+        """() => WorkHunterUI.route.resolve(
+          "/jobs", "?filter=saved&filter=all&source=hh&x=1", "", ["hh"]
+        )"""
+    )
+    invalid = page.evaluate(
+        """() => WorkHunterUI.route.resolve(
+          "/jobs", "?filter=all&source=missing", "", ["hh"]
+        )"""
+    )
+
+    assert valid["canonicalUrl"] == "/jobs?filter=saved&source=hh&x=1"
+    assert invalid["canonicalUrl"] == "/jobs?filter=all"
+    assert invalid["warnings"] == ["invalid_source"]
+
+
+def test_popstate_reapplies_canonical_route_without_extra_history(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+    initial_length = page.evaluate("history.length")
+
+    page.evaluate(
+        """() => {
+          history.pushState({}, "", "/stats");
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }"""
+    )
+
+    expect(page).to_have_url(base_url + "/analytics?tab=overview")
+    assert page.evaluate("history.length") == initial_length + 1
+
+
 def test_static_and_dynamic_controls_work_without_inline_handlers(browser_app):
     page, base_url, app = browser_app
     job = app.storage.list_jobs(limit=1)[0]

@@ -21,11 +21,15 @@ STATIC_DIR = Path(__file__).parent / "static"
 REJECTED_BODY_DRAIN_LIMIT = 1024 * 1024
 REJECTED_BODY_DRAIN_SECONDS = 0.25
 UI_ROUTES = {
+    "/today",
     "/jobs",
+    "/applications",
     "/calendar",
     "/favorites",
     "/chat",
+    "/assistant",
     "/agent",
+    "/analytics",
     "/settings",
     "/sources",
     "/stats",

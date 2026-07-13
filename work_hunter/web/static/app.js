@@ -40,8 +40,14 @@ const ROUTES = {
 
 const PATH_TO_VIEW = Object.fromEntries(Object.entries(ROUTES).map(([view, route]) => [route.path, view]));
 PATH_TO_VIEW["/"] = "inbox";
+PATH_TO_VIEW["/today"] = "inbox";
+PATH_TO_VIEW["/applications"] = "agent";
+PATH_TO_VIEW["/assistant"] = "chat";
 
-function routeViewFromPath(pathname) {
+function routeViewFromPath(pathname, search = window.location.search) {
+  if (pathname === "/analytics") {
+    return new URLSearchParams(search).get("tab") === "trends" ? "trends" : "stats";
+  }
   return PATH_TO_VIEW[pathname] || "inbox";
 }
 
