@@ -18,7 +18,7 @@
     html{color-scheme:light;scroll-behavior:smooth;background:var(--paper);color:var(--ink)}
     body{margin:0;min-width:320px;font-family:var(--text);font-size:17px;line-height:1.5;background:var(--paper);overflow-x:clip}
     body::before{content:"";position:fixed;inset:0;z-index:20;pointer-events:none;opacity:.065;background-image:radial-gradient(rgba(17,17,15,.72) .55px,transparent .75px);background-size:5px 5px;mix-blend-mode:multiply}
-    ::selection{background:var(--signal);color:var(--paper-hi)}
+    ::selection{background:var(--signal);color:var(--ink)}
     a{color:inherit}
     button,a{font:inherit}
     img,svg{display:block;max-width:100%}
@@ -41,7 +41,7 @@
     .double-bezel{padding:7px;border:1px solid var(--rule);border-radius:34px;background:rgba(17,17,15,.035)}
     .double-bezel__core{height:100%;padding:clamp(24px,3vw,48px);border-radius:27px;background:var(--paper-hi);box-shadow:inset 0 1px 0 rgba(255,255,255,.75);overflow:hidden}
     .site-header{position:fixed;left:0;right:0;top:0;z-index:40;display:flex;align-items:center;justify-content:space-between;gap:30px;padding:14px clamp(20px,4vw,72px);background:rgba(17,17,15,.94);color:var(--paper-hi);border-bottom:1px solid rgba(255,255,255,.15);backdrop-filter:blur(12px)}
-    .wordmark{font-family:var(--display);font-size:.82rem;font-weight:800;letter-spacing:.08em;text-decoration:none;white-space:nowrap}
+    .wordmark{min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center;font-family:var(--display);font-size:.82rem;font-weight:800;letter-spacing:.08em;text-decoration:none;white-space:nowrap}
     .dossier-nav{display:flex;align-items:center;gap:4px;overflow-x:auto;scrollbar-width:none}
     .dossier-nav::-webkit-scrollbar{display:none}
     .dossier-nav a{min-height:44px;display:grid;place-items:center;padding:0 14px;border-radius:2px;font-family:var(--display);font-size:.68rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;text-decoration:none;color:rgba(247,241,229,.66);transition:color .35s ease,background-color .35s ease}
@@ -59,13 +59,13 @@
     .hero-grid{display:grid;grid-template-columns:minmax(0,7.3fr) minmax(300px,4.7fr);gap:clamp(36px,6vw,110px);align-items:start}
     .hero-copy{position:relative;padding-top:18px;border-top:1px solid var(--ink)}
     .hero-copy::before{content:"";position:absolute;left:0;top:-6px;width:120px;height:6px;background:var(--signal)}
-    .hero-copy h1{max-width:8ch;margin:clamp(38px,6vw,88px) 0 32px;font-size:clamp(5.1rem,13.3vw,13.8rem);line-height:.75;letter-spacing:-.075em;text-transform:uppercase}
+    .hero-copy h1{max-width:8ch;margin:clamp(38px,6vw,88px) 0 32px;font-size:clamp(5.1rem,12.7vw,13.2rem);line-height:.75;letter-spacing:-.075em;text-transform:uppercase}
     .hero-copy h1::first-line{text-decoration:underline;text-decoration-color:var(--cobalt);text-decoration-thickness:8px;text-underline-offset:16px}
     .date-range{font-family:var(--display);font-size:clamp(.78rem,1.2vw,1rem);font-weight:750;letter-spacing:.08em;text-transform:uppercase}
     .dek{max-width:47rem;margin-top:40px;padding-left:clamp(0px,7vw,130px);font-family:var(--serif);font-size:clamp(1.25rem,2vw,1.85rem);line-height:1.34}
     .tldr{margin-top:clamp(50px,8vw,130px);transform:rotate(1.4deg)}
     .tldr .double-bezel__core{background:var(--ink);color:var(--paper-hi)}
-    .tldr .eyebrow{display:inline-block;padding:6px 9px;background:var(--signal);color:#fff}
+    .tldr .eyebrow{display:inline-block;padding:6px 9px;background:var(--signal);color:var(--ink)}
     .tldr p:not(.eyebrow){font-family:var(--serif);font-size:clamp(1rem,1.35vw,1.25rem);line-height:1.48}
     .tldr p:last-child{margin-bottom:0;color:rgba(247,241,229,.7)}
     .hero-metrics{display:grid;grid-template-columns:repeat(12,1fr);gap:clamp(12px,2vw,26px);align-items:stretch;margin-top:clamp(80px,11vw,150px);padding-top:24px;border-top:1px solid var(--ink)}
@@ -111,11 +111,11 @@
     .chapter{position:relative;grid-column:1/span 5;display:grid;grid-template-columns:54px 1fr;gap:20px;padding:0 0 clamp(40px,6vw,84px)}
     .chapter:nth-child(even){grid-column:8/span 5;transform:translateY(120px)}
     .chapter--wide{grid-column:2/span 5}
-    .chapter-no{width:50px;height:50px;display:grid;place-items:center;background:var(--signal);color:#fff;font-family:var(--display);font-size:.72rem;font-weight:800}
+    .chapter-no{width:50px;height:50px;display:grid;place-items:center;background:var(--signal);color:var(--ink);font-family:var(--display);font-size:.72rem;font-weight:800}
     .chapter h3{margin-bottom:20px;font-size:clamp(1.7rem,3vw,3.1rem)}
     .chapter p:not(.eyebrow){color:var(--muted)}
-    .chapter--signal>div{padding:26px;background:var(--signal);color:#fff}
-    .chapter--signal p:not(.eyebrow){color:rgba(255,255,255,.8)}
+    .chapter--signal>div{padding:26px;background:var(--signal);color:var(--ink)}
+    .chapter--signal p:not(.eyebrow){color:var(--ink)}
     .chapter--dark>div{padding:30px;background:var(--ink);color:var(--paper-hi)}
     .chapter--dark p:not(.eyebrow){color:rgba(247,241,229,.7)}
 
@@ -130,7 +130,8 @@
     .composition-key strong{font-family:var(--display);font-size:.64rem;letter-spacing:.02em}
     .ledger-list{margin:0;padding:0;list-style:none;counter-reset:ledger}
     .ledger-row{position:relative;isolation:isolate;display:grid;grid-template-columns:80px minmax(0,1fr) auto;gap:clamp(18px,3vw,46px);align-items:center;min-height:154px;margin-bottom:12px;padding:24px clamp(20px,3vw,42px);overflow:hidden;background:var(--paper-hi);color:var(--ink)}
-    .ledger-row::before{content:"";position:absolute;z-index:-1;left:0;bottom:0;width:100%;height:7px;background:var(--cobalt);transform:scaleX(var(--rank-scale,1));transform-origin:left center}
+    .ledger-row::before{content:"";position:absolute;z-index:-1;left:0;bottom:0;width:100%;height:7px;background:var(--cobalt);transform:scaleX(var(--rank-scale,1));transform-origin:left center;transition:transform 1s var(--mass)}
+    .ledger-row[data-reveal-ready="true"]:not([data-visible="true"])::before{transform:scaleX(0)}
     .ledger-row--joke::before{background:var(--signal)}
     .ledger-row--paired{box-shadow:inset 8px 0 0 var(--signal)}
     .ledger-rank{font-family:var(--display);font-size:clamp(2rem,4vw,4.6rem);font-weight:800;line-height:1;color:var(--cobalt)}
@@ -161,7 +162,7 @@
     .joke-wall{display:grid;grid-template-columns:repeat(12,1fr);gap:clamp(14px,2vw,28px);align-items:start}
     .joke-card{grid-column:span 4;min-height:300px;display:flex;flex-direction:column;justify-content:space-between;padding:clamp(22px,3vw,40px);background:var(--paper-hi);border:1px solid var(--ink)}
     .joke-card blockquote{margin:30px 0;font-family:var(--serif);font-size:clamp(1.2rem,2vw,1.85rem);line-height:1.35}
-    .joke-score{align-self:flex-start;margin:0;padding:5px 8px;background:var(--signal);color:#fff;font-family:var(--display);font-size:.68rem;font-weight:800;letter-spacing:.08em}
+    .joke-score{align-self:flex-start;margin:0;padding:5px 8px;background:var(--signal);color:var(--ink);font-family:var(--display);font-size:.68rem;font-weight:800;letter-spacing:.08em}
     .joke-card>a{align-self:flex-start}
     .joke-card--hero{grid-column:span 7;min-height:430px}
     .joke-card--hero blockquote{font-size:clamp(2.5rem,5vw,6rem);line-height:.95;letter-spacing:-.04em}
@@ -176,8 +177,8 @@
     .gem-layout{display:grid;grid-template-columns:minmax(360px,5fr) minmax(0,7fr);gap:clamp(30px,5vw,84px);align-items:start}
     .gem-visual{position:sticky;top:100px;padding:20px;background:var(--ink);color:var(--paper-hi);border:7px double var(--paper-low)}
     .gem-constellation .orbit{fill:none;stroke:rgba(247,241,229,.19);stroke-width:1;stroke-dasharray:4 5}
-    .gem-constellation .connector{fill:none;stroke:rgba(247,241,229,.34);stroke-width:1.2;vector-effect:non-scaling-stroke}
-    .gem-constellation .facet{fill:none;stroke:var(--acid);stroke-width:1.4;vector-effect:non-scaling-stroke}
+    .gem-constellation .connector{fill:none;stroke:rgba(247,241,229,.34);stroke-width:1.2;stroke-dasharray:8 6;vector-effect:non-scaling-stroke}
+    .gem-constellation .facet{fill:none;stroke:var(--acid);stroke-width:1.4;stroke-dasharray:160 1;vector-effect:non-scaling-stroke}
     .gem-constellation circle{fill:var(--cobalt);stroke:var(--paper-hi);stroke-width:2}
     .gem-constellation [data-category="infrastructure"] circle{fill:var(--signal)}
     .gem-constellation [data-category="method"] circle{fill:var(--acid)}
@@ -636,10 +637,10 @@
           <article class="joke-card joke-card--offset" data-message-id="498682" data-joke-score="141" data-reactions="148" data-reveal><p class="joke-score">141 / 148</p><blockquote>Если писать ей как девушке -&nbsp; после второго сообщения она бы не отвечала. После третьего кинула бы в чс</blockquote><a href="https://t.me/c/1778093200/498682" target="_blank" rel="noopener noreferrer">Открыть #498682 ↗</a></article>
           <article class="joke-card joke-card--ink" data-message-id="497823" data-joke-score="85" data-reactions="87" data-reveal><p class="joke-score">85 / 87</p><blockquote>— Папа, а что ты делал, когда рождался AGI?<br>— Мониторил ситуацию<br>— Fucking legend</blockquote><a href="https://t.me/c/1778093200/497823" target="_blank" rel="noopener noreferrer">Открыть #497823 ↗</a></article>
           <article class="joke-card" data-message-id="497511" data-joke-score="47" data-reactions="47" data-reveal><p class="joke-score">47 / 47</p><blockquote>«Абсолютно все в этой комнате было ворованное, и даже воздух был какой-то спертый»</blockquote><a href="https://t.me/c/1778093200/497511" target="_blank" rel="noopener noreferrer">Открыть #497511 ↗</a></article>
-          <article class="joke-card joke-card--small" data-message-id="498690" data-joke-score="25" data-reactions="25" data-reveal><p class="joke-score">25 / 25</p><blockquote>Называю все модели Игорь. Запрещаю делать rm fm</blockquote><a href="https://t.me/c/1778093200/498690" target="_blank" rel="noopener noreferrer">Открыть #498690 ↗</a></article>
+          <article class="joke-card joke-card--small" data-message-id="498690" data-joke-score="25" data-reactions="25" data-reveal><p class="joke-score">25 / 25</p><blockquote>Называю все модели Игорь<br>Запрещаю делать rm fm</blockquote><a href="https://t.me/c/1778093200/498690" target="_blank" rel="noopener noreferrer">Открыть #498690 ↗</a></article>
           <article class="joke-card joke-card--blue" data-message-id="498732" data-joke-score="25" data-reactions="25" data-reveal><p class="joke-score">25 / 25</p><blockquote>Вместо «как дела» пишу «кд», сэкономленное время посвящаю саморазвитию</blockquote><a href="https://t.me/c/1778093200/498732" target="_blank" rel="noopener noreferrer">Открыть #498732 ↗</a></article>
           <article class="joke-card joke-card--wide" data-message-id="497480" data-joke-score="22" data-reactions="23" data-reveal><p class="joke-score">22 / 23</p><blockquote>А в чем прикол воровать у эпла их документацию? Типа дизайн доки? Или что? Почему тогда у приложения все равно такой уебский интерфейс? Непонятно…</blockquote><a href="https://t.me/c/1778093200/497480" target="_blank" rel="noopener noreferrer">Открыть #497480 ↗</a></article>
-          <article class="joke-card joke-card--signal" data-message-id="498722" data-joke-score="19" data-reactions="19" data-reveal><p class="joke-score">19 / 19</p><blockquote>Ого, что ты делаешь с 0,12 сэкономленных секунд?</blockquote><a href="https://t.me/c/1778093200/498722" target="_blank" rel="noopener noreferrer">Открыть #498722 ↗</a></article>
+          <article class="joke-card joke-card--signal" data-message-id="498722" data-joke-score="19" data-reactions="19" data-reveal><p class="joke-score">19 / 19</p><blockquote>ого что ты делаешь с 0.12 сэкономленных секунд?</blockquote><a href="https://t.me/c/1778093200/498722" target="_blank" rel="noopener noreferrer">Открыть #498722 ↗</a></article>
         </div>
       </div>
     </section>
@@ -806,7 +807,8 @@
           const active = visible.sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0].target.id;
           links.forEach((link, id) => {
             const isActive = id === active;
-            link.toggleAttribute("aria-current", isActive);
+            if (isActive) link.setAttribute("aria-current", "location");
+            else link.removeAttribute("aria-current");
             const nav = link.closest(".dossier-nav");
             if (isActive && nav && nav.scrollWidth > nav.clientWidth) {
               nav.scrollTo({

@@ -36,8 +36,16 @@ def _open(
     page_errors: list[str] = []
     console_errors: list[str] = []
     context.on("request", lambda request: requests.append(request.url))
+    context.on(
+        "serviceworker",
+        lambda worker: page_errors.append(f"Unexpected service worker: {worker.url}"),
+    )
     page = context.new_page()
     page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.on(
+        "websocket",
+        lambda socket: page_errors.append(f"Unexpected WebSocket: {socket.url}"),
+    )
     page.on(
         "console",
         lambda message: console_errors.append(message.text) if message.type == "error" else None,
@@ -50,12 +58,7 @@ def _open(
 def test_offline_layout_has_no_external_requests_or_overflow(browser, width):
     context, page, requests, page_errors, console_errors = _open(browser, width)
     try:
-        external = [
-            url
-            for url in requests
-            if urlsplit(url).scheme.lower() not in {"", "file", "data", "about", "blob"}
-        ]
-        assert external == []
+        assert requests == [ARTIFACT.as_uri()]
         assert page_errors == []
         assert console_errors == []
         assert page.title() == "Чат Котенков и Горь — 67 часов внутри AI-гонки"
@@ -115,7 +118,7 @@ def test_mobile_nav_tracks_and_centers_the_current_section(browser):
     try:
         page.locator("#method").scroll_into_view_if_needed()
         method_link = page.locator("[data-nav-target='method']")
-        expect(method_link).to_have_attribute("aria-current", "", timeout=3000)
+        expect(method_link).to_have_attribute("aria-current", "location", timeout=3000)
         nav_box = page.locator(".dossier-nav").bounding_box()
         link_box = method_link.bounding_box()
         assert nav_box and link_box
@@ -129,6 +132,39 @@ def test_mobile_nav_tracks_and_centers_the_current_section(browser):
         heading_box = heading.bounding_box()
         assert header_box and heading_box
         assert heading_box["y"] >= header_box["y"] + header_box["height"]
+        assert page_errors == []
+        assert console_errors == []
+    finally:
+        context.close()
+
+
+def test_desktop_hero_title_does_not_collide_with_tldr_plate(browser):
+    context, page, _, page_errors, console_errors = _open(browser, 1440, reduced_motion="reduce")
+    try:
+        geometry = page.evaluate(
+            """() => {
+              const title = document.querySelector('.hero-copy h1');
+              const plate = document.querySelector('.tldr');
+              const range = document.createRange();
+              range.selectNodeContents(title);
+              return {
+                titleRight: Math.max(...[...range.getClientRects()].map((rect) => rect.right)),
+                plateLeft: plate.getBoundingClientRect().left,
+              };
+            }"""
+        )
+        assert geometry["titleRight"] <= geometry["plateLeft"] - 8
+        assert page_errors == []
+        assert console_errors == []
+    finally:
+        context.close()
+
+
+def test_desktop_wordmark_meets_pointer_target_size(browser):
+    context, page, _, page_errors, console_errors = _open(browser, 1440)
+    try:
+        box = page.locator(".wordmark").bounding_box()
+        assert box and box["width"] >= 44 and box["height"] >= 44
         assert page_errors == []
         assert console_errors == []
     finally:

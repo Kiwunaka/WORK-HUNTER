@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 from collections import Counter
+from datetime import datetime
+from html import unescape
 from pathlib import Path
 
 
@@ -261,6 +263,11 @@ def test_progressive_enhancement_functions_and_network_bans():
     assert "IntersectionObserver" in html
     assert "function resolveRoot" in html
     assert html.count("const scope = resolveRoot(root);") == 5
+    compact_css = re.sub(r"\s+", "", html)
+    assert (
+        '.ledger-row[data-reveal-ready="true"]:not([data-visible="true"])::before'
+        "{transform:scaleX(0)}"
+    ) in compact_css
 
 
 def _relative_luminance(hex_color: str) -> float:
@@ -289,3 +296,100 @@ def test_core_color_tokens_keep_body_text_at_wcag_aa_contrast():
     assert _contrast_ratio(tokens["muted"], tokens["paper-hi"]) >= 4.5
     assert _contrast_ratio(tokens["paper-hi"], tokens["cobalt"]) >= 4.5
     assert _contrast_ratio(tokens["ink"], tokens["acid"]) >= 4.5
+    assert _contrast_ratio(tokens["ink"], tokens["signal"]) >= 4.5
+
+    compact_css = re.sub(r"\s+", "", html)
+    for selector in (
+        ".tldr.eyebrow",
+        ".chapter-no",
+        ".chapter--signal>div",
+        ".chapter--signalp:not(.eyebrow)",
+        ".joke-score",
+    ):
+        assert re.search(
+            rf"{re.escape(selector)}\{{[^}}]*color:var\(--ink\)", compact_css
+        ), selector
+
+
+def test_all_joke_quotes_preserve_source_wording():
+    html = _html()
+    by_id = _by_id()
+    for message_id in JOKE_IDS:
+        match = re.search(
+            rf'<article[^>]*data-message-id="{message_id}"[^>]*>.*?'
+            r"<blockquote>(.*?)</blockquote>",
+            html,
+            re.DOTALL,
+        )
+        assert match, message_id
+        quote = re.sub(r"<br\s*/?>", "\n", match.group(1), flags=re.IGNORECASE)
+        quote = unescape(re.sub(r"<[^>]+>", "", quote))
+        source_text = by_id[message_id]["text"]
+        assert isinstance(source_text, str)
+        assert " ".join(quote.split()) == " ".join(source_text.split())
+
+
+def test_constellation_connectors_have_a_real_dash_pattern_to_animate():
+    html = _html()
+    for selector in ("connector", "facet"):
+        rule = re.search(rf"\.gem-constellation \.{selector}\{{([^}}]*)\}}", html)
+        assert rule
+        assert "stroke-dasharray:" in rule.group(1)
+
+
+def test_rank_order_duration_and_derived_poll_copy_are_recomputed():
+    messages = _source()["messages"]
+    ranked = sorted(
+        messages,
+        key=lambda message: (_reaction_total(message), int(message["id"])),
+        reverse=True,
+    )[:10]
+    assert [int(message["id"]) for message in ranked] == TOP_IDS
+
+    first = datetime.fromisoformat(messages[0]["date"])
+    last = datetime.fromisoformat(messages[-1]["date"])
+    assert round((last - first).total_seconds() / 3600, 2) == 67.04
+
+    html = _html()
+    for text in ("72,6%", "80,0%", "5,3%", "11,3%", "52,9%", "27,6%", "19,4%"):
+        assert text in html
+
+
+def test_artifact_is_one_self_contained_offline_document():
+    html = _html()
+    csp = (
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+        "img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; "
+        "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    )
+    assert f'content="{csp}"' in html
+    assert html.lower().count("<!doctype html>") == 1
+    assert html.lower().count("<html ") == 1
+    assert ARTIFACT.stat().st_size <= 307_200
+    assert "base64," not in html
+
+    forbidden_patterns = (
+        r"<script[^>]+\bsrc=",
+        r"<link[^>]+\bstylesheet\b",
+        r"@import\b",
+        r"url\(",
+        r"<img\b",
+        r"\bsrcset=",
+        r"<(?:iframe|frame|object|embed|source|video|audio)\b",
+        r"<use[^>]+(?:href|xlink:href)=\"(?!#)",
+        r"\bimport\s*\(",
+    )
+    for pattern in forbidden_patterns:
+        assert not re.search(pattern, html, re.IGNORECASE)
+
+    urls = re.findall(r"https?://[^\"'<\s]+", html)
+    assert urls
+    assert all(re.fullmatch(r"https://t\.me/c/1778093200/\d+", url) for url in urls)
+
+    telegram_anchors = re.findall(
+        r'<a\b[^>]*href="https://t\.me/c/1778093200/\d+"[^>]*>', html, re.IGNORECASE
+    )
+    assert telegram_anchors
+    for anchor in telegram_anchors:
+        assert 'target="_blank"' in anchor
+        assert 'rel="noopener noreferrer"' in anchor
