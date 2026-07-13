@@ -261,3 +261,31 @@ def test_progressive_enhancement_functions_and_network_bans():
     assert "IntersectionObserver" in html
     assert "function resolveRoot" in html
     assert html.count("const scope = resolveRoot(root);") == 5
+
+
+def _relative_luminance(hex_color: str) -> float:
+    channels = [int(hex_color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+
+    def linearize(channel: float) -> float:
+        if channel <= 0.04045:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (linearize(channel) for channel in channels)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    lighter, darker = sorted(
+        (_relative_luminance(foreground), _relative_luminance(background)), reverse=True
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_core_color_tokens_keep_body_text_at_wcag_aa_contrast():
+    html = _html()
+    tokens = dict(re.findall(r"--([\w-]+):(#[0-9a-fA-F]{6})", html))
+    assert _contrast_ratio(tokens["muted"], tokens["paper"]) >= 4.5
+    assert _contrast_ratio(tokens["muted"], tokens["paper-hi"]) >= 4.5
+    assert _contrast_ratio(tokens["paper-hi"], tokens["cobalt"]) >= 4.5
+    assert _contrast_ratio(tokens["ink"], tokens["acid"]) >= 4.5

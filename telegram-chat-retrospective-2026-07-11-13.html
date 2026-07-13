@@ -8,7 +8,7 @@
   <style>
     :root{
       --paper:#ece4d4;--paper-hi:#f7f1e5;--paper-low:#ded3bf;--ink:#11110f;
-      --muted:#6d685e;--cobalt:#1246d8;--cobalt-dark:#0b2f98;--signal:#f04424;
+      --muted:#686359;--cobalt:#1246d8;--cobalt-dark:#0b2f98;--signal:#f04424;
       --acid:#c9f44a;--rule:rgba(17,17,15,.2);--rule-inverse:rgba(247,241,229,.23);
       --display:Bahnschrift,"Aptos Display","Segoe UI Variable Display",sans-serif;
       --text:"Aptos","Segoe UI Variable Text","Segoe UI",sans-serif;
@@ -55,7 +55,7 @@
     .link-cluster a:hover,.link-pair a:hover,.gem-card>a:hover,.joke-card>a:hover{background:var(--ink);color:var(--paper-hi);transform:translateY(-2px)}
 
     .opening-dossier{padding-top:clamp(136px,13vw,210px);min-height:100vh;background:linear-gradient(90deg,var(--cobalt) 0 7px,transparent 7px calc(100% - 7px),var(--signal) calc(100% - 7px))}
-    .opening-dossier::after{content:"ARCHIVE / 1778093200";position:absolute;right:-79px;top:47%;font-family:var(--display);font-size:.66rem;font-weight:800;letter-spacing:.2em;transform:rotate(90deg);color:var(--muted)}
+    .opening-dossier::after{content:"ARCHIVE / 1778093200";position:absolute;right:-66px;top:47%;font-family:var(--display);font-size:.66rem;font-weight:800;letter-spacing:.2em;transform:rotate(90deg);color:var(--muted)}
     .hero-grid{display:grid;grid-template-columns:minmax(0,7.3fr) minmax(300px,4.7fr);gap:clamp(36px,6vw,110px);align-items:start}
     .hero-copy{position:relative;padding-top:18px;border-top:1px solid var(--ink)}
     .hero-copy::before{content:"";position:absolute;left:0;top:-6px;width:120px;height:6px;background:var(--signal)}
@@ -804,7 +804,17 @@
           const visible = entries.filter((entry) => entry.isIntersecting);
           if (!visible.length) return;
           const active = visible.sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0].target.id;
-          links.forEach((link, id) => link.toggleAttribute("aria-current", id === active));
+          links.forEach((link, id) => {
+            const isActive = id === active;
+            link.toggleAttribute("aria-current", isActive);
+            const nav = link.closest(".dossier-nav");
+            if (isActive && nav && nav.scrollWidth > nav.clientWidth) {
+              nav.scrollTo({
+                left: link.offsetLeft - (nav.clientWidth - link.offsetWidth) / 2,
+                behavior: "auto",
+              });
+            }
+          });
         }, { rootMargin: "-22% 0px -62%", threshold: [0, 0.12, 0.3] });
         links.forEach((_, id) => {
           const section = scope.querySelector(`#${id}`);
