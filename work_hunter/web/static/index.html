@@ -46,7 +46,7 @@
         <p id="summary-line">Синхронизируй источники, затем отсортируй по score.</p>
       </div>
       <div class="actions" id="route-actions">
-        <button id="sync-button" class="primary">Синхронизировать</button>
+        <button id="sync-button" class="primary" data-action-id="jobs.sync">Синхронизировать</button>
         <button id="score-button">Пересчитать score</button>
       </div>
     </header>
@@ -106,7 +106,7 @@
           </select>
         </label>
         <button id="refresh-button">Обновить список</button>
-        <button id="export-csv-button" style="margin-left:auto;">Экспорт CSV</button>
+        <button id="export-csv-button" style="margin-left:auto;" data-action-id="stats.export-csv">Экспорт CSV</button>
       </div>
 
       <div class="workspace">
@@ -229,7 +229,7 @@
     <section id="view-calendar" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <h1>Календарь</h1>
-        <button id="add-event-button" class="primary" data-ui-action="show-event-form">+ Событие</button>
+        <button id="add-event-button" class="primary" data-ui-action="show-event-form" data-action-id="event.create">+ Событие</button>
       </div>
       <div id="event-form" class="panel" style="display:none;margin-bottom:14px;">
         <h3 id="event-form-title">Новое событие</h3>
@@ -270,7 +270,7 @@
           </div>
           <div class="chat-input-bar">
             <textarea id="chat-input" rows="2" placeholder="Задай вопрос..." wrap="soft"></textarea>
-            <button id="chat-send-button" class="primary">Отправить</button>
+            <button id="chat-send-button" class="primary" data-action-id="chat.send">Отправить</button>
           </div>
         </div>
         <div class="chat-sidebar">
@@ -278,7 +278,7 @@
             <h3>Контекст</h3>
             <p class="meta" id="chat-context-job">Вакансия не выбрана. Выбери вакансию в списке.</p>
             <label style="margin-top: 12px;">
-              <input type="checkbox" id="chat-attach-job"> Прикрепить выбранную вакансию
+              <input type="checkbox" id="chat-attach-job" data-action-id="chat.attach-job"> Прикрепить выбранную вакансию
             </label>
           </div>
         </div>
@@ -288,14 +288,20 @@
     <section id="view-agent" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <div>
-          <h1>HH Агент</h1>
-          <p id="agent-status-line">Локальная кабина для запусков, approvals, шаблонов и blacklist.</p>
+          <h1>Отклики</h1>
+          <p id="agent-status-line">Воронка, решения и автоматизация.</p>
         </div>
         <div class="actions">
-          <button id="agent-refresh-button">Обновить</button>
-          <button id="agent-live-auth-button">Проверить HH auth</button>
+          <button id="agent-refresh-button" data-action-id="agent.refresh">Обновить</button>
+          <button id="agent-live-auth-button" data-action-id="agent.live-auth">Проверить HH auth</button>
           <button id="agent-digest-button" class="primary">Digest</button>
         </div>
+      </div>
+
+      <div class="destination-tabs" role="tablist" aria-label="Разделы откликов">
+        <button role="tab" data-applications-tab="pipeline">Воронка</button>
+        <button role="tab" data-applications-tab="agent">Агент</button>
+        <button role="tab" data-applications-tab="automation">Автоматизация</button>
       </div>
 
       <div class="agent-tabs">
@@ -390,8 +396,8 @@
               <p class="meta">HH search analysis with local dry-run apply planning.</p>
             </div>
             <div class="actions">
-              <button id="agent-research-run-button">Analyze</button>
-              <button id="agent-research-plan-button" class="primary">Plan apply</button>
+              <button id="agent-research-run-button" data-action-id="agent.research.run">Исследовать</button>
+              <button id="agent-research-plan-button" class="primary" data-action-id="agent.research.plan">Собрать план</button>
             </div>
           </div>
           <div class="hh-lab-editor">
@@ -420,8 +426,8 @@
           <div class="panel-head">
             <h2>HH API Lab</h2>
             <div class="actions">
-              <button id="hh-lab-run-button" class="primary">Run</button>
-              <button id="hh-lab-save-snippet-button">Save snippet</button>
+              <button id="hh-lab-run-button" class="primary" data-action-id="hh.lab.run">Выполнить</button>
+              <button id="hh-lab-save-snippet-button" data-action-id="hh.lab.snippet.save">Сохранить шаблон</button>
             </div>
           </div>
           <div id="hh-lab-quick-calls" class="agent-operation-grid"></div>
@@ -451,7 +457,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Letter templates</h2>
-            <button id="agent-save-template-button" class="primary">Сохранить</button>
+            <button id="agent-save-template-button" class="primary" data-action-id="agent.template.save">Сохранить</button>
           </div>
           <div class="agent-form-grid">
             <label>Название <input id="agent-template-name" placeholder="warm_reply"></label>
@@ -486,7 +492,7 @@
               <h2>Batch preset matrix</h2>
               <p>resumes x search presets x letters x limits, with secrets and local scripts stripped.</p>
             </div>
-            <button id="agent-batch-matrix-button">Build</button>
+            <button id="agent-batch-matrix-button" data-action-id="agent.batch-matrix">Собрать</button>
           </div>
           <label>Matrix JSON
             <textarea id="agent-batch-matrix-input" rows="10" spellcheck="false"></textarea>
@@ -499,7 +505,7 @@
         <div class="panel">
           <div class="panel-head">
             <h2>Employer blacklist</h2>
-            <button id="agent-save-blacklist-button" class="primary">Сохранить</button>
+            <button id="agent-save-blacklist-button" class="primary" data-action-id="agent.blacklist.save">Сохранить</button>
           </div>
           <div class="agent-form-grid three">
             <label>Employer ID <input id="agent-blacklist-id" placeholder="123456"></label>
@@ -545,11 +551,22 @@
     </section>
 
     <section id="view-settings" class="view">
+      <div class="destination-tabs settings-tabs" role="tablist" aria-label="Разделы настроек">
+        <button role="tab" data-settings-tab="profile">Профиль</button>
+        <button role="tab" data-settings-tab="resumes">Резюме</button>
+        <button role="tab" data-settings-tab="search">Поиск</button>
+        <button role="tab" data-settings-tab="hh">HH</button>
+        <button role="tab" data-settings-tab="ai">AI</button>
+        <button role="tab" data-settings-tab="notifications">Уведомления</button>
+        <button role="tab" data-settings-tab="appearance">Вид</button>
+        <button role="tab" data-settings-tab="help">Помощь</button>
+        <button role="tab" data-settings-tab="advanced">Дополнительно</button>
+      </div>
       <div class="panel">
         <div class="panel-head">
           <h2>Профиль: что ищем</h2>
           <div>
-            <button id="save-profile-button" class="primary">Сохранить профиль</button>
+            <button id="save-profile-button" class="primary" data-action-id="profile.save">Сохранить профиль</button>
             <button id="rescore-after-save" style="margin-left:8px;">Пересчитать score</button>
           </div>
         </div>
@@ -579,7 +596,7 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Мои резюме</h2>
-          <button id="add-resume-button" class="primary" data-ui-action="show-resume-form">+ Резюме</button>
+          <button id="add-resume-button" class="primary" data-ui-action="show-resume-form" data-action-id="resume.create">+ Резюме</button>
         </div>
         <div id="resume-form" style="display:none;margin-bottom:10px;">
           <label>Название <input id="resume-name-input" style="width:100%;" placeholder="Python Backend"></label>
@@ -663,7 +680,7 @@
           <label>Поисковый запрос <input id="search-query-input" style="width:100%;" placeholder="python fastapi backend"></label>
           <label><input type="checkbox" id="search-alert-checkbox"> Включить уведомления</label>
           <div style="display:flex;gap:8px;margin-top:8px;">
-            <button id="save-search-button" class="primary" data-ui-action="save-search">Сохранить</button>
+            <button id="save-search-button" class="primary" data-ui-action="save-search" data-action-id="search.save">Сохранить</button>
             <button data-ui-action="hide-search-form">Отмена</button>
           </div>
         </div>
@@ -680,23 +697,44 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Конфигурация (JSON)</h2>
-          <button id="save-config-button" class="primary">Сохранить JSON</button>
+          <button id="save-config-button" class="primary" data-action-id="config.save">Сохранить JSON</button>
         </div>
         <textarea id="config-editor" spellcheck="false"></textarea>
       </div>
+      <div class="panel" data-settings-panel="appearance">
+        <div class="panel-head"><h2>Внешний вид</h2></div>
+        <p>Используйте системную светлую или тёмную тему.</p>
+        <button data-ui-action="toggle-theme-from-settings">Переключить тему</button>
+      </div>
+      <div class="panel" data-settings-panel="help">
+        <div class="panel-head"><h2>Помощь и подсказки</h2></div>
+        <p>Повторите первоначальную настройку или верните контекстные советы.</p>
+        <div class="actions">
+          <button data-ui-action="restart-onboarding" data-action-id="onboarding.restart">Повторить знакомство</button>
+          <button data-ui-action="restart-guidance" data-action-id="guidance.restart">Показать советы снова</button>
+        </div>
+      </div>
+      <div id="settings-advanced-slot" data-settings-panel="advanced"></div>
     </section>
 
     <section id="view-sources" class="view">
       <div class="panel">
-        <h2>Источники</h2>
+        <div class="panel-head">
+          <h2>Источники</h2>
+          <button data-ui-action="sync-from-sources" data-action-id="sources.sync">Синхронизировать</button>
+        </div>
         <div id="sources-list" class="source-list"></div>
       </div>
     </section>
 
     <section id="view-stats" class="view">
+      <div class="destination-tabs" role="tablist" aria-label="Разделы аналитики">
+        <button role="tab" data-analytics-tab="overview">Обзор</button>
+        <button role="tab" data-analytics-tab="trends">Тренды</button>
+      </div>
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <h1>Статистика</h1>
-        <button id="refresh-stats-button">Обновить</button>
+        <button id="refresh-stats-button" data-action-id="stats.refresh">Обновить</button>
       </div>
       <div class="stats-grid">
         <div class="stat-card">
@@ -733,7 +771,7 @@
     <section id="view-trends" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <h1>Тренды рынка</h1>
-        <button id="load-trends-button" class="primary" data-ui-action="load-market-trends">Анализировать</button>
+        <button id="load-trends-button" class="primary" data-ui-action="load-market-trends" data-action-id="trends.run">Анализировать</button>
       </div>
       <div id="trends-output" class="panel">
         <p class="meta">Нажми «Анализировать» чтобы получить AI-отчёт о трендах рынка на основе последних вакансий.</p>

@@ -63,7 +63,7 @@ PATH_TO_VIEW["/assistant"] = "chat";
 function routeViewFromPath(pathname, search = window.location.search) {
   if (pathname === "/today" && window.__WORK_HUNTER_TEST_LEGACY_ROOT__) return "inbox";
   if (pathname === "/analytics") {
-    return new URLSearchParams(search).get("tab") === "trends" ? "trends" : "stats";
+    return "stats";
   }
   return PATH_TO_VIEW[pathname] || "inbox";
 }
@@ -840,6 +840,15 @@ function activateView(view, options = {}) {
   if (routeView === "stats") loadStats().catch(console.error);
   if (routeView === "agent") loadAgentCockpit().catch(console.error);
   if (routeView === "today") loadToday().catch((error) => notifyError("today", error, "Не удалось загрузить экран Сегодня"));
+  if (routeView === "agent") {
+    switchApplicationsTab(new URLSearchParams(window.location.search).get("tab") || "pipeline", { push: false });
+  }
+  if (routeView === "stats") {
+    switchAnalyticsTab(new URLSearchParams(window.location.search).get("tab") || "overview", { push: false });
+  }
+  if (routeView === "settings") {
+    switchSettingsSection(new URLSearchParams(window.location.search).get("section") || "profile", { push: false });
+  }
 }
 
 function toggleTheme() {
@@ -1140,6 +1149,102 @@ function switchAgentPanel(panelName) {
   document.querySelectorAll(".agent-panel").forEach(p => p.classList.remove("active"));
   document.querySelector(`.agent-tab[data-agent-panel="${panelName}"]`)?.classList.add("active");
   $(`#agent-panel-${panelName}`)?.classList.add("active");
+}
+
+const APPLICATION_TAB_PANELS = Object.freeze({
+  pipeline: ["inbox"],
+  agent: ["dashboard", "approvals", "runs", "events"],
+  automation: ["research", "templates", "resume-builder", "blacklist", "settings"],
+});
+
+function pushDestinationSubview(path, key, value, push = true) {
+  if (!push) return;
+  const params = new URLSearchParams();
+  params.set(key, value);
+  window.history.pushState({}, "", `${path}?${params.toString()}`);
+}
+
+function switchApplicationsTab(tab, { push = true } = {}) {
+  const selected = APPLICATION_TAB_PANELS[tab] ? tab : "pipeline";
+  const panels = APPLICATION_TAB_PANELS[selected];
+  document.querySelectorAll("[data-applications-tab]").forEach((button) => {
+    const active = button.dataset.applicationsTab === selected;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll(".agent-tab").forEach((button) => {
+    button.hidden = !panels.includes(button.dataset.agentPanel);
+  });
+  const activePanel = document.querySelector(".agent-panel.active")?.id.replace("agent-panel-", "");
+  switchAgentPanel(panels.includes(activePanel) ? activePanel : panels[0]);
+  pushDestinationSubview("/applications", "tab", selected, push);
+}
+
+function switchAnalyticsTab(tab, { push = true } = {}) {
+  const selected = tab === "trends" ? "trends" : "overview";
+  document.querySelectorAll("[data-analytics-tab]").forEach((button) => {
+    const active = button.dataset.analyticsTab === selected;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  const overview = $("#analytics-overview-panel");
+  const trends = $("#analytics-trends-panel");
+  if (overview) overview.hidden = selected !== "overview";
+  if (trends) trends.hidden = selected !== "trends";
+  pushDestinationSubview("/analytics", "tab", selected, push);
+}
+
+const SETTINGS_SECTIONS = new Set([
+  "profile", "resumes", "search", "hh", "ai", "notifications", "appearance", "help", "advanced",
+]);
+
+function switchSettingsSection(section, { push = true } = {}) {
+  const selected = SETTINGS_SECTIONS.has(section) ? section : "profile";
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    const active = button.dataset.settingsTab === selected;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach((panelElement) => {
+    panelElement.hidden = window.__WORK_HUNTER_TEST_LEGACY_ROOT__
+      ? false
+      : panelElement.dataset.settingsPanel !== selected;
+  });
+  pushDestinationSubview("/settings", "section", selected, push);
+}
+
+function setupDestinationPanels() {
+  const statsView = $("#view-stats");
+  const statsTabs = statsView?.querySelector(".destination-tabs");
+  if (statsView && statsTabs && !$("#analytics-overview-panel")) {
+    const overview = document.createElement("div");
+    overview.id = "analytics-overview-panel";
+    for (const child of [...statsView.children]) {
+      if (child !== statsTabs) overview.append(child);
+    }
+    const trends = document.createElement("div");
+    trends.id = "analytics-trends-panel";
+    const legacyTrends = $("#view-trends");
+    for (const child of [...legacyTrends.children]) trends.append(child);
+    statsView.append(overview, trends);
+  }
+
+  const settingsPanels = [...document.querySelectorAll("#view-settings > .panel")];
+  const mapping = ["profile", "resumes", "ai", "notifications", "hh", "search", "advanced", "advanced", "appearance", "help"];
+  settingsPanels.forEach((panelElement, index) => {
+    if (!panelElement.dataset.settingsPanel) panelElement.dataset.settingsPanel = mapping[index] || "advanced";
+  });
+  const apiLab = $("#agent-panel-api-lab");
+  const advancedSlot = $("#settings-advanced-slot");
+  if (apiLab && advancedSlot) {
+    apiLab.classList.remove("agent-panel", "active");
+    apiLab.removeAttribute("hidden");
+    advancedSlot.append(apiLab);
+    document.querySelector('.agent-tab[data-agent-panel="api-lab"]')?.remove();
+  }
 }
 
 async function loadAgentCockpit({ liveAuth = false } = {}) {
@@ -1899,6 +2004,14 @@ const delegatedUiActions = Object.freeze({
   "hide-search-form": () => hideSearchForm(),
   "load-ghost-jobs": () => loadGhostJobs(),
   "load-market-trends": () => loadMarketTrends(),
+  "sync-from-sources": () => syncJobs(),
+  "toggle-theme-from-settings": () => toggleTheme(),
+  "restart-onboarding": () => window.appOnboarding?.review(),
+  "restart-guidance": () => {
+    localStorage.removeItem("work-hunter:guidance:v2");
+    sessionStorage.removeItem("work-hunter:guidance-session:v2");
+    notify("success", "guidance", "reset", "Контекстные советы включены снова");
+  },
   "mark-selected": (control) => markSelected(control.dataset.status),
   "fetch-full-description": () => fetchFullDescription(),
   "apply-hh": (control) => applyHh(control.dataset.dryRun !== "false"),
@@ -1999,6 +2112,7 @@ function handleDynamicRecordAction(event) {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  setupDestinationPanels();
   setupResumeBuilderDefaults();
   document.addEventListener("click", handleDelegatedUiAction);
   document.addEventListener("click", handleDynamicRecordAction);
@@ -2052,6 +2166,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.querySelectorAll(".agent-tab").forEach(tab => {
     tab.addEventListener("click", () => switchAgentPanel(tab.dataset.agentPanel));
+  });
+  document.querySelectorAll("[data-applications-tab]").forEach(tab => {
+    tab.addEventListener("click", () => switchApplicationsTab(tab.dataset.applicationsTab));
+  });
+  document.querySelectorAll("[data-analytics-tab]").forEach(tab => {
+    tab.addEventListener("click", () => switchAnalyticsTab(tab.dataset.analyticsTab));
+  });
+  document.querySelectorAll("[data-settings-tab]").forEach(tab => {
+    tab.addEventListener("click", () => switchSettingsSection(tab.dataset.settingsTab));
   });
 
   window.addEventListener("popstate", () => activateView(routeViewFromPath(window.location.pathname), { push: false }));

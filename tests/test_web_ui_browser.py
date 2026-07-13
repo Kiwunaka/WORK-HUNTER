@@ -1335,8 +1335,7 @@ def test_hh_lab_live_action_cancel_and_literal_confirmation(browser_app):
         )
 
     page.route("**/api/hh/lab/call", capture_mutation)
-    page.goto(base_url + "/agent", wait_until="domcontentloaded")
-    page.locator(".agent-tab[data-agent-panel='api-lab']").click()
+    page.goto(base_url + "/settings?section=advanced", wait_until="domcontentloaded")
     page.locator("#hh-lab-method").select_option("POST")
     page.locator("#hh-lab-path").fill("/resumes/123/publish")
     page.locator("#hh-lab-body").fill('{"token":"secret-value","publish":true}')
@@ -1643,3 +1642,22 @@ def test_vacancy_workspace_exposes_stable_capability_action_ids(browser_app):
         "job.ai.interview",
         "job.ai.experience-pitch",
     } <= action_ids
+
+
+def test_destination_subtabs_follow_canonical_urls(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/agent", wait_until="networkidle")
+    expect(page.locator("[data-applications-tab='agent']")).to_have_attribute(
+        "aria-selected", "true"
+    )
+    page.locator("[data-applications-tab='automation']").click()
+    expect(page).to_have_url(base_url + "/applications?tab=automation")
+    expect(page.locator("#agent-panel-research")).to_be_visible()
+
+    page.goto(base_url + "/trends", wait_until="networkidle")
+    expect(page).to_have_url(base_url + "/analytics?tab=trends")
+    expect(page.locator("#trends-output")).to_be_visible()
+
+    page.goto(base_url + "/settings?section=help", wait_until="networkidle")
+    expect(page.locator("[data-settings-panel='help']")).to_be_visible()
+    expect(page.locator("[data-action-id='onboarding.restart']")).to_be_visible()

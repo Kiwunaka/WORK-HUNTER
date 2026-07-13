@@ -395,6 +395,56 @@ def test_shell_uses_system_typography_and_no_emoji_action_icons():
     assert "📤" not in index + app
 
 
+def test_destination_tabs_and_capability_ids_are_present():
+    index = _read_static("index.html")
+    app = _read_static("app.js")
+    combined = index + app
+
+    for tab in ("pipeline", "agent", "automation"):
+        assert f'data-applications-tab="{tab}"' in index
+    for tab in ("overview", "trends"):
+        assert f'data-analytics-tab="{tab}"' in index
+    for section in (
+        "profile",
+        "resumes",
+        "search",
+        "hh",
+        "ai",
+        "notifications",
+        "appearance",
+        "help",
+        "advanced",
+    ):
+        assert f'data-settings-tab="{section}"' in index
+
+    for action_id in (
+        "agent.refresh",
+        "agent.live-auth",
+        "agent.research.plan",
+        "agent.research.run",
+        "event.create",
+        "chat.send",
+        "stats.refresh",
+        "stats.export-csv",
+        "trends.run",
+        "profile.save",
+        "resume.create",
+        "config.save",
+        "onboarding.restart",
+        "hh.lab.run",
+    ):
+        assert f'data-action-id="{action_id}"' in combined
+
+
+def test_destination_subview_switchers_are_url_synchronized():
+    app = _read_static("app.js")
+
+    assert "function switchApplicationsTab" in app
+    assert "function switchAnalyticsTab" in app
+    assert "function switchSettingsSection" in app
+    assert 'window.history.pushState' in app
+
+
 def test_static_and_dynamic_actions_avoid_inline_javascript():
     index = _read_static("index.html")
     app = _read_static("app.js")

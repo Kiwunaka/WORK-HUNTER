@@ -463,6 +463,35 @@ nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
   gap: 16px; margin-bottom: 20px;
 }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.destination-tabs {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  margin: 0 0 16px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(118, 118, 128, 0.08);
+  scrollbar-width: none;
+}
+.destination-tabs::-webkit-scrollbar { display: none; }
+.destination-tabs button {
+  flex: 0 0 auto;
+  justify-content: center;
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+}
+.destination-tabs button.active {
+  background: var(--panel-solid);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+.settings-tabs { max-width: 100%; }
+[hidden] { display: none !important; }
 
 /* ── Views ────── */
 .view { display: none; animation: fadeIn 0.3s ease; }
