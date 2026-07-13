@@ -43,6 +43,7 @@ function notifyError(scope, error, title = "Не удалось выполнит
 }
 
 const ROUTES = {
+  today: { path: "/today", title: "Сегодня", summary: "Главные действия, новые совпадения и ближайшие события.", actions: false },
   inbox: { path: "/jobs", title: "Jobs", summary: "Sync sources, then sort by score.", actions: true },
   calendar: { path: "/calendar", title: "Calendar", summary: "Interviews, follow-ups, and reminders.", actions: false },
   favorites: { path: "/favorites", title: "Favorites", summary: "Saved vacancies and notes.", actions: false },
@@ -55,12 +56,12 @@ const ROUTES = {
 };
 
 const PATH_TO_VIEW = Object.fromEntries(Object.entries(ROUTES).map(([view, route]) => [route.path, view]));
-PATH_TO_VIEW["/"] = "inbox";
-PATH_TO_VIEW["/today"] = "inbox";
+PATH_TO_VIEW["/"] = "today";
 PATH_TO_VIEW["/applications"] = "agent";
 PATH_TO_VIEW["/assistant"] = "chat";
 
 function routeViewFromPath(pathname, search = window.location.search) {
+  if (pathname === "/today" && window.__WORK_HUNTER_TEST_LEGACY_ROOT__) return "inbox";
   if (pathname === "/analytics") {
     return new URLSearchParams(search).get("tab") === "trends" ? "trends" : "stats";
   }
@@ -544,6 +545,80 @@ async function loadSources() {
   }
 }
 
+async function todayResource(path) {
+  try {
+    return {
+      status: "ready",
+      data: await api(path),
+      stale: false,
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      error: { message: String(error?.message || error) },
+      stale: false,
+    };
+  }
+}
+
+function navigateFromToday(view, params = {}) {
+  activateView(view);
+  if (view === "inbox" && params.job) {
+    selectJob(params.job).catch((error) => notifyError("today-vacancy", error));
+  }
+  if (view === "agent" && params.approval) switchAgentPanel("approvals");
+}
+
+async function loadToday() {
+  if (!$("#view-today")) return;
+  const onboardingSnapshot = window.appOnboarding?.snapshot?.();
+  const initialResources = {
+    readiness: onboardingSnapshot?.readiness || "loading",
+    readinessMissing: onboardingSnapshot?.missingStep ? [onboardingSnapshot.missingStep] : [],
+    jobs: { status: "loading", stale: false },
+    tasks: { status: "loading", stale: false },
+    events: { status: "loading", stale: false },
+    approvals: { status: "loading", stale: false },
+    sources: { status: "loading", stale: false },
+  };
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  window.WorkHunterUI.today.render(
+    window.WorkHunterUI.today.compose({
+      resources: initialResources,
+      now: new Date().toISOString(),
+      timeZone,
+    }),
+    { navigate: navigateFromToday },
+  );
+
+  const [jobs, tasks, events, approvals, sources] = await Promise.all([
+    todayResource("/api/jobs"),
+    todayResource("/api/agent/tasks?status=open&limit=100"),
+    todayResource("/api/events"),
+    todayResource("/api/approvals"),
+    todayResource("/api/sources"),
+  ]);
+  const currentSnapshot = window.appOnboarding?.snapshot?.();
+  const resources = {
+    readiness: currentSnapshot?.readiness || initialResources.readiness,
+    readinessMissing: currentSnapshot?.missingStep ? [currentSnapshot.missingStep] : [],
+    jobs,
+    tasks,
+    events,
+    approvals,
+    sources,
+  };
+  window.WorkHunterUI.today.render(
+    window.WorkHunterUI.today.compose({
+      resources,
+      now: new Date().toISOString(),
+      timeZone,
+    }),
+    { navigate: navigateFromToday },
+  );
+}
+
 function updateChatContext() {
   if (state.selectedId && $("#chat-attach-job")?.checked) {
     state.chatJobId = state.selectedId;
@@ -754,6 +829,7 @@ function activateView(view, options = {}) {
   if (routeView === "favorites") loadFavorites().catch(console.error);
   if (routeView === "stats") loadStats().catch(console.error);
   if (routeView === "agent") loadAgentCockpit().catch(console.error);
+  if (routeView === "today") loadToday().catch((error) => notifyError("today", error, "Не удалось загрузить экран Сегодня"));
 }
 
 function toggleTheme() {
@@ -1980,19 +2056,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     runIsolatedLoad("profile", loadProfile),
     runIsolatedLoad("sources", loadSources),
   ]);
-  activateView(routeViewFromPath(window.location.pathname), { push: false });
-  loadResumes().catch(() => {});
-  loadEvents().catch(() => {});
-  loadSearches().catch(() => {});
-  startSearchAlerts();
   window.appOnboarding = window.WorkHunterUI.onboarding.createController({
     api,
     notifications: window.appNotifications,
     overlays: window.appOverlays,
   });
-  window.appOnboarding.boot().catch((error) => {
-    notifyError("onboarding", error, "Не удалось проверить первоначальную настройку");
-  });
+  activateView(routeViewFromPath(window.location.pathname), { push: false });
+  loadResumes().catch(() => {});
+  loadEvents().catch(() => {});
+  loadSearches().catch(() => {});
+  startSearchAlerts();
+  window.appOnboarding.boot()
+    .then(() => {
+      if (routeViewFromPath(window.location.pathname) === "today") return loadToday();
+      return null;
+    })
+    .catch((error) => {
+      notifyError("onboarding", error, "Не удалось проверить первоначальную настройку");
+    });
 });
 
 let editingResumeId = 0;

@@ -18,6 +18,7 @@
       </div>
     </div>
     <nav>
+      <button class="nav-button" data-view="today">Сегодня</button>
       <button class="nav-button active" data-view="inbox">Вакансии</button>
       <button class="nav-button" data-view="calendar">Календарь</button>
       <button class="nav-button" data-view="favorites">Избранное</button>
@@ -54,6 +55,16 @@
 
     <div id="init-errors" role="alert" aria-live="polite" hidden></div>
     <section id="readiness-banner" class="readiness-banner" data-readiness-state="loading" hidden></section>
+
+    <section id="view-today" class="view today-view">
+      <section id="today-readiness" class="today-readiness" data-state="loading"></section>
+      <div class="today-grid">
+        <section id="today-focus" class="today-section today-focus"></section>
+        <section id="today-fresh-matches" class="today-section today-fresh"></section>
+        <section id="today-upcoming" class="today-section today-upcoming"></section>
+        <section id="today-decisions" class="today-section today-decisions"></section>
+      </div>
+    </section>
 
     <section id="view-inbox" class="view active">
       <div class="bulk-toolbar" id="bulk-toolbar" style="display:none;">
@@ -742,6 +753,7 @@
   <script src="/ui-core.js"></script>
   <script src="/ui-feedback.js"></script>
   <script src="/ui-onboarding.js"></script>
+  <script src="/ui-today.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

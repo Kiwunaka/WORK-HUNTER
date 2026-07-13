@@ -143,6 +143,9 @@ def browser_app(tmp_path):
                         JSON.stringify({onboardingDeferred: true, forceReview: false})
                       );
                     }
+                    if (!location.search.includes('__first_run=1') && !location.search.includes('__today=1')) {
+                      window.__WORK_HUNTER_TEST_LEGACY_ROOT__ = true;
+                    }
                     """
                 )
                 setattr(
@@ -1491,3 +1494,116 @@ def test_onboarding_resume_activation_retry_does_not_create_duplicate(browser_ap
     )
     assert progress["pendingResumeActivationId"] is None
     assert "resume" in progress["completedSteps"]
+
+
+def test_today_fresh_matches_exclude_unscored_and_fall_back_to_fetched(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today?__today=1", wait_until="domcontentloaded")
+    args = {
+        "now": "2026-07-13T09:00:00Z",
+        "timeZone": "Europe/Moscow",
+        "resources": {
+            "readiness": "ready",
+            "jobs": {
+                "status": "ready",
+                "stale": False,
+                "data": [
+                    {
+                        "id": 1,
+                        "status": "new",
+                        "score": {"total_score": 80},
+                        "published_at": "2026-07-11T09:00:00Z",
+                        "fetched_at": "2026-07-13T08:00:00Z",
+                    },
+                    {
+                        "id": 2,
+                        "status": "new",
+                        "score": {"total_score": 90},
+                        "published_at": "invalid",
+                        "fetched_at": "2026-07-13T08:00:00Z",
+                    },
+                    {
+                        "id": 3,
+                        "status": "new",
+                        "score": {"total_score": 85},
+                        "published_at": "2026-07-12T09:00:00Z",
+                        "fetched_at": "2026-07-12T09:00:00Z",
+                    },
+                    {
+                        "id": 4,
+                        "status": "new",
+                        "score": None,
+                        "published_at": "2026-07-13T09:00:00Z",
+                        "fetched_at": "2026-07-13T09:00:00Z",
+                    },
+                ],
+            },
+            "tasks": {"status": "ready", "stale": False, "data": []},
+            "events": {"status": "ready", "stale": False, "data": []},
+            "approvals": {"status": "ready", "stale": False, "data": []},
+            "sources": {"status": "ready", "stale": False, "data": []},
+        },
+    }
+
+    result = page.evaluate(
+        "args => WorkHunterUI.today.compose(args).freshMatches.map(item => item.id)",
+        args,
+    )
+    assert result == [2, 3, 1]
+
+
+def test_today_focus_priority_and_upcoming_boundaries(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today?__today=1", wait_until="domcontentloaded")
+    result = page.evaluate(
+        """
+        () => WorkHunterUI.today.compose({
+          now: '2026-07-13T09:00:00Z', timeZone: 'Europe/Moscow',
+          resources: {
+            readiness: 'incomplete', readinessMissing: ['resume'],
+            jobs: {status:'ready', stale:false, data:[
+              {id:9, status:'new', score:{total_score:95}, title:'High match'}
+            ]},
+            tasks: {status:'ready', stale:false, data:[
+              {id:2, status:'open', due_at:'2026-07-13T13:00:00+03:00', title:'Task today'},
+              {id:1, status:'open', due_at:'2026-05-01', title:'Too old'}
+            ]},
+            events: {status:'ready', stale:false, data:[
+              {id:5, event_date:'2026-07-13T15:00:00+03:00', title:'Today event'},
+              {id:6, event_date:'2026-07-14', title:'Tomorrow'},
+              {id:7, event_date:'2026-08-20', title:'Too far'}
+            ]},
+            approvals: {status:'ready', stale:false, data:[
+              {id:3, status:'pending', created_at:'2026-07-12T10:00:00Z', action_type:'apply'}
+            ]},
+            sources: {status:'ready', stale:false, data:[]}
+          }
+        })
+        """
+    )
+
+    assert [item["kind"] for item in result["focus"]] == [
+        "approval",
+        "task",
+        "event",
+    ]
+    assert [item["id"] for item in result["upcoming"]] == [5, 6]
+    assert result["pendingDecision"]["id"] == 3
+
+
+def test_today_route_renders_bounded_real_sections(browser_app):
+    page, base_url, _ = browser_app
+    page.goto(base_url + "/today?__today=1", wait_until="networkidle")
+
+    expect(page.locator("#view-today")).to_be_visible()
+    for section_id in (
+        "today-readiness",
+        "today-focus",
+        "today-fresh-matches",
+        "today-upcoming",
+        "today-decisions",
+    ):
+        expect(page.locator(f"#{section_id}")).to_be_visible()
+    expect(page.locator("#today-fresh-matches")).to_contain_text(
+        "Нет оценённых новых вакансий"
+    )

@@ -25,6 +25,7 @@ STATIC_FILES = {
     "ui-core.js",
     "ui-feedback.js",
     "ui-onboarding.js",
+    "ui-today.js",
 }
 MIGRATION_FILES = {"0001_backbone.sql"}
 
@@ -221,7 +222,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
         assert work_hunter.__version__ == "1.0.0"
         package = resources.files("work_hunter")
         static = package.joinpath("web", "static")
-        for name in ("app.css", "app.js", "index.html", "manifest.json", "sw.js", "ui-core.js", "ui-feedback.js", "ui-onboarding.js"):
+        for name in ("app.css", "app.js", "index.html", "manifest.json", "sw.js", "ui-core.js", "ui-feedback.js", "ui-onboarding.js", "ui-today.js"):
             resource = static.joinpath(name)
             assert resource.is_file()
             assert resource.read_bytes()

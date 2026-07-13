@@ -698,7 +698,13 @@
       boot,
       review,
       deriveReadiness,
-      snapshot: () => ({ readiness, currentStep, progress, session }),
+      snapshot: () => ({
+        readiness,
+        currentStep,
+        missingStep: readiness === "incomplete" ? missingDomainStep(resources) : null,
+        progress,
+        session,
+      }),
     });
   }
 
