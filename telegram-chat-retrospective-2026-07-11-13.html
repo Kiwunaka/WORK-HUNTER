@@ -204,6 +204,21 @@
     .back-to-top{min-height:44px;display:inline-flex;align-items:center;padding:8px 14px;border:1px solid currentColor;color:var(--paper-hi);font-family:var(--display);font-weight:800;text-decoration:none;white-space:nowrap}
     #copy-status{position:fixed;z-index:80;right:20px;bottom:20px;max-width:min(420px,calc(100vw - 40px));padding:12px 16px;background:var(--acid);color:var(--ink);font-size:.82rem;font-weight:700;transform:translateY(160%);transition:transform .45s var(--mass)}
     #copy-status:not(:empty){transform:none}
+    .visually-hidden{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+    .ledger-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+    .copy-link{width:46px;height:46px;display:grid;place-items:center;padding:0;border:1px solid var(--ink);border-radius:50%;background:transparent;color:var(--ink);cursor:pointer;transition:background-color .3s ease,color .3s ease,transform .5s var(--mass)}
+    .copy-link[hidden]{display:none}
+    .copy-link svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+    .copy-link:hover,.copy-link:focus-visible,.copy-link[data-copied="true"]{background:var(--acid);transform:translateY(-2px)}
+    [data-reveal]{opacity:1;translate:0 0;transition:opacity .75s var(--mass),translate .9s var(--mass)}
+    [data-reveal][data-reveal-ready="true"]:not([data-visible="true"]){opacity:0;translate:0 34px}
+    [data-chart] rect,[data-chart] circle,[data-chart] path{transition:transform 1s var(--mass),opacity .75s ease,stroke-dashoffset 1.2s var(--mass)}
+    .daily-chart[data-reveal-ready="true"]:not([data-visible="true"]) .chart-bar rect{transform:scaleX(0)}
+    [data-chart="channel-skew"] rect,[data-chart="top-composition"] g[data-reaction] rect,.poll-chart g[data-poll] rect{transform-box:fill-box;transform-origin:left center}
+    [data-chart="channel-skew"][data-reveal-ready="true"]:not([data-visible="true"]) rect,[data-chart="top-composition"][data-reveal-ready="true"]:not([data-visible="true"]) g[data-reaction] rect,.poll-chart[data-reveal-ready="true"]:not([data-visible="true"]) g[data-poll] rect{transform:scaleX(0)}
+    [data-chart="reacted-share"][data-reveal-ready="true"]:not([data-visible="true"]) .ring-value{stroke-dashoffset:100}
+    .gem-constellation[data-reveal-ready="true"]:not([data-visible="true"]) [data-category]{opacity:0;transform:scale(.55);transform-origin:center;transform-box:fill-box}
+    .gem-constellation[data-reveal-ready="true"]:not([data-visible="true"]) .connector,.gem-constellation[data-reveal-ready="true"]:not([data-visible="true"]) .facet{opacity:.08;stroke-dashoffset:80}
 
     @media (max-width:900px){
       .section-heading{grid-template-columns:1fr 3fr}.section-heading>p:last-child{grid-column:2}
@@ -212,7 +227,7 @@
       .overview-plates{grid-template-columns:1fr 1fr}.data-plate--wide{grid-column:span 2}.data-plate--compact{grid-column:auto;transform:none}.data-plate--contrast{grid-column:auto;margin:0}
       .chapter-line{column-gap:28px}.chapter{grid-column:1/span 6}.chapter:nth-child(even){grid-column:7/span 6}
       .reaction-composition{grid-template-columns:1fr}.composition-key{grid-template-columns:repeat(4,1fr)}
-      .ledger-row{grid-template-columns:60px minmax(0,1fr)}.ledger-row .message-link{grid-column:2;justify-self:start}
+      .ledger-row{grid-template-columns:60px minmax(0,1fr)}.ledger-actions{grid-column:2;justify-content:flex-start}.ledger-row>.message-link{grid-column:2;justify-self:start}
       .poll-grid{grid-template-columns:1fr}.poll-plate,.poll-plate:nth-child(2){width:min(760px,100%);margin:0 auto;transform:none}.poll-plate:nth-child(2){margin-top:28px}
       .joke-card{grid-column:span 6}.joke-card--hero{grid-column:span 8}.joke-card--offset{grid-column:9/span 4}.joke-card--ink{grid-column:span 6}.joke-card--wide{grid-column:span 7}
       .gem-layout{grid-template-columns:1fr}.gem-visual{position:relative;top:auto;width:min(700px,100%);margin:0 auto}.gem-catalog{grid-template-columns:repeat(2,1fr)}
@@ -227,7 +242,7 @@
       .overview-plates{display:block}.data-plate{margin-bottom:14px;padding:22px}.data-plate header{display:block}.data-plate--compact,.data-plate--contrast{transform:none}.channel-split{grid-template-columns:1fr}.scope-note{margin-top:40px}
       .section-heading{display:block;margin-bottom:58px}.section-heading .section-index{width:max-content;margin-bottom:38px}.section-heading h2{font-size:clamp(3.2rem,16vw,5.3rem);margin-bottom:28px}.section-heading>p:last-child{max-width:30rem}
       .chapter-line{display:block}.chapter-line::before{left:24px}.chapter,.chapter:nth-child(even),.chapter--wide{display:grid;grid-template-columns:48px 1fr;transform:none;margin-bottom:20px;padding-bottom:42px}.chapter--signal>div,.chapter--dark>div{padding:20px}.chapter-no{width:48px;height:48px;z-index:1}
-      .reaction-composition{display:block;padding:20px}.composition-key{grid-template-columns:repeat(2,1fr)}.ledger-row{grid-template-columns:52px 1fr;padding:20px 16px;min-height:0}.ledger-rank{font-size:2rem}.ledger-copy h3{font-size:2.35rem}.ledger-row .message-link{grid-column:1/span 2}.ledger-row::before{height:5px}
+      .reaction-composition{display:block;padding:20px}.composition-key{grid-template-columns:repeat(2,1fr)}.ledger-row{grid-template-columns:52px 1fr;padding:20px 16px;min-height:0}.ledger-rank{font-size:2rem}.ledger-copy h3{font-size:2.35rem}.ledger-row>.message-link,.ledger-actions{grid-column:1/span 2}.ledger-actions{justify-content:flex-start}.ledger-row::before{height:5px}
       .double-bezel{border-radius:24px}.double-bezel__core{border-radius:18px;padding:22px}.poll-plate h3{font-size:2.8rem}.poll-lead{font-size:1.1rem}
       .joke-wall{display:block}.joke-card,.joke-card--hero,.joke-card--offset,.joke-card--ink,.joke-card--wide{min-height:0;margin:0 0 12px;transform:none}.joke-card--hero blockquote{font-size:2.5rem}
       .gem-layout{display:block}.gem-catalog{display:block}.gem-card,.gem-card:nth-child(3n+2),.gem-card--theory{min-height:0;margin-bottom:12px;transform:none}.gem-card--theory{grid-column:auto}
@@ -486,7 +501,13 @@
         <ol class="ledger-list">
           <li class="ledger-row ledger-row--paired" data-message-id="497797" data-reactions="419" data-reveal style="--rank-scale:1">
             <span class="ledger-rank">01</span><div class="ledger-copy"><p class="eyebrow">AI-2040 · часть 1</p><h3>419 реакций</h3><p>Главный сигнал: 🤡 213</p></div>
-            <a class="message-link" href="https://t.me/c/1778093200/497797" target="_blank" rel="noopener noreferrer"><span>Открыть #497797</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+            <div class="ledger-actions">
+              <a class="message-link" href="https://t.me/c/1778093200/497797" target="_blank" rel="noopener noreferrer"><span>Открыть #497797</span><span class="arrow-island" aria-hidden="true">↗</span></a>
+              <button class="copy-link" type="button" hidden data-copy-link="https://t.me/c/1778093200/497797" aria-label="Копировать ссылку на сообщение 497797">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+                <span class="visually-hidden">Копировать ссылку</span>
+              </button>
+            </div>
           </li>
           <li class="ledger-row ledger-row--paired" data-message-id="497798" data-reactions="369" data-reveal style="--rank-scale:.881">
             <span class="ledger-rank">02</span><div class="ledger-copy"><p class="eyebrow">AI-2040 · часть 2</p><h3>369 реакций</h3><p>Главный сигнал: 🤡 178</p></div>
@@ -692,5 +713,137 @@
     </section>
   </main>
   <div id="copy-status" role="status" aria-live="polite"></div>
+  <script>
+    (() => {
+      "use strict";
+
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+      function resolveRoot(root) {
+        if (typeof root === "string") return document.querySelector(root);
+        return root || document;
+      }
+
+      function setReducedMotionMode() {
+        document.documentElement.dataset.motion = reduceMotion.matches ? "reduced" : "full";
+        if (!reduceMotion.matches) return;
+        document.querySelectorAll("[data-reveal],[data-chart]").forEach((node) => {
+          node.dataset.visible = "true";
+        });
+      }
+
+      function initMetricCounters(root = document) {
+        if (reduceMotion.matches) return;
+        const scope = resolveRoot(root);
+        if (!scope) return;
+        scope.querySelectorAll(".metric-value[data-value]").forEach((node) => {
+          const finalText = node.textContent;
+          const target = Number(node.dataset.value);
+          if (!Number.isFinite(target)) return;
+          const started = performance.now();
+          const tick = (now) => {
+            const progress = Math.min(1, (now - started) / 950);
+            const eased = 1 - Math.pow(1 - progress, 4);
+            node.textContent = Math.round(target * eased).toLocaleString("ru-RU");
+            if (progress < 1) {
+              window.requestAnimationFrame(tick);
+            } else {
+              node.textContent = finalText;
+            }
+          };
+          window.requestAnimationFrame(tick);
+        });
+      }
+
+      function initChartReveals(root = document) {
+        const scope = resolveRoot(root);
+        if (!scope) return;
+        const charts = [...scope.querySelectorAll("[data-chart]")];
+        if (reduceMotion.matches || !("IntersectionObserver" in window)) {
+          charts.forEach((chart) => { chart.dataset.visible = "true"; });
+          return;
+        }
+        charts.forEach((chart) => { chart.dataset.revealReady = "true"; });
+        const observer = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            entry.target.dataset.visible = "true";
+            observer.unobserve(entry.target);
+          });
+        }, { threshold: 0.18 });
+        charts.forEach((chart) => observer.observe(chart));
+      }
+
+      function initRevealMotion(root = document) {
+        const scope = resolveRoot(root);
+        if (!scope) return;
+        const items = [...scope.querySelectorAll("[data-reveal]")];
+        if (reduceMotion.matches || !("IntersectionObserver" in window)) {
+          items.forEach((item) => { item.dataset.visible = "true"; });
+          return;
+        }
+        items.forEach((item) => { item.dataset.revealReady = "true"; });
+        const observer = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            entry.target.dataset.visible = "true";
+            observer.unobserve(entry.target);
+          });
+        }, { threshold: 0.12, rootMargin: "0px 0px -8%" });
+        items.forEach((item) => observer.observe(item));
+      }
+
+      function initDossierNav(root = document) {
+        if (!("IntersectionObserver" in window)) return;
+        const scope = resolveRoot(root);
+        if (!scope) return;
+        const links = new Map(
+          [...scope.querySelectorAll("[data-nav-target]")].map((link) => [link.dataset.navTarget, link])
+        );
+        const observer = new IntersectionObserver((entries) => {
+          const visible = entries.filter((entry) => entry.isIntersecting);
+          if (!visible.length) return;
+          const active = visible.sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0].target.id;
+          links.forEach((link, id) => link.toggleAttribute("aria-current", id === active));
+        }, { rootMargin: "-22% 0px -62%", threshold: [0, 0.12, 0.3] });
+        links.forEach((_, id) => {
+          const section = scope.querySelector(`#${id}`);
+          if (section) observer.observe(section);
+        });
+      }
+
+      function initLinkActions(root = document) {
+        const scope = resolveRoot(root);
+        if (!scope) return;
+        const status = scope.querySelector("#copy-status") || document.querySelector("#copy-status");
+        scope.querySelectorAll("[data-copy-link]").forEach((button) => {
+          button.hidden = false;
+          button.addEventListener("click", async () => {
+            const url = button.dataset.copyLink;
+            try {
+              if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+              await navigator.clipboard.writeText(url);
+              button.dataset.copied = "true";
+              if (status) status.textContent = `Ссылка ${url} скопирована`;
+              window.setTimeout(() => {
+                button.dataset.copied = "false";
+                if (status) status.textContent = "";
+              }, 1600);
+            } catch (_) {
+              if (status) status.textContent = "Буфер обмена недоступен — откройте ссылку обычной кнопкой";
+            }
+          });
+        });
+      }
+
+      setReducedMotionMode();
+      initMetricCounters();
+      initChartReveals();
+      initRevealMotion();
+      initDossierNav();
+      initLinkActions();
+      reduceMotion.addEventListener?.("change", setReducedMotionMode);
+    })();
+  </script>
 </body>
 </html>

@@ -233,3 +233,31 @@ def test_svg_values_are_source_bound_and_accessibly_labeled():
     assert "неполный день, до 19:03 MSK" in html
     assert "758 сообщений с реакциями из 2743" in html
     assert "Канальные сообщения: 3,1% сообщений и 40,2% реакций" in html
+
+
+def test_progressive_enhancement_functions_and_network_bans():
+    html = _html()
+    for name in (
+        "initMetricCounters",
+        "initChartReveals",
+        "initRevealMotion",
+        "initDossierNav",
+        "initLinkActions",
+        "setReducedMotionMode",
+    ):
+        assert f"function {name}" in html
+    forbidden = (
+        "fetch(",
+        "XMLHttpRequest",
+        "WebSocket",
+        "EventSource",
+        "sendBeacon",
+        "setInterval(",
+        'addEventListener("scroll"',
+    )
+    assert not any(token in html for token in forbidden)
+    assert 'aria-live="polite"' in html
+    assert "data-copy-link=" in html
+    assert "IntersectionObserver" in html
+    assert "function resolveRoot" in html
+    assert html.count("const scope = resolveRoot(root);") == 5
