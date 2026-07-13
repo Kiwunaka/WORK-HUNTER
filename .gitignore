@@ -35,6 +35,7 @@ env/
 
 # Local browser/test/research artifacts
 .playwright-mcp/
+.superpowers/
 .research/
 scratch.py
 
