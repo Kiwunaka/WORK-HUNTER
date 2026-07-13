@@ -93,6 +93,25 @@ Run the local UI:
 python -m work_hunter ui --host 127.0.0.1 --port 8787
 ```
 
+### Local UI
+
+The Apple HIG-inspired cockpit has eight destinations:
+
+- **Today** — readiness, up to three priority actions, fresh matches, upcoming events, and pending decisions;
+- **Vacancies** — search, filters, scoring, saved items, vacancy details, letters, and guarded HH apply;
+- **Applications** — pipeline, agent approvals/runs, and automation tools;
+- **Calendar** — interviews, follow-ups, reminders, and tasks;
+- **Assistant** — job-aware chat and drafting;
+- **Analytics** — funnel, score distribution, source performance, and trends;
+- **Sources** — connection health, last sync, errors, and retry;
+- **Settings** — profiles, resumes, searches, HH/AI configuration, appearance, help, and advanced API Lab tools.
+
+On a genuine first run, a three-step sheet reviews the search goal, enabled sources, and active resume. **Set up later** defers it only for the current browser tab and does not pretend setup is complete. Progress survives reloads, including the case where a resume was created but activation must be retried.
+
+Use **Settings → Help → Repeat introduction** to review setup again. **Show tips again** resets contextual coach marks. The interface adapts from a full sidebar to a compact icon sidebar and then to a mobile menu sheet.
+
+Real HH mutations are never autonomous. The UI shows a dedicated safety sheet with the exact target and consequence, requires acknowledgement, revalidates immediately before execution, and sends the literal JSON boolean `confirm: true`. Server-side authorization and policy checks remain authoritative.
+
 Run the MCP server:
 
 ```powershell

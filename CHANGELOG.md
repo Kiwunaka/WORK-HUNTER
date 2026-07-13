@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - 2026-07-13
+
+### Apple HIG cockpit redesign
+
+- Replace the legacy navigation with eight canonical destinations and a deterministic **Today** dashboard.
+- Add a three-step first-run onboarding flow with safe deferral, reload recovery, and profile-scoped resume activation.
+- Add contextual coach marks, accessible notifications, sheets, popovers, inline failures, and empty states.
+- Add full, compact, and mobile responsive shell modes with local SVG icons and reduced-motion support.
+- Group Applications, Analytics, and Settings into URL-synchronized tabs while preserving existing workflows.
+
+### Safety and compatibility
+
+- Replace browser alerts and confirms with typed feedback and live-action safety sheets.
+- Revalidate HH mutations immediately before execution and retain literal-boolean server confirmation guards.
+- Preserve legacy deep links through canonical URL replacement and package all local UI controller assets.
+
 ## 1.0.0 - 2026-07-10
 
 ### Safety
