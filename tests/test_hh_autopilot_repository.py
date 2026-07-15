@@ -685,3 +685,171 @@ def test_repository_rejects_raw_state_strings_and_bad_identifier_types(repo) -> 
         )
     with pytest.raises(TypeError):
         repo.create_item(run.id, "default", 1, "r-1", "preset")
+
+
+def test_immediate_rolls_back_when_deferred_foreign_key_fails_at_commit(repo) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        with repo.immediate():
+            repo.conn.execute("PRAGMA defer_foreign_keys = ON")
+            repo.conn.execute(
+                """
+                INSERT INTO hh_autopilot_events (
+                    run_id, item_id, previous_state, next_state, reason_code,
+                    metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    None,
+                    999_999,
+                    "discovered",
+                    "discovered",
+                    "deferred_fk_probe",
+                    "{}",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+
+    assert repo.conn.in_transaction is False
+    assert (
+        repo.conn.execute(
+            "SELECT COUNT(*) FROM hh_autopilot_events WHERE reason_code = ?",
+            ("deferred_fk_probe",),
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_repository_rejects_nul_in_every_idempotency_component(repo) -> None:
+    with pytest.raises(ValueError, match="NUL"):
+        repo.create_run("default\0other", trigger="manual", policy_hash="hash")
+
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    injected_pairs = [
+        ("vacancy", "v-1\0tail", "r-1"),
+        ("resume", "v-1", "r-1\0tail"),
+        ("resume-boundary", "x", "r\0v"),
+        ("vacancy-boundary", "v\0x", "r"),
+    ]
+    for _label, vacancy_id, resume_id in injected_pairs:
+        with pytest.raises(ValueError, match="NUL"):
+            repo.create_item(
+                run.id,
+                "default",
+                vacancy_id,
+                resume_id,
+                "preset",
+            )
+
+    with pytest.raises(ValueError, match="NUL"):
+        repo.create_item(run.id, "default", "v-1", "r-1", "preset\0other")
+    assert repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_items").fetchone()[0] == 0
+
+
+def test_unambiguous_valid_idempotency_pairs_remain_distinct(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+
+    first = repo.create_item(run.id, "default", "c", "ab", "preset")
+    second = repo.create_item(run.id, "default", "bc", "a", "preset")
+
+    assert first.id != second.id
+
+
+def test_tuple_nested_secrets_are_redacted_from_run_counters(repo) -> None:
+    run = repo.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="hash",
+        counters={"steps": ({"access_token": "create-secret", "count": 1},)},
+    )
+    created_raw = repo.conn.execute(
+        "SELECT counters_json FROM hh_autopilot_runs WHERE id = ?", (run.id,)
+    ).fetchone()[0]
+
+    assert "create-secret" not in created_raw
+    assert run.counters == {
+        "steps": [{"access_token": "***", "count": 1}],
+    }
+
+    finished = repo.finish_run(
+        run.id,
+        counters={"steps": (({"refresh_token": "finish-secret"},),)},
+    )
+    finished_raw = repo.conn.execute(
+        "SELECT counters_json FROM hh_autopilot_runs WHERE id = ?", (run.id,)
+    ).fetchone()[0]
+
+    assert "finish-secret" not in finished_raw
+    assert finished.counters == {
+        "steps": [[{"refresh_token": "***"}]],
+    }
+
+
+def test_due_timestamp_offsets_are_normalized_before_boundary_comparison(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset")
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_items
+        SET state = ?, next_attempt_at = ?
+        WHERE id = ?
+        """,
+        (
+            AutopilotState.ELIGIBLE.value,
+            "2026-01-01T22:30:00+00:00",
+            item.id,
+        ),
+    )
+    repo.conn.commit()
+
+    assert repo.list_due_items(
+        "default",
+        states=[AutopilotState.ELIGIBLE],
+        now="2026-01-02T00:00:00+02:00",
+        limit=10,
+    ) == []
+    assert repo.list_due_items(
+        "default",
+        states=[AutopilotState.ELIGIBLE],
+        now="2026-01-02T01:00:00+02:00",
+        limit=10,
+    ) == [repo.get_item(item.id)]
+    assert repo.list_due_items(
+        "default",
+        states=[AutopilotState.ELIGIBLE],
+        now="2026-01-01T23:00:00Z",
+        limit=10,
+    ) == [repo.get_item(item.id)]
+
+
+@pytest.mark.parametrize(
+    "now",
+    ["not-a-timestamp", "2026-01-01T23:00:00"],
+)
+def test_due_timestamp_rejects_invalid_or_naive_strings(repo, now) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    repo.create_item(run.id, "default", "v-1", "r-1", "preset")
+
+    with pytest.raises(ValueError):
+        repo.list_due_items(
+            "default",
+            states=[AutopilotState.DISCOVERED],
+            now=now,
+            limit=10,
+        )
+
+
+def test_append_event_rejects_forged_state_arguments(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset")
+
+    with pytest.raises((TypeError, ValueError)):
+        repo.append_event(
+            item.id,
+            "forged",
+            previous_state=AutopilotState.APPLYING,
+            next_state=AutopilotState.APPLIED,
+        )
+
+    assert [event["reason_code"] for event in repo.list_events(item.id)] == [
+        "discovered"
+    ]

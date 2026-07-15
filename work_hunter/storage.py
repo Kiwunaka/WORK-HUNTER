@@ -224,7 +224,7 @@ def redact_for_storage(value: Any) -> Any:
             else:
                 result[key] = redact_for_storage(item)
         return result
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [redact_for_storage(item) for item in value]
     return value
 

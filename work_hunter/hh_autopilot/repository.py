@@ -134,6 +134,8 @@ def _canonical_identifier(value: Any, *, field: str) -> str:
     normalized = value.strip().casefold()
     if not normalized:
         raise ValueError(f"{field} must not be empty")
+    if "\0" in normalized:
+        raise ValueError(f"{field} must not contain NUL")
     return normalized
 
 
@@ -143,6 +145,8 @@ def _required_text(value: Any, *, field: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise ValueError(f"{field} must not be empty")
+    if "\0" in normalized:
+        raise ValueError(f"{field} must not contain NUL")
     return normalized
 
 
@@ -158,6 +162,13 @@ def _integer(value: Any, *, field: str, minimum: int = 0) -> int:
     if value < minimum:
         raise ValueError(f"{field} must be at least {minimum}")
     return value
+
+
+def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
+    lastrowid = cursor.lastrowid
+    if lastrowid is None:
+        raise RuntimeError("SQLite did not return a lastrowid")
+    return lastrowid
 
 
 def _enum_value(value: Any, enum_type: type[AutopilotState] | type[RetryStage], *, field: str):
@@ -195,15 +206,20 @@ def _json_copy(value: dict[str, Any]) -> dict[str, Any]:
 
 def _timestamp(value: datetime | str, *, field: str) -> str:
     if isinstance(value, datetime):
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError(f"{field} must be timezone-aware")
-        return value.astimezone(timezone.utc).isoformat()
-    if isinstance(value, str):
+        parsed = value
+    elif isinstance(value, str):
         normalized = value.strip()
         if not normalized:
             raise ValueError(f"{field} must not be empty")
-        return normalized
-    raise TypeError(f"{field} must be a datetime or ISO timestamp string")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError(f"{field} must be a valid ISO timestamp") from exc
+    else:
+        raise TypeError(f"{field} must be a datetime or ISO timestamp string")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 class AutopilotRepository:
@@ -218,11 +234,10 @@ class AutopilotRepository:
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             yield
+            self.conn.commit()
         except BaseException:
             self.conn.rollback()
             raise
-        else:
-            self.conn.commit()
 
     def create_run(
         self,
@@ -269,7 +284,7 @@ class AutopilotRepository:
                     now,
                 ),
             )
-            return self._run_for_update(int(cursor.lastrowid))
+            return self._run_for_update(_required_lastrowid(cursor))
 
     def get_run(self, run_id: int) -> RunRecord | None:
         run_id = _integer(run_id, field="run_id", minimum=1)
@@ -366,7 +381,7 @@ class AutopilotRepository:
                 ),
             )
             if cursor.rowcount == 1:
-                item_id = int(cursor.lastrowid)
+                item_id = _required_lastrowid(cursor)
                 self._insert_event(
                     item_id=item_id,
                     run_id=origin_run_id,
@@ -461,8 +476,6 @@ class AutopilotRepository:
         metadata: dict[str, Any] | None = None,
         *,
         run_id: int | None = None,
-        previous_state: AutopilotState | None = None,
-        next_state: AutopilotState | None = None,
         fencing_token: int | None = None,
     ) -> dict[str, Any]:
         item_id = _integer(item_id, field="item_id", minimum=1)
@@ -472,12 +485,6 @@ class AutopilotRepository:
         if run_id == 0:
             raise ValueError("run_id must be at least 1")
         fencing_token = _optional_integer(fencing_token, field="fencing_token")
-        if previous_state is not None:
-            previous_state = _enum_value(
-                previous_state, AutopilotState, field="previous_state"
-            )
-        if next_state is not None:
-            next_state = _enum_value(next_state, AutopilotState, field="next_state")
         with self.immediate():
             current = self._item_for_update(item_id)
             if fencing_token is not None:
@@ -486,13 +493,11 @@ class AutopilotRepository:
                 run = self._run_for_update(run_id)
                 if run.account_id != current.account_id:
                     raise ValueError("event run and item accounts must match")
-            previous = previous_state or current.state
-            target = next_state or current.state
             event_id = self._insert_event(
                 item_id=item_id,
                 run_id=run_id,
-                previous=previous,
-                target=target,
+                previous=current.state,
+                target=current.state,
                 reason=reason,
                 metadata=_json_loads(metadata_json, field="metadata"),
             )
@@ -613,7 +618,7 @@ class AutopilotRepository:
                 _utc_now(),
             ),
         )
-        return int(cursor.lastrowid)
+        return _required_lastrowid(cursor)
 
     def _run_for_update(self, run_id: int) -> RunRecord:
         row = self.conn.execute(
