@@ -30,6 +30,7 @@ STATIC_FILES = {
 MIGRATION_FILES = {
     "0001_backbone.sql",
     "0002_account_aware_applications.sql",
+    "0003_hh_autopilot_runtime.sql",
 }
 
 
@@ -230,7 +231,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
             resource = static.joinpath(name)
             assert resource.is_file()
             assert resource.read_bytes()
-        for name in ("0001_backbone.sql", "0002_account_aware_applications.sql"):
+        for name in ("0001_backbone.sql", "0002_account_aware_applications.sql", "0003_hh_autopilot_runtime.sql"):
             migration = package.joinpath("migrations", name)
             assert migration.is_file()
             assert migration.read_text(encoding="utf-8").strip()
@@ -245,7 +246,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
             }
         finally:
             storage.close()
-        assert {"0001_backbone.sql", "0002_account_aware_applications.sql"} <= versions
+        assert {"0001_backbone.sql", "0002_account_aware_applications.sql", "0003_hh_autopilot_runtime.sql"} <= versions
         print(Path(work_hunter.__file__).resolve())
         """
     )
