@@ -367,6 +367,8 @@ class Application:
     notes: str = ""
     applied_at: str = ""
     updated_at: str = ""
+    account_profile_id: str = "legacy"
+    resume_id: str = ""
 
     def to_dict(self):
         return {
@@ -376,6 +378,8 @@ class Application:
             "notes": self.notes,
             "applied_at": self.applied_at,
             "updated_at": self.updated_at,
+            "account_profile_id": self.account_profile_id,
+            "resume_id": self.resume_id,
         }
 
 

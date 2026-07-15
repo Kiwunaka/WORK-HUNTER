@@ -27,7 +27,10 @@ STATIC_FILES = {
     "ui-onboarding.js",
     "ui-today.js",
 }
-MIGRATION_FILES = {"0001_backbone.sql"}
+MIGRATION_FILES = {
+    "0001_backbone.sql",
+    "0002_account_aware_applications.sql",
+}
 
 
 def _docker_stages(dockerfile: str) -> dict[str, list[str]]:
@@ -227,9 +230,10 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
             resource = static.joinpath(name)
             assert resource.is_file()
             assert resource.read_bytes()
-        migration = package.joinpath("migrations", "0001_backbone.sql")
-        assert migration.is_file()
-        assert migration.read_text(encoding="utf-8").strip()
+        for name in ("0001_backbone.sql", "0002_account_aware_applications.sql"):
+            migration = package.joinpath("migrations", name)
+            assert migration.is_file()
+            assert migration.read_text(encoding="utf-8").strip()
 
         storage = Storage(Path(sys.argv[1]) / "smoke.sqlite3")
         try:
@@ -241,7 +245,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
             }
         finally:
             storage.close()
-        assert "0001_backbone.sql" in versions
+        assert {"0001_backbone.sql", "0002_account_aware_applications.sql"} <= versions
         print(Path(work_hunter.__file__).resolve())
         """
     )

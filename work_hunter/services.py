@@ -9,6 +9,7 @@ import json
 import os
 import re
 import smtplib
+import sqlite3
 import sys
 import threading
 import time
@@ -910,6 +911,55 @@ def send_email_message(message: dict[str, Any], smtp_config: dict[str, Any] | No
     return {"status": "sent", "to": str(message["to"])}
 
 
+def _has_provable_hh_user_identity(
+    profile: dict[str, Any],
+    *,
+    root: Path,
+) -> bool:
+    if any(
+        str(profile.get(key) or "").strip()
+        for key in ("access_token", "refresh_token")
+    ):
+        return True
+    cookie_path_raw = str(profile.get("hh_cookie_file") or "").strip()
+    if not cookie_path_raw:
+        return False
+    cookie_path = Path(cookie_path_raw)
+    if not cookie_path.is_absolute():
+        cookie_path = root / cookie_path
+    try:
+        return cookie_path.is_file() and cookie_path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _effective_hh_auth_profile_ids(
+    config: dict[str, Any],
+    *,
+    root: Path,
+) -> list[str]:
+    effective: set[str] = set()
+    sources = config.get("sources") or {}
+    legacy_hh = sources.get("hh") if isinstance(sources, dict) else None
+    if isinstance(legacy_hh, dict) and _has_provable_hh_user_identity(
+        legacy_hh,
+        root=root,
+    ):
+        effective.add("default")
+
+    profiles = config.get("hh_account_profiles") or {}
+    if isinstance(profiles, dict):
+        for raw_profile_id, profile in profiles.items():
+            if not isinstance(raw_profile_id, str) or not isinstance(profile, dict):
+                continue
+            profile_id = raw_profile_id.strip()
+            if not profile_id or profile_id.casefold() == "legacy":
+                continue
+            if _has_provable_hh_user_identity(profile, root=root):
+                effective.add(profile_id)
+    return sorted(effective)
+
+
 class WorkHunter:
     def __init__(self, root: str | Path | None = None):
         self.root = Path(root) if root is not None else Path.cwd()
@@ -922,8 +972,28 @@ class WorkHunter:
     @property
     def storage(self) -> Storage:
         if self._storage is None:
-            self._storage = Storage(database_path(self.root))
+            storage = Storage(database_path(self.root))
+            self._storage = storage
+            profile_ids = _effective_hh_auth_profile_ids(
+                self.config,
+                root=self.root,
+            )
+            if len(profile_ids) == 1:
+                try:
+                    storage.reassign_legacy_application_account(profile_ids[0])
+                except sqlite3.IntegrityError:
+                    pass
         return self._storage
+
+    def application_identity_migration_report(self) -> dict[str, Any]:
+        rows = self.storage.list_legacy_application_identities()
+        return mask_secrets(
+            {
+                "status": "ok" if not rows else "needs_reassignment",
+                "sentinel_count": len(rows),
+                "rows": rows,
+            }
+        )
 
     def active_profile_id(self) -> str:
         selected = self.config.get("profile", "default")
@@ -4066,7 +4136,9 @@ class WorkHunter:
             "top_jobs": [job.to_dict() for job in jobs],
             "counts": {
                 "top_jobs": len(jobs),
-                "applications": len(self.storage.list_applications()),
+                "applications": len(
+                    {item.job_id for item in self.storage.list_applications()}
+                ),
             },
         }
 

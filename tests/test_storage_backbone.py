@@ -95,7 +95,7 @@ def test_concurrent_storage_initialization_is_serialized(tmp_path):
     storage = Storage(path)
     assert storage.conn.execute(
         "SELECT COUNT(*) FROM schema_migrations"
-    ).fetchone()[0] == 1
+    ).fetchone()[0] == len(list(storage.migrations_dir.glob("*.sql")))
 
 
 def test_failed_migration_rolls_back_schema_and_version(tmp_path):

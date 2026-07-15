@@ -62,6 +62,19 @@ def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
     return int(value)
 
 
+def _validated_application_account_profile_id(
+    value: Any,
+    *,
+    allow_legacy: bool = True,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("A non-empty account profile id is required")
+    profile_id = value.strip()
+    if not allow_legacy and profile_id.casefold() == "legacy":
+        raise ValueError("The legacy account profile sentinel cannot be reassigned")
+    return profile_id
+
+
 def _utc_cutoff_days(days: int, *, now: datetime | None = None) -> str:
     reference = now or datetime.now(timezone.utc)
     try:
@@ -733,6 +746,7 @@ class Storage:
     def _migrate(self) -> None:
         with self._schema_transaction():
             self._execute_sql_script(BASE_SCHEMA_SQL)
+            self._ensure_backbone_columns()
             self._apply_migrations()
             self._ensure_backbone_columns()
 
@@ -1078,6 +1092,7 @@ class Storage:
         status: str = "applied",
         notes: str = "",
         *,
+        account_profile_id: str = "legacy",
         source: str = "",
         source_id: str = "",
         resume_id: str = "",
@@ -1088,6 +1103,9 @@ class Storage:
         result: dict[str, Any] | None = None,
         error: str = "",
     ) -> None:
+        account_profile_id = _validated_application_account_profile_id(
+            account_profile_id
+        )
         now = utc_now()
         if not (source and source_id):
             job = self.get_job(job_id)
@@ -1098,12 +1116,12 @@ class Storage:
         self.conn.execute(
             """
             INSERT INTO applications (
-                job_id, status, notes, applied_at, updated_at,
+                account_profile_id, job_id, status, notes, applied_at, updated_at,
                 source, source_id, resume_id, resume_hash, plan_id,
                 transport, sent_at, result_json, error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(job_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_profile_id, job_id, resume_id) DO UPDATE SET
                 status = excluded.status,
                 notes = excluded.notes,
                 applied_at = CASE
@@ -1124,6 +1142,7 @@ class Storage:
                 error = excluded.error
             """,
             (
+                account_profile_id,
                 job_id,
                 status,
                 notes,
@@ -1214,11 +1233,38 @@ class Storage:
         )
         self.conn.commit()
 
-    def get_application(self, job_id: int) -> Application | None:
-        row = self.conn.execute(
-            "SELECT * FROM applications WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()
+    def get_application(
+        self,
+        job_id: int,
+        *,
+        account_profile_id: str | None = None,
+        resume_id: str | None = None,
+    ) -> Application | None:
+        if account_profile_id is None and resume_id is None:
+            row = self.conn.execute(
+                """
+                SELECT * FROM applications
+                WHERE job_id = ?
+                ORDER BY updated_at DESC, applied_at DESC, id DESC
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+        else:
+            if account_profile_id is None or resume_id is None:
+                raise ValueError(
+                    "Both account profile id and resume id are required for an exact application read"
+                )
+            exact_profile_id = _validated_application_account_profile_id(
+                account_profile_id
+            )
+            row = self.conn.execute(
+                """
+                SELECT * FROM applications
+                WHERE job_id = ? AND account_profile_id = ? AND resume_id = ?
+                """,
+                (job_id, exact_profile_id, resume_id),
+            ).fetchone()
         if row is None:
             return None
         return Application(
@@ -1228,11 +1274,13 @@ class Storage:
             notes=row["notes"],
             applied_at=row["applied_at"],
             updated_at=row["updated_at"],
+            account_profile_id=row["account_profile_id"],
+            resume_id=row["resume_id"],
         )
 
     def list_applications(self) -> list[Application]:
         rows = self.conn.execute(
-            "SELECT * FROM applications ORDER BY applied_at DESC"
+            "SELECT * FROM applications ORDER BY applied_at DESC, id DESC"
         ).fetchall()
         return [
             Application(
@@ -1242,9 +1290,38 @@ class Storage:
                 notes=row["notes"],
                 applied_at=row["applied_at"],
                 updated_at=row["updated_at"],
+                account_profile_id=row["account_profile_id"],
+                resume_id=row["resume_id"],
             )
             for row in rows
         ]
+
+    def list_legacy_application_identities(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT id, account_profile_id, job_id, resume_id, source, source_id
+            FROM applications
+            WHERE account_profile_id = 'legacy'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reassign_legacy_application_account(self, profile_id: str) -> int:
+        validated_profile_id = _validated_application_account_profile_id(
+            profile_id,
+            allow_legacy=False,
+        )
+        with self._schema_transaction():
+            cursor = self.conn.execute(
+                """
+                UPDATE applications
+                SET account_profile_id = ?
+                WHERE account_profile_id = 'legacy'
+                """,
+                (validated_profile_id,),
+            )
+        return int(cursor.rowcount)
 
     def upsert_hh_resume(self, resume: HHResume) -> None:
         self.conn.execute(
@@ -2662,11 +2739,36 @@ class Storage:
                 buckets["81-100"] += 1
 
         total_applications = self.conn.execute(
-            "SELECT COUNT(*) AS cnt FROM applications"
+            """
+            SELECT COUNT(*) AS cnt
+            FROM applications a
+            WHERE a.id = (
+                SELECT latest.id
+                FROM applications latest
+                WHERE latest.job_id = a.job_id
+                ORDER BY latest.updated_at DESC,
+                         latest.applied_at DESC,
+                         latest.id DESC
+                LIMIT 1
+            )
+            """
         ).fetchone()["cnt"]
 
         app_status_rows = self.conn.execute(
-            "SELECT status, COUNT(*) AS cnt FROM applications GROUP BY status"
+            """
+            SELECT a.status, COUNT(*) AS cnt
+            FROM applications a
+            WHERE a.id = (
+                SELECT latest.id
+                FROM applications latest
+                WHERE latest.job_id = a.job_id
+                ORDER BY latest.updated_at DESC,
+                         latest.applied_at DESC,
+                         latest.id DESC
+                LIMIT 1
+            )
+            GROUP BY a.status
+            """
         ).fetchall()
         applications_by_status = {row["status"]: row["cnt"] for row in app_status_rows}
 
@@ -3096,9 +3198,22 @@ class Storage:
         cutoff = _utc_cutoff_days(days)
         rows = self.conn.execute(
             """
+            WITH latest_applications AS (
+                SELECT a.*
+                FROM applications a
+                WHERE a.id = (
+                    SELECT latest.id
+                    FROM applications latest
+                    WHERE latest.job_id = a.job_id
+                    ORDER BY latest.updated_at DESC,
+                             latest.applied_at DESC,
+                             latest.id DESC
+                    LIMIT 1
+                )
+            )
             SELECT j.*
             FROM jobs j
-            INNER JOIN applications a ON a.job_id = j.id
+            INNER JOIN latest_applications a ON a.job_id = j.id
             WHERE j.status = 'applied'
               AND a.status = 'applied'
               AND julianday(a.applied_at) <= julianday(?)
