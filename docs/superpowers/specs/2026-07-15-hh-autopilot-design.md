@@ -10,7 +10,7 @@ Build a single production path that continuously performs:
 
 `multi-page search -> hard filters -> ranking -> quotas -> application -> supported screening/form handling -> journal -> retry -> scheduler`
 
-Once the operator enables `sources.hh.autopilot.enabled` through the confirmed enable command, the scheduler may execute this path without per-run or per-vacancy confirmation. The enable command atomically records a scoped durable authorization grant; directly editing the configuration flag does not create a grant. The default remains `false`. Every live mutation must still honor the active grant, kill switch, account lease, quotas, configured time window, and current policy immediately before dispatch.
+Once the operator enables an entry in `sources.hh.autopilot.accounts[]` through the confirmed enable command, the scheduler may execute this path for that account without per-run or per-vacancy confirmation. The enable command atomically records a scoped durable authorization grant; directly editing the account flag does not create a grant. Every account defaults to `enabled=false`. Every autonomous live mutation must honor the active grant, kill switch, account lease, quotas, configured time window, and current policy immediately before dispatch; one-shot manual mutations follow the separate safety matrix below.
 
 The implementation must use the existing Work Hunter HH transport, storage, scoring, AI, campaign, notification, resume, CLI, and web boundaries. It must replace the current fragmented application orchestration paths with one state machine rather than add another independent application engine.
 
@@ -40,7 +40,7 @@ Add a focused `HHAutopilot` orchestrator. It owns run coordination and state tra
 | `HHSearchProvider` | Fetch recommendation or query result pages and normalize vacancies | Existing HH client/session |
 | `HHEligibilityPolicy` | Apply deterministic hard filters and return stable reason codes | Profile, preset, employer blacklist |
 | `HHVacancyRanker` | Produce deterministic score and optional structured AI decision | Existing scoring and AI backends |
-| `HHApplicationExecutor` | Send one idempotent application and classify the transport result | Existing HH API/web transport |
+| `HHApplicationExecutor` | Send one locally guarded application attempt and classify delivery certainty/result | Existing HH API/web transport |
 | `HHChallengeHandler` | Handle supported screening/forms or create a manual challenge | Authenticated browser session, profile data |
 | `HHRetryPolicy` | Decide terminal versus retryable outcomes and calculate `next_attempt_at` | Typed outcome only |
 | `HHApplicationReconciler` | Resolve ambiguous or duplicate remote outcomes against HH negotiations/history | Read-only HH negotiation transport |
@@ -79,7 +79,10 @@ retry_wait -> eligible
 retry_wait -> reconciling
 retry_wait -> dead
 manual_challenge -> ready
+manual_challenge -> reconciling
+manual_challenge -> applied
 manual_challenge -> skipped
+manual_challenge -> dead
 ```
 
 `eligible` means every hard filter passed. `applied`, `skipped`, and `dead` are terminal unless the operator explicitly requeues a `dead` item. A filtered-out item moves directly from `discovered` to terminal `skipped` with a stable hard-filter reason. No error may leave an item indefinitely in `applying`; lease recovery moves an abandoned `applying` item to `reconciling`, never directly to a new dispatch, because the remote POST may already have succeeded.
@@ -88,24 +91,33 @@ Stable outcome families include:
 
 - `applied`
 - `duplicate`
+- `duplicate_external`
+- `external_applied`
 - `ambiguous_remote_result`
+- `ambiguous_application`
 - `vacancy_closed`
 - `forbidden`
-- `parse_error`
 - `hard_filter:<filter_name>`
 - `missing_required_data`
+- `ai_unavailable`
 - `manual_assessment`
 - `manual_captcha`
 - `hh_daily_limit`
 - `rate_limited`
 - `auth_expired`
 - `manual_auth`
-- `network_error`
+- `challenge_expired`
+- `challenge_dismissed`
+- `pre_dispatch_network_error`
+- `post_dispatch_network_error`
 - `server_error`
+- `read_parse_error`
+- `post_dispatch_parse_error`
 - `internal_error`
 - `invalid_request`
 - `retry_exhausted`
 - `interrupted`
+- `authorization_state_mismatch`
 
 ## Persistence
 
@@ -133,27 +145,47 @@ The default lease TTL is 120 seconds, application HTTP timeout is at most 30 sec
 
 ### `hh_autopilot_quota_reservations`
 
-Stores one row per dispatch attempt: reservation ID, attempt ID, account, timezone, local date, state (`reserved`, `consumed`, or `released`), fencing token, created time, and resolved time. A `BEGIN IMMEDIATE` transaction counts `reserved + consumed` for the account/date and inserts a unique reservation only when both daily and per-run capacity remain. Compare-and-swap state changes prevent double consume/release.
+Stores one row per dispatch attempt or synchronized external application: reservation ID, optional attempt ID, source (`dispatch` or `external_sync`), optional unique remote negotiation ID, account, timezone, local date, state (`reserved`, `held`, `consumed`, or `released`), fencing token, created time, and resolved time. A `BEGIN IMMEDIATE` transaction counts `reserved + held + consumed` for the account/date and inserts a unique dispatch reservation only when both daily and per-run capacity remain. Unique remote negotiation ID and compare-and-swap state changes prevent double external count or double hold/consume/release.
 
-A reservation is never expired merely by wall clock while its attempt is `applying` or `reconciling`. Recovery resolves the remote outcome first, then consumes or releases it. Failed, skipped, and challenged items release their reservation; a later retry reserves again. Timezone is a high-risk setting and cannot change while a grant or unresolved reservation is active. Local-day rollover creates reservations for the new date but does not reassign old rows.
+A reservation is never expired merely by wall clock while its attempt is `applying`, `reconciling`, or challenged as `ambiguous_application`. Recovery resolves the remote outcome first, then consumes or releases it. Definite failures, skips, CAPTCHA, assessment, form, and authentication challenges release their reservation; a later dispatch reserves again. An ambiguous application changes the reservation to `held`, so it conservatively consumes capacity until resolved. Timezone is a high-risk setting and cannot change while a grant or unresolved reservation is active. Local-day rollover creates reservations for the new date but does not reassign old rows.
 
 ### `hh_autopilot_challenges`
 
-Stores scope (`item` or `account`), type, account, optional related item, sanitized URL, optional local screenshot path, status, expiry, resolution timestamp, resolution actor, and masked metadata. Status transitions are `open -> in_progress -> resolved`, `open|in_progress -> dismissed`, and `open|in_progress -> expired`. An account-scoped `manual_auth` challenge pauses dispatch for that account only. Resolving it returns due account items to reconciliation or readiness. An expired/dismissed item challenge moves its item to `skipped` with `challenge_expired` or `challenge_dismissed`; explicit requeue remains available.
+Stores scope (`item` or `account`), type, account, optional related item, sanitized URL, optional local screenshot path, status, expiry, resolution timestamp, resolution actor, resolution action, and masked metadata. Status transitions are `open -> in_progress -> resolved`, `open|in_progress -> dismissed`, and `open|in_progress -> expired`.
+
+- `manual_captcha` and `manual_assessment`: successful completion returns the item to `ready`; dismissal/expiry moves it to `skipped`.
+- `manual_auth`: account-scoped, pauses dispatch for that account only, and does not auto-expire. Resolution sends possibly-sent items to `reconciling`; an item with a definite authentication rejection returns to its stored retry stage because the remote mutation did not occur.
+- `ambiguous_application`: retains a `held` quota reservation. Resolution actions are `confirmed_applied` (atomically consume and move to `applied`), `confirmed_not_applied_retry` (release and move to `ready`), `confirmed_not_applied_skip` (release and move to `skipped`), or `retry_reconciliation` (retain and move to `reconciling`). Dismissal/expiry moves the item to `dead` but retains the hold until an explicit applied/not-applied resolution; it never silently returns to `ready`.
 
 Default item-challenge expiry is 24 hours and account authentication challenges do not auto-expire. Both policies are configurable.
 
-### `hh_autopilot_search_checkpoints`
+### `hh_autopilot_search_cycles` and `hh_autopilot_search_checkpoints`
 
-Stores run, account, resume, preset/query key, next page, reported total, unique vacancy count, and status (`pending`, `running`, `complete`, or `failed`). Updating a checkpoint and persisting the normalized page results occurs in one transaction. Recovery may resume an interrupted search from `next_page`; a new scheduled run starts a new search cycle.
+A search cycle stores account, configuration hash, origin run, current owner run, claim version, fencing token, and status (`running`, `complete`, `failed`, or `interrupted`). Checkpoints reference the cycle and store resume, preset/query key, next page, reported total, unique vacancy count, and status (`pending`, `running`, `complete`, or `failed`). Updating a checkpoint and persisting normalized page results occurs in one transaction.
+
+Recovery creates its own `recovery` run, then compare-and-swap claims the interrupted cycle with its new run ID, claim version, and fencing token. It never rewrites `origin_run_id`. Only the current claimed run may advance checkpoints. A normal later scheduled run creates a new search cycle; it does not append pages to a completed or superseded cycle.
+
+### `hh_autopilot_account_state`
+
+Stores account-level `blocked_until`, stable block reason, update version, and HH reset metadata. A definite `rate_limited` or `hh_daily_limit` response atomically releases the current reservation, defers the item, and updates this row. Every ready-item dispatch checks it; while active, no application POST for that account is sent. `Retry-After` or HH reset time is authoritative. Without one, rate limit uses retry policy and daily limit uses the next local-day boundary in the account timezone.
+
+### `hh_application_account_guards`
+
+Stores unique `(account_profile_id, source, source_id)` with current owner attempt, first-seen resume, status (`active`, `applied`, or `external_applied`), authoritative application ID when known, application count, and timestamps. This is the concrete account-plus-vacancy concurrency/summary guard. `best_resume_only` treats any applied/external row as terminal. `per_resume` still serializes through the active guard but permits a later different-resume attempt only when no identical account/job/resume application exists and HH has not returned an account-wide duplicate.
 
 ### `hh_autopilot_grants`
 
 Stores account, scope (`applications` in this specification), policy hash, creation/revocation timestamps, grant version, and masked actor/source. `HHAutopilotAuthorizer` creates the row only from the existing literal-boolean confirmed enable boundary and passes a typed `LiveAuthorization(kind="autopilot", grant_id, scope, account_id, run_id, fencing_token)` to the service mutation guard.
 
-The guard validates the active grant, account, scope, policy hash, configuration flag, pause state, and kill switch immediately before dispatch. Direct configuration edits cannot create or widen a grant. Disabling or invoking the kill switch revokes the grant atomically. Changing account/resume mappings, timezone, schedule window, quotas, send delays, application modes, proxy, browser transport, or administrative maxima invalidates the policy hash and requires a new confirmed enable action.
+The guard validates the active grant, account, scope, policy hash, configuration flag, pause state, and kill switch immediately before dispatch. Direct configuration edits cannot create or widen a grant. Disabling or invoking the kill switch revokes the grant atomically. Any canonical policy input change invalidates the hash and requires a new confirmed enable action.
 
-Existing `applications`, `hh_application_attempts`, campaign, employer, contact, negotiation, form review, and operation log tables remain authoritative for their current consumers. Migrations add nullable `autopilot_run_id`, `autopilot_item_id`, and `autopilot_attempt_id` links where applicable.
+`policy_hash` is SHA-256 over canonical UTF-8 JSON with sorted object keys, normalized arrays where order is not semantic, and no secret values. The canonical input contains the account mapping; effective HH auth profile ID; candidate-profile facts/version; selected resume IDs and content/version hashes; fully expanded search preset definitions; recommendation flag and search budgets; all hard filters; ranking thresholds, weights, AI modes, model identifier, and prompt/template versions; quotas; timezone and schedule; send delays; retry/reconciliation policy; cover-letter mode and template/version; screening/form/CAPTCHA policy; effective proxy/browser transport identity; and administrative maxima. Secret credentials are represented by stable local secret-version IDs rather than values.
+
+The account's `enabled`/`paused` state, notification destinations, log level, retention, run counters, and current timestamps are excluded because they are runtime controls rather than policy content. Any canonical input change blocks autonomous dispatch until a new confirmed enable action creates a new grant generation. An observed `enabled=false`, the `disable` command, or a kill switch permanently revokes the current generation; setting the file back to `true` cannot reactivate it. On every config load, `enabled=false` is persisted as revocation before work continues. A mismatch between the account entry's recorded grant generation and the active database grant stops the scheduler with `authorization_state_mismatch`.
+
+Existing application history must become account-aware before multi-account autopilot is enabled. A versioned table-rebuild migration adds `account_profile_id TEXT NOT NULL`, retains `job_id` as a foreign key rather than a unique key, and creates `UNIQUE(account_profile_id, job_id, resume_id)`. Existing rows migrate with the active legacy profile ID when it can be determined, otherwise the explicit sentinel `legacy`; the migration report lists sentinel rows for later reassignment. `get_application`/`save_application` require account profile and resume identity for HH calls, while compatibility readers may request an aggregate view.
+
+`hh_application_attempts` likewise gains `account_profile_id`, `autopilot_run_id`, `autopilot_item_id`, `autopilot_attempt_id`, authorization kind/reference, policy hash, delivery certainty, and dispatch timestamps. This immutable provenance permits reconciliation/finalization after a grant is revoked without authorizing a new POST. Campaign, employer, contact, negotiation, form review, and operation log tables remain authoritative for their current consumers.
 
 Finalizing a successful or reconciled application is one SQLite transaction that verifies item version and fencing token, upserts the existing application row, writes the existing attempt outcome, consumes the quota reservation, advances the item to `applied`, inserts its event, updates the account-vacancy guard, and increments cached run counters. Any failure rolls back the whole transaction. Non-success transitions similarly update attempt, reservation, item, event, and challenge atomically.
 
@@ -163,13 +195,14 @@ Finalizing a successful or reconciled application is one SQLite transaction that
 
 ```json
 {
-  "enabled": false,
-  "paused": false,
   "timezone": "Europe/Moscow",
   "accounts": [
     {
       "profile_id": "default",
       "candidate_profile_id": "default",
+      "enabled": false,
+      "paused": false,
+      "authorization_generation": null,
       "resume_queries": [
         {"resume_id": "published:*", "preset_names": []}
       ]
@@ -183,7 +216,6 @@ Finalizing a successful or reconciled application is one SQLite transaction that
   },
   "search": {
     "include_recommendations": true,
-    "presets": [],
     "per_page": 100,
     "max_pages": 20,
     "max_results_per_run": 2000
@@ -247,7 +279,6 @@ Finalizing a successful or reconciled application is one SQLite transaction that
   },
   "application": {
     "resume_policy": "best_resume_only",
-    "send_cover_letter": true,
     "cover_letter_mode": "template",
     "screening_mode": "profile_grounded",
     "form_mode": "profile_grounded",
@@ -269,11 +300,13 @@ Finalizing a successful or reconciled application is one SQLite transaction that
 }
 ```
 
-`profile_id` identifies the HH authentication account. `candidate_profile_id` identifies the Work Hunter candidate facts/scoring profile used for truthful answers and ranking. `preset_names` reference existing HH campaign presets, which contain the actual HH query, specialization, area, schedule, employment, experience, salary, and other supported search parameters. `published:*` expands to every published resume in the account; explicit resume IDs are also accepted. The same resume cannot appear twice for one preset after expansion.
+`profile_id` identifies the HH authentication account. `candidate_profile_id` identifies the Work Hunter candidate facts/scoring profile used for truthful answers and ranking. `authorization_generation` is a service-managed nullable integer written only by confirmed enable/disable flows; user configuration updates cannot set it. `preset_names` exclusively reference existing top-level `hh_campaign_presets`; there is no second inline preset collection or precedence rule. Presets contain the actual HH query, specialization, area, schedule, employment, experience, salary, and other supported search parameters. An empty `preset_names` list is valid only when recommendations are enabled. `published:*` expands to every published resume in the account; explicit resume IDs are also accepted. The same resume cannot appear twice for one preset after expansion.
 
 Enums are fixed as follows: `remote` is `any|only|exclude`; `unknown_salary` is `allow|reject`; `ai_mode` is `off|borderline|all`; `ai_detail` is `light|heavy`; `ai_failure_policy` is `retry|deterministic|skip`; `resume_policy` is `best_resume_only|per_resume`; `cover_letter_mode` is `none|template|ai`; screening and form modes are `off|profile_grounded`; CAPTCHA mode is only `manual_handoff` in this specification.
 
-All numeric values have explicit bounds: page size `1..100`, pages `1..100`, run search results `1..10000`, daily and per-run success `1..administrative_max_daily_success`, administrative maximum `1..200`, delays `0..3600`, retry and reconciliation checks `1..20`, retry/reconciliation delays `1..86400`, jitter ratio `0..1`, lease/request/navigation times `1..600`, challenge expiry `1..720` hours, and retention `1..3650` days. Weight values are non-negative finite numbers with a positive sum and are normalized at runtime.
+All numeric values have explicit bounds: page size `1..100`, pages `1..100`, run search results `1..10000`, interval minutes `1..1440`, salary `0..1000000000`, daily and per-run success `1..administrative_max_daily_success`, administrative maximum `1..200`, send delays `0..3600`, retry and reconciliation checks `1..20`, retry/reconciliation delays `1..86400`, jitter ratio `0..1`, lease/request/navigation times `1..600`, challenge expiry `1..720` hours, and retention `1..3650` days. Weight values are non-negative finite numbers with a positive sum and are normalized at runtime. `custom` accepts at most 100 named finite non-negative weights.
+
+Array and identifier domains are also fixed: accounts `1..100`; resume mappings `1..500` per account; preset names `0..100` per mapping; keyword and role lists `0..1000` strings of `1..200` characters; areas/citizenships `0..500` HH ID strings; schedules, employment types, and experience levels `0..100` values from the current HH dictionaries; languages `0..100` BCP-47 tags; and required application capabilities from `direct|screening|form`. All arrays reject duplicates after normalization. Query preset fields are validated by the existing HH search schema before hashing or execution. Boolean fields accept JSON booleans only.
 
 Validation also requires valid IANA timezone, unique weekday integers `1..7`, valid `HH:MM` values with `start <= end`, positive interval, `per_run_success <= daily_success`, minimum send delay not above maximum, `borderline_low <= minimum_score <= borderline_high`, AI confidence in `0..1`, lease TTL at least request timeout plus renewal margin, unique account mappings, existing HH and candidate profiles/presets, at least one resolvable published resume, supported modes, a usable application transport, and an active application grant before a live run. Unknown configuration keys are rejected. Invalid configuration cannot enable or start the autopilot.
 
@@ -321,23 +354,26 @@ The same vacancy can be ranked against multiple resumes. Under `best_resume_only
 
 The scheduler evaluates the configured local timezone and window. Missed intervals do not create a burst of catch-up runs; at most one run starts when the process resumes. A live account lease prevents concurrent manual, scheduled, retry, or application recovery mutation for the same account.
 
-Before every application mutation, not only at run start, the orchestrator checks:
+Before every autonomous application POST, not only at run start, the orchestrator checks:
 
 1. active application grant, matching account/scope/policy hash, and typed authorization context;
-2. `enabled` and `paused`;
+2. the selected account entry's `enabled` and `paused` flags;
 3. global and account kill-switch state;
 4. account lease ownership and current fencing token;
 5. time window;
 6. per-run remaining quota;
 7. daily remaining quota or an existing reservation for this attempt;
 8. HH-reported limits;
-9. item compare-and-swap version, idempotency guard, and current state.
+9. durable account `blocked_until` state;
+10. item compare-and-swap version, idempotency guard, and current state.
 
 Dispatch uses a configurable randomized delay. A stopped or paused run commits its current state and exits cleanly.
 
 ## Application And Challenge Flow
 
 `HHApplicationExecutor` sends a standard application through the supported HH transport and maps API/web results to typed outcomes. It never parses an error string to make retry decisions when a typed transport status is available.
+
+Every POST outcome includes delivery certainty: `definitely_not_sent`, `possibly_sent`, or `definite_response`. Only connection/DNS/TLS/preflight failures proven to occur before request bytes are written may be `definitely_not_sent`. Timeout, connection reset, process interruption after dispatch begins, malformed/partial POST response, or any transport exception without proof is conservatively `possibly_sent` and enters reconciliation. A parse failure on a read-only search may retry normally; a parse failure after a possibly successful application POST may not issue another POST before reconciliation.
 
 - A normal success atomically records the existing application and attempt rows, consumes its quota reservation, and advances to `applied`.
 - Closed, forbidden, invalid, and other permanent responses release the reservation and advance to `skipped` with their stable code.
@@ -349,7 +385,7 @@ Dispatch uses a configurable randomized delay. A stopped or paused run commits i
 
 Supported screening fields are mapped from explicit candidate profile fields and resume data. Supported forms are filled in the authenticated browser session using the same mapping. Unknown required fields produce `missing_required_data` and skip only the vacancy.
 
-Knowledge assessments and unsupported task types produce `manual_assessment`. CAPTCHA produces `manual_captcha`. The challenge stores enough sanitized context to reopen the same authenticated browser flow. Resolution moves the item back to `ready`, and the executor repeats the original operation through the local idempotency guard.
+Knowledge assessments and unsupported task types produce `manual_assessment`. CAPTCHA produces `manual_captcha`. The challenge stores enough sanitized context to reopen the same authenticated browser flow. Successful CAPTCHA/assessment resolution moves the item back to `ready`; ambiguous and authentication challenges follow their type-specific transitions defined in persistence.
 
 Contact discovery and employer snapshots use the existing storage tables. Scheduled recruiter email is outside this core specification and remains an existing separately confirmed operation until the maintenance slice defines its grant and durable scheduler.
 
@@ -357,12 +393,13 @@ Contact discovery and employer snapshots use the existing storage tables. Schedu
 
 Before every remote POST, the orchestrator creates an attempt and quota reservation, transitions the item to `applying`, and commits those records. If the process loses the response or crashes before finalization, recovery moves the item to `reconciling`.
 
-`HHApplicationReconciler` queries read-only HH negotiation/application history for the same account, vacancy, and resume:
+`HHApplicationReconciler` queries read-only HH negotiation/application history for the same account and vacancy across every resume, then compares resume identity and remote timestamps with the prepared attempt:
 
-- a matching negotiation finalizes the existing attempt as `applied` and consumes its original reservation;
+- a matching same-resume negotiation created at or after the attempt finalizes the existing attempt as `applied` and consumes its original reservation;
+- a negotiation that clearly predates the attempt or belongs to another resume is recorded through the account-vacancy guard as `external_applied`, releases the current reservation, and terminates the item as `duplicate_external` without another POST. If its unique remote ID and timestamp place it in the current local day, an idempotent `external_sync` consumed quota row counts it toward the account's daily total; older external applications do not consume today's quota;
 - a confirmed absence after the configured consistency delay releases the reservation and permits a bounded new attempt;
 - a duplicate response followed by a matching negotiation finalizes as `applied` rather than `skipped`;
-- an outcome still ambiguous after the reconciliation limit creates an item challenge `ambiguous_application` and does not issue another POST automatically.
+- a negotiation whose resume/time cannot be classified, or an outcome still ambiguous after the reconciliation limit, holds the reservation, creates an item challenge `ambiguous_application`, and does not issue another POST automatically.
 
 The default consistency delay is 30 seconds and reconciliation limit is 3 read-only checks; both are configurable within the retry bounds. This is reconciliation, not remote idempotency.
 
@@ -372,15 +409,20 @@ Retryability is determined by the following complete outcome families:
 
 | Outcome | Action |
 |---|---|
-| `network_error`, `server_error`, `internal_error`, `parse_error` | `retry_wait`, bounded by `max_attempts` |
+| any `possibly_sent` POST outcome, `post_dispatch_network_error`, `post_dispatch_parse_error` | `reconciling` before any retry |
+| `pre_dispatch_network_error`, `read_parse_error`, pre-dispatch `internal_error`, definite retryable `server_error` | `retry_wait`, bounded by `max_attempts` |
 | `rate_limited`, `hh_daily_limit` | `retry_wait` at `Retry-After`/reset, without a tight loop |
 | `auth_expired` | one token/session recovery; then `manual_auth` account challenge |
 | `duplicate`, `ambiguous_remote_result`, abandoned `applying` | `reconciling` |
 | `manual_captcha`, `manual_assessment` | `manual_challenge` |
-| `vacancy_closed`, `forbidden`, `invalid_request`, hard filter, missing data | terminal `skipped` |
+| `duplicate_external`, `external_applied`, `vacancy_closed`, `forbidden`, `invalid_request`, hard filter, missing data, `ai_unavailable` under skip policy | terminal `skipped` |
+| `challenge_expired`, `challenge_dismissed` | terminal `skipped`, except ambiguous application becomes `dead` with held quota |
+| `authorization_state_mismatch` | stop account run; no item dispatch |
 | exhausted retry or reconciliation | `dead` or `ambiguous_application` challenge as specified above |
 
 `max_attempts` counts actual application POST dispatches, including requests whose response was lost. Read-only reconciliation checks and token refresh do not increment it. Authentication recovery is separately bounded by `auth_recovery_attempts`.
+
+Every direct transition to `retry_wait` releases the current dispatch reservation in the same transaction. A possibly-sent outcome never transitions directly to `retry_wait`; reconciliation retains or holds its reservation until remote state is classified.
 
 The default attempts are bounded and persisted. Delay is exponential with bounded jitter:
 
@@ -439,6 +481,20 @@ The service mutation guard accepts exactly two typed authorization forms:
 - `LiteralConfirmation`, created for one existing manual CLI/UI operation from the current literal JSON boolean `confirm=true` boundary;
 - `LiveAuthorization`, created only by `HHAutopilotAuthorizer` from an active durable application grant.
 
+The pre-dispatch matrix is:
+
+| Check | Autonomous POST | Manual confirmed POST | Read-only reconciliation | Local finalization |
+|---|---:|---:|---:|---:|
+| Matching active grant, `enabled`, not paused | required | not required | not required | authorization provenance on attempt only |
+| Scheduler time window | required | not required | not required | not required |
+| Global/account kill switch | must be clear | must be clear | read-only allowed | allowed to close durable state |
+| Account lease and fencing token | required | required | required | required |
+| Account cooldown | required | required | read-only allowed | allowed |
+| Daily/per-run quota reservation | required | required | existing reservation only | existing reservation only |
+| Item version and account-vacancy guard | required | required | required | required |
+
+Thus pausing or disabling the autopilot does not break a one-shot manual confirmation, and a stopped schedule cannot prevent safe read-only reconciliation of an already attempted POST. Manual success still counts toward the same account daily quota because HH enforces one remote account limit.
+
 Manual campaign confirmation remains available, but its items pass through the same executor, reservation, reconciliation, application record, and journal code. It does not create a durable grant. The scheduler can use only `LiveAuthorization`. Existing plan/dry-run calls remain read-only.
 
 MCP may inspect configuration, status, plans, history, and challenges but cannot enable or disable the autopilot, clear the kill switch, create a grant, or initiate a live run. The current agent `real_apply_blocked` rule remains for arbitrary agent calls; the scheduler is not treated as an agent call.
@@ -447,24 +503,24 @@ The legacy `allow_broad_apply` boolean is deprecated and cannot authorize a muta
 
 ## CLI And UI Contract
 
-Add native commands and equivalent local API/UI actions for:
+Add native commands and equivalent local API/UI actions. Mutating commands require exactly one `--account PROFILE_ID` or an explicit `--all`; they never silently select the first configured account. Read-only `status`, `history`, and `challenges` default to all accounts and accept an optional account filter.
 
-- `hh autopilot validate`
-- `hh autopilot enable --confirm`
-- `hh autopilot disable --confirm`
-- `hh autopilot status`
-- `hh autopilot run-now`
-- `hh autopilot pause`
-- `hh autopilot resume`
-- `hh autopilot stop --run-id ...`
-- `hh autopilot kill-switch --confirm`
-- `hh autopilot clear-kill-switch --confirm`
-- `hh autopilot retry --item-id ...`
-- `hh autopilot challenges`
-- `hh autopilot resolve-challenge --challenge-id ...`
-- `hh autopilot history`
+- `hh autopilot validate [--account ...]`
+- `hh autopilot enable --account ... --confirm` or `--all --confirm`
+- `hh autopilot disable --account ... --confirm` or `--all --confirm`
+- `hh autopilot status [--account ...]`
+- `hh autopilot run-now --account ...` or `--all`
+- `hh autopilot pause --account ...` or `--all`
+- `hh autopilot resume --account ...` or `--all`
+- `hh autopilot stop --account ... --run-id ...`
+- `hh autopilot kill-switch --account ... --confirm`, `--all --confirm`, or `--global --confirm`
+- `hh autopilot clear-kill-switch --account ... --confirm`, `--all --confirm`, or `--global --confirm`
+- `hh autopilot retry --account ... --item-id ...`
+- `hh autopilot challenges [--account ...]`
+- `hh autopilot resolve-challenge --account ... --challenge-id ... --action ...`
+- `hh autopilot history [--account ...]`
 
-`enable` validates configuration, records the application grant, and sets `enabled=true` atomically. `disable` revokes the grant, sets `enabled=false`, and requests the current run to stop after its in-flight network call. `pause` preserves the grant and configuration but prevents new runs and new dispatches; `resume` clears that state. `stop` affects only the named current run, so the next scheduled interval remains eligible. The account/global kill switch revokes the grant and blocks every new mutation immediately; clearing it does not recreate the revoked grant, so the operator must enable again.
+`enable` validates each selected account and atomically creates one grant per account; `--all` fails without changing any account if any selected account is invalid. It sets the per-account enabled projection. `disable` revokes each selected grant, clears its enabled projection, and requests its current run to stop after the in-flight network call. `pause` preserves the grant/configuration but prevents new runs and new dispatches for the selected accounts; `resume` clears that state. `stop` affects only the named account/run, so its next scheduled interval remains eligible. Account/all/global kill switches revoke the affected grants and block every new mutation immediately; clearing them does not recreate grants, so each account must be enabled again.
 
 `run-now` does not require per-run confirmation when a valid application grant exists. Enabling, disabling, killing, clearing the kill switch, and reauthorizing after a high-risk setting change require the existing literal-boolean safety acknowledgement in CLI/UI/API. Direct configuration edits are visible to validation but cannot create authorization.
 
@@ -499,10 +555,12 @@ Implementation follows test-driven development. Every behavior is first represen
 - grant creation, scope validation, policy-hash invalidation, revocation, and direct-config-edit rejection;
 - lease acquisition, renewal, fencing, expiry, takeover, and recovery;
 - pagination stop rules and deduplication;
-- search checkpoint commit and resume;
+- search-cycle claim, checkpoint commit, fenced ownership, and recovery-run audit;
 - every hard filter and missing-value policy;
 - score normalization, AI modes, and resume tie-breaking;
 - quota reservation/consume/release, compare-and-swap races, abandoned reservation recovery, and local-day rollover;
+- held ambiguous reservations and account cooldown enforcement;
+- account-aware application migration, legacy sentinel reporting, and unique account/job/resume identity;
 - retry classification, backoff, `Retry-After`, and exhaustion;
 - configuration validation and masking;
 - kill-switch checks before every mutation.
@@ -511,7 +569,7 @@ Implementation follows test-driven development. Every behavior is first represen
 
 A local fake HH server represents pagination, recommendations, normal application, duplicate, closed vacancy, redirect, screening, form, CAPTCHA response, authentication expiry, `429`, retryable `5xx`, timeout, and HH daily limit. Tests assert transport calls and durable business outcomes rather than mock call counts alone.
 
-The fake server can accept a POST and close the connection before returning its response. The test must prove that recovery reconciles the remote negotiation, consumes exactly one reservation, creates exactly one authoritative application record, and never issues an unsafe second POST. A duplicate response with a matching negotiation must produce `applied`, not `skipped`.
+The fake server can accept a POST and close the connection before returning its response. The test must prove that recovery reconciles the remote negotiation, consumes exactly one reservation, creates exactly one authoritative application record, and never issues an unsafe second POST. A duplicate response with a matching same-resume negotiation must produce `applied`; a pre-existing or other-resume negotiation must produce `external_applied` without consuming the new reservation or issuing another POST. An unclassifiable duplicate must hold quota and create `ambiguous_application`.
 
 ### Browser integration tests
 
@@ -519,7 +577,7 @@ Local HTML fixtures exercise authenticated form filling, unknown required fields
 
 ### Restart and concurrency tests
 
-Tests terminate a run after `applying`, expire its lease, restart the service, and assert one reconciled application without duplicates. A stale fenced owner cannot commit after takeover. Concurrent runners against one account must produce one lease owner; the replacement reconciles stale in-flight attempts before dispatch. Different accounts may run independently. Additional sequences cover process death after reservation, policy change with queued items, pause/disable/kill during a run, challenge expiry, and attempted timezone change with an active grant or unresolved reservation.
+Tests terminate a run after `applying`, expire its lease, restart the service, and assert one reconciled application without duplicates. A stale fenced owner cannot commit after takeover. Concurrent runners against one account must produce one lease owner; the replacement reconciles stale in-flight attempts before dispatch. Different accounts may apply to the same vacancy without overwriting each other's authoritative history. Additional sequences cover process death after reservation, policy change with queued items, pause/disable/kill during an in-flight request, account cooldown with other ready items, challenge expiry, ambiguous challenge resolution, and attempted timezone change with an active grant or unresolved reservation.
 
 ### Compatibility tests
 
@@ -549,12 +607,16 @@ The work is complete only when:
 - ranking selects the best resume and never exceeds configured limits;
 - successful applications survive restart without duplication;
 - ambiguous remote outcomes reconcile to one authoritative application or one manual ambiguity challenge;
+- possibly-sent transport failures never issue another POST before account-wide reconciliation;
+- account-aware application history preserves independent results for two HH accounts on one vacancy;
 - fencing prevents a stale runner from committing after lease takeover;
 - quota reservations cannot leak or overshoot the configured daily/per-run limit after failure or restart;
+- HH rate/daily-limit cooldown blocks every ready item for the affected account until reset;
 - retryable failures resume after persisted backoff;
 - permanent and missing-data outcomes do not retry;
 - a CAPTCHA or unsupported assessment creates one manual challenge, leaves other vacancies running, and automatically retries after resolution;
 - application authorization is durable, account/scope/policy-bound, immediately revocable, and cannot be created by editing configuration directly;
+- manual literal confirmation, autonomous dispatch, read-only reconciliation, and local finalization obey their distinct safety-check matrix;
 - CLI and UI expose enable, disable, validation, status, pause, stop, kill switch, retry, challenge resolution, quota, and history;
 - secrets and personal payloads are absent from normal logs and journal events;
 - unit, contract, browser, restart, concurrency, compatibility, lint, type, build, and package smoke gates pass;
