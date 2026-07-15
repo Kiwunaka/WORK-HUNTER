@@ -218,6 +218,44 @@ def test_cross_field_invariants_are_enforced(mutate) -> None:
         parse_autopilot_settings(config)
 
 
+@pytest.mark.parametrize("timezone", ["PST", "CST", "ACT"])
+def test_timezone_rejects_non_iana_legacy_ids(timezone: str) -> None:
+    config = default_config()
+    _autopilot(config)["timezone"] = timezone
+
+    with pytest.raises(AutopilotConfigError, match="IANA timezone"):
+        parse_autopilot_settings(config)
+
+
+@pytest.mark.parametrize(
+    ("language", "normalized"),
+    [
+        ("en", "en"),
+        ("ru-RU", "ru-ru"),
+        ("zh-Hant-CN", "zh-hant-cn"),
+        ("de-CH-1996", "de-ch-1996"),
+    ],
+)
+def test_valid_bcp47_language_tags_remain_accepted(
+    language: str, normalized: str
+) -> None:
+    config = default_config()
+    _autopilot(config)["filters"]["languages"] = [language]
+
+    settings = parse_autopilot_settings(config)
+
+    assert settings.filters["languages"] == [normalized]
+
+
+@pytest.mark.parametrize("language", ["en-x", "en-a", "en-US-US", "en-419-419"])
+def test_incomplete_or_repeated_bcp47_subtags_are_rejected(language: str) -> None:
+    config = default_config()
+    _autopilot(config)["filters"]["languages"] = [language]
+
+    with pytest.raises(AutopilotConfigError, match="BCP-47"):
+        parse_autopilot_settings(config)
+
+
 def test_arrays_are_normalized_and_duplicates_rejected() -> None:
     config = default_config()
     _autopilot(config)["filters"]["excluded_keywords"] = [" Python ", "python"]
@@ -263,6 +301,36 @@ def test_account_and_resume_mapping_domains_are_enforced() -> None:
     config = default_config()
     _autopilot(config)["search"]["include_recommendations"] = False
     with pytest.raises(AutopilotConfigError, match="preset_names"):
+        parse_autopilot_settings(config)
+
+
+def test_identifier_fields_are_normalized_consistently() -> None:
+    config = default_config()
+    account = _autopilot(config)["accounts"][0]
+    account.update(
+        {
+            "profile_id": " DEFAULT ",
+            "candidate_profile_id": " Candidate ",
+            "resume_queries": [
+                {"resume_id": " R1 ", "preset_names": [" Backend "]}
+            ],
+        }
+    )
+
+    parsed = parse_autopilot_settings(config).accounts[0]
+
+    assert parsed.profile_id == "default"
+    assert parsed.candidate_profile_id == "candidate"
+    assert parsed.resume_queries == (
+        {"resume_id": "r1", "preset_names": ["backend"]},
+    )
+
+
+def test_explicit_null_autopilot_configuration_is_rejected() -> None:
+    config = default_config()
+    config["sources"]["hh"]["autopilot"] = None
+
+    with pytest.raises(AutopilotConfigError, match="autopilot must be an object"):
         parse_autopilot_settings(config)
 
 
@@ -523,6 +591,34 @@ def test_semantically_unordered_arrays_do_not_change_hash() -> None:
     ) == policy_hash(parse_autopilot_settings(second), "default", second_material)
 
 
+def test_resume_identifier_case_does_not_change_policy_hash() -> None:
+    upper = _material()
+    upper.resumes[0]["id"] = " R1 "
+    lower = _material()
+    lower.resumes[0]["id"] = "r1"
+
+    settings = parse_autopilot_settings(default_config())
+
+    assert policy_hash(settings, "default", upper) == policy_hash(
+        settings, "default", lower
+    )
+
+
+def test_canonical_resume_array_uses_normalized_identifier_order() -> None:
+    canonical = canonicalize_policy_payload(
+        {"resumes": [{"id": " R2 "}, {"id": "r1"}]}
+    )
+
+    assert canonical == {"resumes": [{"id": "r1"}, {"id": "r2"}]}
+
+
+def test_canonical_arrays_reject_duplicates_after_normalization() -> None:
+    with pytest.raises(AutopilotConfigError, match="duplicate"):
+        canonicalize_policy_payload(
+            {"candidate_profile": {"skills": [" Python ", "python"]}}
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -536,6 +632,27 @@ def test_semantically_unordered_arrays_do_not_change_hash() -> None:
 def test_canonical_policy_rejects_raw_credentials(payload: dict) -> None:
     with pytest.raises(AutopilotConfigError, match="credential"):
         canonicalize_policy_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "credential_key",
+    [
+        "accessToken",
+        "refreshToken",
+        "clientSecret",
+        "proxyPassword",
+        "authorizationHeader",
+        "HTTP_AUTHORIZATION",
+        "CGI_HTTP_AUTHORIZATION",
+        "REDIRECT_HTTP_AUTHORIZATION",
+        "sessionCookie",
+    ],
+)
+def test_canonical_policy_rejects_compact_and_http_credential_keys(
+    credential_key: str,
+) -> None:
+    with pytest.raises(AutopilotConfigError, match="credential"):
+        canonicalize_policy_payload({credential_key: "raw"})
 
 
 def test_secret_versions_accept_only_stable_positive_integer_ids() -> None:

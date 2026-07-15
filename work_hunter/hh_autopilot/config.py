@@ -275,7 +275,36 @@ _HH_SEARCH_ORDER = frozenset(
 _TIME_RE = re.compile(r"^(?P<hour>\d{2}):(?P<minute>\d{2})$")
 _HH_ID_RE = re.compile(r"^\d+$")
 _HH_COMPOSITE_ID_RE = re.compile(r"^\d+(?:\.\d+)*$")
-_LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
+_GRANDFATHERED_LANGUAGE_TAGS = frozenset(
+    {
+        "art-lojban",
+        "cel-gaulish",
+        "en-gb-oed",
+        "i-ami",
+        "i-bnn",
+        "i-default",
+        "i-enochian",
+        "i-hak",
+        "i-klingon",
+        "i-lux",
+        "i-mingo",
+        "i-navajo",
+        "i-pwn",
+        "i-tao",
+        "i-tay",
+        "i-tsu",
+        "no-bok",
+        "no-nyn",
+        "sgn-be-fr",
+        "sgn-be-nl",
+        "sgn-ch-de",
+        "zh-guoyu",
+        "zh-hakka",
+        "zh-min",
+        "zh-min-nan",
+        "zh-xiang",
+    }
+)
 
 
 def _mapping(name: str, value: Any, allowed: Collection[str]) -> dict[str, Any]:
@@ -352,7 +381,7 @@ def _enum(name: str, value: Any, allowed: Collection[str]) -> str:
 
 
 def _identifier(name: str, value: Any) -> str:
-    return _text(name, value)
+    return _text(name, value, casefold=True)
 
 
 def _identifier_key(value: str) -> str:
@@ -374,10 +403,99 @@ def _composite_hh_id(name: str, value: Any) -> str:
 
 
 def _language(name: str, value: Any) -> str:
-    parsed = _text(name, value)
-    if not _LANGUAGE_RE.fullmatch(parsed):
+    parsed = _text(name, value, casefold=True)
+    if parsed in _GRANDFATHERED_LANGUAGE_TAGS:
+        return parsed
+    subtags = parsed.split("-")
+
+    def alpha(item: str) -> bool:
+        return item.isascii() and item.isalpha()
+
+    def alphanumeric(item: str) -> bool:
+        return item.isascii() and item.isalnum()
+
+    def invalid() -> None:
         raise AutopilotConfigError(f"{name} must be a BCP-47 language tag")
-    return parsed.casefold()
+
+    if subtags[0] == "x":
+        if len(subtags) < 2 or any(
+            not 1 <= len(item) <= 8 or not alphanumeric(item)
+            for item in subtags[1:]
+        ):
+            invalid()
+        return parsed
+
+    primary = subtags[0]
+    if not alpha(primary) or not 2 <= len(primary) <= 8:
+        invalid()
+    index = 1
+    if len(primary) <= 3:
+        extlang_count = 0
+        while (
+            index < len(subtags)
+            and len(subtags[index]) == 3
+            and alpha(subtags[index])
+            and extlang_count < 3
+        ):
+            index += 1
+            extlang_count += 1
+    if index < len(subtags) and len(subtags[index]) == 4 and alpha(subtags[index]):
+        index += 1
+    if index < len(subtags) and (
+        (len(subtags[index]) == 2 and alpha(subtags[index]))
+        or (len(subtags[index]) == 3 and subtags[index].isascii() and subtags[index].isdigit())
+    ):
+        index += 1
+
+    variants: set[str] = set()
+    while index < len(subtags):
+        item = subtags[index]
+        is_variant = alphanumeric(item) and (
+            5 <= len(item) <= 8
+            or (len(item) == 4 and item[0].isdigit())
+        )
+        if not is_variant:
+            break
+        if item in variants:
+            invalid()
+        variants.add(item)
+        index += 1
+
+    extensions: set[str] = set()
+    while index < len(subtags) and (
+        len(subtags[index]) == 1
+        and alphanumeric(subtags[index])
+        and subtags[index] != "x"
+    ):
+        singleton = subtags[index]
+        if singleton in extensions:
+            invalid()
+        extensions.add(singleton)
+        index += 1
+        start = index
+        while (
+            index < len(subtags)
+            and 2 <= len(subtags[index]) <= 8
+            and alphanumeric(subtags[index])
+        ):
+            index += 1
+        if index == start:
+            invalid()
+
+    if index < len(subtags) and subtags[index] == "x":
+        index += 1
+        start = index
+        while (
+            index < len(subtags)
+            and 1 <= len(subtags[index]) <= 8
+            and alphanumeric(subtags[index])
+        ):
+            index += 1
+        if index == start:
+            invalid()
+    if index != len(subtags):
+        invalid()
+    return parsed
 
 
 def _normalized_array(
@@ -431,8 +549,10 @@ def _raw_autopilot_config(config: dict[str, Any]) -> dict[str, Any]:
         return default_autopilot_config()
     if not isinstance(hh, dict):
         raise AutopilotConfigError("sources.hh must be an object")
-    supplied = hh.get("autopilot")
-    if supplied is None or supplied == {}:
+    if "autopilot" not in hh:
+        return default_autopilot_config()
+    supplied = hh["autopilot"]
+    if supplied == {}:
         return default_autopilot_config()
     if not isinstance(supplied, dict):
         raise AutopilotConfigError("sources.hh.autopilot must be an object")
@@ -855,7 +975,7 @@ def _timezone(name: str, value: Any) -> str:
             destination = (uchar * 128)()
             is_system_id = ctypes.c_int8()
             error_code = ctypes.c_int32()
-            validate(
+            canonical_length = validate(
                 source,
                 source_length,
                 destination,
@@ -863,7 +983,12 @@ def _timezone(name: str, value: Any) -> str:
                 ctypes.byref(is_system_id),
                 ctypes.byref(error_code),
             )
-            if error_code.value == 0 and is_system_id.value:
+            canonical = bytes(destination)[: canonical_length * 2].decode("utf-16-le")
+            if (
+                error_code.value == 0
+                and is_system_id.value
+                and (canonical == parsed or parsed == "UTC")
+            ):
                 return parsed
             raise AutopilotConfigError(f"{name} must be a valid IANA timezone")
         except (AttributeError, OSError):
@@ -1385,6 +1510,7 @@ _CASEFOLD_ARRAY_KEYS = frozenset(
 )
 _CASEFOLD_VALUE_KEYS = frozenset(
     {
+        "id",
         "profile_id",
         "candidate_profile_id",
         "resume_id",
@@ -1398,22 +1524,42 @@ _NORMALIZED_MAPPING_KEY_PARENTS = frozenset(
 
 
 def _credential_like_key(key: str) -> bool:
-    lowered = key.strip().casefold()
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.strip())
+    separated = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", separated)
+    lowered = separated.casefold()
     parts = tuple(part for part in re.split(r"[^a-z0-9]+", lowered) if part)
-    if lowered in {
+    compact = "".join(parts)
+    if compact in {
         "api_key",
         "apikey",
         "authorization",
         "authorization_header",
+        "authorizationheader",
         "key",
         "proxy_password",
+        "proxypassword",
     }:
         return True
     if parts and parts[-1] == "key" and any(
         part in {"access", "api", "private"} for part in parts[:-1]
     ):
         return True
-    return any(part in {"token", "cookie", "cookies", "password", "secret"} for part in parts)
+    if any(
+        part
+        in {
+            "authorization",
+            "cookie",
+            "cookies",
+            "password",
+            "secret",
+            "token",
+        }
+        for part in parts
+    ):
+        return True
+    return compact.endswith(
+        ("authorization", "authorizationheader", "cookie", "cookies", "password", "secret", "token")
+    )
 
 
 def _canonical_json_sort_key(value: Any) -> str:
@@ -1480,6 +1626,13 @@ def _canonicalize(value: Any, path: tuple[str, ...]) -> Any:
             ]
         if key in _UNORDERED_ARRAY_KEYS:
             normalized_items.sort(key=_canonical_json_sort_key)
+            normalized_keys = [
+                _canonical_json_sort_key(item) for item in normalized_items
+            ]
+            if len(normalized_keys) != len(set(normalized_keys)):
+                raise AutopilotConfigError(
+                    f"policy array contains a duplicate after normalization: {key}"
+                )
         return normalized_items
     if isinstance(value, str):
         normalized = value.strip()
