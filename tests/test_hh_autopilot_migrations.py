@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sqlite3
 from collections.abc import Callable
@@ -230,6 +232,143 @@ def test_save_application_defaults_to_legacy_and_upserts_only_exact_identity(
     }
 
 
+def test_save_application_canonicalizes_account_and_resume_identity(
+    tmp_path: Path,
+) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+    job_id = _job(storage)
+
+    storage.save_application(
+        job_id,
+        notes="first",
+        account_profile_id=" Work ",
+        resume_id=" R1 ",
+    )
+    storage.save_application(
+        job_id,
+        notes="updated",
+        account_profile_id="work",
+        resume_id="r1",
+    )
+
+    rows = storage.list_applications()
+    assert [
+        (row.account_profile_id, row.resume_id, row.notes)
+        for row in rows
+    ] == [("work", "r1", "updated")]
+
+
+def test_get_application_canonicalizes_exact_identity(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+    job_id = _job(storage)
+    storage.save_application(
+        job_id,
+        account_profile_id="work",
+        resume_id="r1",
+    )
+
+    application = storage.get_application(
+        job_id,
+        account_profile_id=" WORK ",
+        resume_id=" R1 ",
+    )
+
+    assert application is not None
+    assert (application.account_profile_id, application.resume_id) == ("work", "r1")
+
+
+def test_empty_resume_id_is_a_canonical_exact_identity(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+    job_id = _job(storage)
+    storage.save_application(job_id, account_profile_id=" Work ")
+
+    application = storage.get_application(
+        job_id,
+        account_profile_id="work",
+        resume_id="   ",
+    )
+
+    assert application is not None
+    assert (application.account_profile_id, application.resume_id) == ("work", "")
+
+
+@pytest.mark.parametrize("resume_id", [None, 1, b"r1"])
+def test_save_application_rejects_non_string_resume_id(
+    tmp_path: Path,
+    resume_id: Any,
+) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+    job_id = _job(storage)
+
+    with pytest.raises(ValueError):
+        storage.save_application(job_id, resume_id=resume_id)
+
+
+@pytest.mark.parametrize("resume_id", [None, 1, b"r1"])
+def test_exact_get_application_rejects_non_string_resume_id(
+    tmp_path: Path,
+    resume_id: Any,
+) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+    job_id = _job(storage)
+
+    with pytest.raises(ValueError, match="resume id"):
+        storage.get_application(
+            job_id,
+            account_profile_id="work",
+            resume_id=resume_id,
+        )
+
+
+def test_legacy_spelling_is_canonical_and_visible_in_report(tmp_path: Path) -> None:
+    app = WorkHunter(tmp_path)
+    job_id = _job(app.storage)
+    app.storage.save_application(
+        job_id,
+        account_profile_id=" LEGACY ",
+        resume_id=" R1 ",
+    )
+
+    report = app.application_identity_migration_report()
+
+    assert report["sentinel_count"] == 1
+    assert report["rows"] == [
+        {
+            "id": report["rows"][0]["id"],
+            "account_profile_id": "legacy",
+            "job_id": job_id,
+            "resume_id": "r1",
+            "source": "hh",
+            "source_id": "v1",
+        }
+    ]
+
+
+def test_csv_application_export_keeps_account_resume_identity(tmp_path: Path) -> None:
+    app = WorkHunter(tmp_path)
+    job_id = _job(app.storage)
+    app.storage.save_application(
+        job_id,
+        account_profile_id="work",
+        resume_id="r1",
+    )
+    app.storage.save_application(
+        job_id,
+        account_profile_id="personal",
+        resume_id="r2",
+    )
+
+    reader = csv.DictReader(io.StringIO(app.export_applications(format="csv")))
+    rows = list(reader)
+
+    assert reader.fieldnames is not None
+    assert {"account_profile_id", "resume_id"} <= set(reader.fieldnames)
+    assert {
+        (row["job_id"], row["account_profile_id"], row["resume_id"])
+        for row in rows
+    } == {(str(job_id), "work", "r1"), (str(job_id), "personal", "r2")}
+
+
 def test_get_application_supports_exact_and_deterministic_aggregate_reads(
     tmp_path: Path,
 ) -> None:
@@ -382,6 +521,77 @@ def test_packaged_migration_preserves_every_compatibility_column(
     assert row["autopilot_attempt_id"] is None
 
 
+def test_packaged_migration_canonicalizes_legacy_resume_id(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.sqlite3"
+    _create_legacy_database(db)
+    connection = sqlite3.connect(db)
+    connection.execute("UPDATE applications SET resume_id = ' R1 '")
+    connection.commit()
+    connection.close()
+
+    storage = Storage(db)
+
+    row = storage.conn.execute(
+        "SELECT account_profile_id, resume_id FROM applications WHERE job_id = 1"
+    ).fetchone()
+    assert (row["account_profile_id"], row["resume_id"]) == ("legacy", "r1")
+
+
+def test_packaged_application_indexes_include_latest_job_order(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+
+    index_names = {
+        row["name"]
+        for row in storage.conn.execute("PRAGMA index_list(applications)").fetchall()
+    }
+    assert "idx_applications_account_sent" in index_names
+    assert "idx_applications_job_latest" in index_names
+    latest_columns = [
+        (row["name"], int(row["desc"]))
+        for row in storage.conn.execute(
+            "PRAGMA index_xinfo(idx_applications_job_latest)"
+        ).fetchall()
+        if row["key"]
+    ]
+    assert latest_columns == [
+        ("job_id", 0),
+        ("updated_at", 1),
+        ("applied_at", 1),
+        ("id", 1),
+    ]
+
+
+def test_newest_application_lookup_uses_packaged_index_without_temp_sort(
+    tmp_path: Path,
+) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+    job_id = _job(storage)
+    storage.save_application(
+        job_id,
+        account_profile_id="work",
+        resume_id="r1",
+    )
+    details = [
+        str(row["detail"])
+        for row in storage.conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM applications
+            WHERE job_id = ?
+            ORDER BY updated_at DESC, applied_at DESC, id DESC
+            LIMIT 1
+            """,
+            (job_id,),
+        ).fetchall()
+    ]
+
+    assert any(
+        "USING INDEX idx_applications_job_latest" in detail
+        for detail in details
+    ), details
+    assert not any("USE TEMP B-TREE" in detail.upper() for detail in details), details
+
+
 def test_packaged_migration_adds_attempt_provenance_without_losing_rows(
     tmp_path: Path,
 ) -> None:
@@ -500,6 +710,22 @@ def test_legacy_reassignment_is_atomic_when_target_identity_conflicts(
     } == {(first_job_id, "r1"), (second_job_id, "r2")}
 
 
+def test_legacy_reassignment_canonicalizes_target_profile(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "db.sqlite3")
+    job_id = _job(storage)
+    storage.save_application(job_id)
+
+    assert storage.reassign_legacy_application_account(" Work ") == 1
+
+    application = storage.get_application(
+        job_id,
+        account_profile_id="work",
+        resume_id="",
+    )
+    assert application is not None
+    assert application.account_profile_id == "work"
+
+
 def test_single_unambiguous_legacy_hh_profile_is_reassigned(
     app_factory: Callable[..., WorkHunter],
     legacy_db: Path,
@@ -511,6 +737,37 @@ def test_single_unambiguous_legacy_hh_profile_is_reassigned(
 
     assert app.storage.list_legacy_application_identities() == []
     assert app.storage.list_applications()[0].account_profile_id == "work"
+
+
+def test_startup_reassignment_uses_canonical_raw_profile_key(
+    app_factory: Callable[..., WorkHunter],
+    legacy_db: Path,
+) -> None:
+    app = app_factory(
+        legacy_db,
+        hh_account_profiles={" Work ": {"access_token": "account-secret"}},
+    )
+
+    assert app.storage.list_legacy_application_identities() == []
+    assert app.storage.list_applications()[0].account_profile_id == "work"
+
+
+def test_colliding_credential_profile_keys_leave_legacy_sentinel(
+    app_factory: Callable[..., WorkHunter],
+    legacy_db: Path,
+) -> None:
+    app = app_factory(
+        legacy_db,
+        hh_account_profiles={
+            "Work": {"access_token": "secret-a"},
+            " work ": {"refresh_token": "secret-b"},
+        },
+    )
+
+    report = app.application_identity_migration_report()
+
+    assert report["sentinel_count"] == 1
+    assert app.storage.list_applications()[0].account_profile_id == "legacy"
 
 
 def test_startup_reassignment_conflict_leaves_all_sentinels_reportable(
@@ -604,6 +861,22 @@ def test_legacy_and_named_user_credentials_are_ambiguous(
         legacy_db,
         hh_account_profiles={"work": {"access_token": "named-secret"}},
         legacy_hh_identity={"refresh_token": "legacy-secret"},
+    )
+
+    report = app.application_identity_migration_report()
+
+    assert report["sentinel_count"] == 1
+    assert app.storage.list_applications()[0].account_profile_id == "legacy"
+
+
+def test_conflicting_legacy_and_named_default_credentials_are_ambiguous(
+    app_factory: Callable[..., WorkHunter],
+    legacy_db: Path,
+) -> None:
+    app = app_factory(
+        legacy_db,
+        hh_account_profiles={"default": {"access_token": "named-secret"}},
+        legacy_hh_identity={"access_token": "legacy-secret"},
     )
 
     report = app.application_identity_migration_report()

@@ -31,13 +31,16 @@ INSERT INTO applications (
 )
 SELECT
     id, 'legacy', job_id, status, notes, applied_at, updated_at,
-    source, source_id, resume_id, resume_hash, plan_id, transport, sent_at,
+    source, source_id, canonicalize_application_identity(resume_id),
+    resume_hash, plan_id, transport, sent_at,
     result_json, error
 FROM applications_legacy_0002;
 
 DROP TABLE applications_legacy_0002;
 CREATE INDEX idx_applications_account_sent
     ON applications(account_profile_id, sent_at);
+CREATE INDEX idx_applications_job_latest
+    ON applications(job_id, updated_at DESC, applied_at DESC, id DESC);
 
 ALTER TABLE hh_application_attempts
     ADD COLUMN account_profile_id TEXT NOT NULL DEFAULT 'legacy';

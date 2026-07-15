@@ -83,7 +83,7 @@ from .sources import (
 )
 from .sources.hh import HHApplyClient
 from .sources.common import canonicalize_job_url, clean_text, fetch_url
-from .storage import Storage
+from .storage import Storage, _canonical_application_account_profile_id
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -916,21 +916,48 @@ def _has_provable_hh_user_identity(
     *,
     root: Path,
 ) -> bool:
-    if any(
-        str(profile.get(key) or "").strip()
+    return bool(_hh_user_identity_evidence(profile, root=root))
+
+
+def _hh_user_identity_evidence(
+    profile: dict[str, Any],
+    *,
+    root: Path,
+) -> dict[str, str]:
+    evidence = {
+        key: value
         for key in ("access_token", "refresh_token")
-    ):
-        return True
+        if (value := str(profile.get(key) or "").strip())
+    }
     cookie_path_raw = str(profile.get("hh_cookie_file") or "").strip()
     if not cookie_path_raw:
-        return False
+        return evidence
     cookie_path = Path(cookie_path_raw)
     if not cookie_path.is_absolute():
         cookie_path = root / cookie_path
     try:
-        return cookie_path.is_file() and cookie_path.stat().st_size > 0
-    except OSError:
-        return False
+        if cookie_path.is_file() and cookie_path.stat().st_size > 0:
+            evidence["hh_cookie_file"] = os.path.normcase(
+                str(cookie_path.resolve())
+            )
+    except (OSError, RuntimeError):
+        pass
+    return evidence
+
+
+def _same_logical_hh_user_identity(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    root: Path,
+) -> bool:
+    left_evidence = _hh_user_identity_evidence(left, root=root)
+    right_evidence = _hh_user_identity_evidence(right, root=root)
+    shared = left_evidence.keys() & right_evidence.keys()
+    return bool(shared) and all(
+        left_evidence[key] == right_evidence[key]
+        for key in shared
+    )
 
 
 def _effective_hh_auth_profile_ids(
@@ -938,25 +965,53 @@ def _effective_hh_auth_profile_ids(
     *,
     root: Path,
 ) -> list[str]:
-    effective: set[str] = set()
     sources = config.get("sources") or {}
     legacy_hh = sources.get("hh") if isinstance(sources, dict) else None
-    if isinstance(legacy_hh, dict) and _has_provable_hh_user_identity(
-        legacy_hh,
-        root=root,
-    ):
-        effective.add("default")
+    legacy_profile = (
+        legacy_hh
+        if isinstance(legacy_hh, dict)
+        and _has_provable_hh_user_identity(legacy_hh, root=root)
+        else None
+    )
 
+    named_profiles: list[tuple[str, dict[str, Any]]] = []
     profiles = config.get("hh_account_profiles") or {}
     if isinstance(profiles, dict):
         for raw_profile_id, profile in profiles.items():
             if not isinstance(raw_profile_id, str) or not isinstance(profile, dict):
                 continue
-            profile_id = raw_profile_id.strip()
-            if not profile_id or profile_id.casefold() == "legacy":
+            try:
+                profile_id = _canonical_application_account_profile_id(
+                    raw_profile_id
+                )
+            except ValueError:
+                continue
+            if profile_id == "legacy":
                 continue
             if _has_provable_hh_user_identity(profile, root=root):
-                effective.add(profile_id)
+                named_profiles.append((profile_id, profile))
+
+    effective = [
+        profile_id
+        for profile_id, _profile in named_profiles
+        if profile_id != "default"
+    ]
+    named_defaults = [
+        profile
+        for profile_id, profile in named_profiles
+        if profile_id == "default"
+    ]
+    if legacy_profile is None:
+        effective.extend("default" for _profile in named_defaults)
+    elif len(named_defaults) == 1 and _same_logical_hh_user_identity(
+        legacy_profile,
+        named_defaults[0],
+        root=root,
+    ):
+        effective.append("default")
+    else:
+        effective.append("default")
+        effective.extend("default" for _profile in named_defaults)
     return sorted(effective)
 
 
@@ -5023,13 +5078,27 @@ class WorkHunter:
         if format == "csv":
             buf = io.StringIO()
             writer = csv.writer(buf)
-            writer.writerow(["id", "job_id", "status", "applied_at", "title", "company", "source", "url", "notes"])
+            writer.writerow([
+                "id",
+                "account_profile_id",
+                "job_id",
+                "resume_id",
+                "status",
+                "applied_at",
+                "title",
+                "company",
+                "source",
+                "url",
+                "notes",
+            ])
             for item in rows:
                 job_data = item.get("job")
                 job_payload = job_data if isinstance(job_data, dict) else {}
                 writer.writerow([
                     item.get("id"),
+                    item.get("account_profile_id"),
                     item.get("job_id"),
+                    item.get("resume_id"),
                     item.get("status"),
                     item.get("applied_at"),
                     job_payload.get("title", ""),

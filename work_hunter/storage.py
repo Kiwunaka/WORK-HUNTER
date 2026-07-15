@@ -62,17 +62,41 @@ def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
     return int(value)
 
 
-def _validated_application_account_profile_id(
+def _canonical_application_identity(
+    value: Any,
+    *,
+    field: str,
+    allow_empty: bool,
+) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    identity = value.strip().casefold()
+    if not identity and not allow_empty:
+        raise ValueError(f"A non-empty {field} is required")
+    return identity
+
+
+def _canonical_application_account_profile_id(
     value: Any,
     *,
     allow_legacy: bool = True,
 ) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("A non-empty account profile id is required")
-    profile_id = value.strip()
+    profile_id = _canonical_application_identity(
+        value,
+        field="account profile id",
+        allow_empty=False,
+    )
     if not allow_legacy and profile_id.casefold() == "legacy":
         raise ValueError("The legacy account profile sentinel cannot be reassigned")
     return profile_id
+
+
+def _canonical_application_resume_id(value: Any) -> str:
+    return _canonical_application_identity(
+        value,
+        field="resume id",
+        allow_empty=True,
+    )
 
 
 def _utc_cutoff_days(days: int, *, now: datetime | None = None) -> str:
@@ -708,6 +732,12 @@ class Storage:
         self.conn = sqlite3.connect(self.path)
         try:
             self.conn.row_factory = sqlite3.Row
+            self.conn.create_function(
+                "canonicalize_application_identity",
+                1,
+                _canonical_application_resume_id,
+                deterministic=True,
+            )
             self.conn.execute("PRAGMA foreign_keys = ON")
             self.conn.execute("PRAGMA busy_timeout = 5000")
             self._migrate()
@@ -1103,9 +1133,10 @@ class Storage:
         result: dict[str, Any] | None = None,
         error: str = "",
     ) -> None:
-        account_profile_id = _validated_application_account_profile_id(
+        account_profile_id = _canonical_application_account_profile_id(
             account_profile_id
         )
+        resume_id = _canonical_application_resume_id(resume_id)
         now = utc_now()
         if not (source and source_id):
             job = self.get_job(job_id)
@@ -1255,15 +1286,16 @@ class Storage:
                 raise ValueError(
                     "Both account profile id and resume id are required for an exact application read"
                 )
-            exact_profile_id = _validated_application_account_profile_id(
+            exact_profile_id = _canonical_application_account_profile_id(
                 account_profile_id
             )
+            exact_resume_id = _canonical_application_resume_id(resume_id)
             row = self.conn.execute(
                 """
                 SELECT * FROM applications
                 WHERE job_id = ? AND account_profile_id = ? AND resume_id = ?
                 """,
-                (job_id, exact_profile_id, resume_id),
+                (job_id, exact_profile_id, exact_resume_id),
             ).fetchone()
         if row is None:
             return None
@@ -1308,7 +1340,7 @@ class Storage:
         return [dict(row) for row in rows]
 
     def reassign_legacy_application_account(self, profile_id: str) -> int:
-        validated_profile_id = _validated_application_account_profile_id(
+        validated_profile_id = _canonical_application_account_profile_id(
             profile_id,
             allow_legacy=False,
         )
