@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 from work_hunter.storage import Storage, redact_for_storage
 
@@ -47,6 +47,12 @@ class LostLease(RuntimeError):
 
 class KillSwitchActive(RuntimeError):
     pass
+
+
+class RepositoryAuthorizationDenied(RuntimeError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -179,6 +185,21 @@ class AccountStateRecord:
         return _json_copy(self.hh_reset)
 
 
+@dataclass(frozen=True)
+class AuthorizationReconciliationRecord:
+    """Detached result; the mismatch mapping is a caller-mutable fresh snapshot."""
+
+    mismatches: dict[str, str]
+    revoked_accounts: tuple[str, ...]
+    stopped_accounts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LiveAuthorizationSnapshot:
+    grant: GrantRecord
+    run: RunRecord
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -308,6 +329,48 @@ def _account_ids(values: Any, *, field: str = "account_ids") -> list[str]:
         seen.add(account_id)
         canonical.append(account_id)
     return canonical
+
+
+def _authorization_projections(
+    values: Any,
+) -> dict[str, tuple[bool, int | None]]:
+    if not isinstance(values, Mapping):
+        raise TypeError("projections must be a mapping")
+    projections: dict[str, tuple[bool, int | None]] = {}
+    for raw_account_id, raw_projection in values.items():
+        account_id = _canonical_identifier(raw_account_id, field="projection account_id")
+        if account_id in projections:
+            raise ValueError("projections contains a duplicate account identifier")
+        if not isinstance(raw_projection, tuple) or len(raw_projection) != 2:
+            raise TypeError("projection must be an enabled/generation tuple")
+        enabled, generation = raw_projection
+        if type(enabled) is not bool:
+            raise TypeError("projection enabled must be a boolean")
+        if generation is not None:
+            generation = _integer(generation, field="projection generation", minimum=1)
+        projections[account_id] = (enabled, generation)
+    return projections
+
+
+def _authorization_annotations(
+    values: Any,
+    *,
+    field: str,
+    accounts: set[str],
+) -> dict[str, str]:
+    if values is None:
+        return {}
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{field} must be a mapping")
+    annotations: dict[str, str] = {}
+    for raw_account_id, raw_value in values.items():
+        account_id = _canonical_identifier(raw_account_id, field=f"{field} account_id")
+        if account_id in annotations:
+            raise ValueError(f"{field} contains a duplicate account identifier")
+        if account_id not in accounts:
+            raise ValueError(f"{field} contains an account without a projection")
+        annotations[account_id] = _required_text(raw_value, field=field)
+    return annotations
 
 
 class AutopilotRepository:
@@ -728,6 +791,14 @@ class AutopilotRepository:
     ) -> GrantRecord | None:
         account_id = _canonical_identifier(account_id, field="account_id")
         scope = _scope(scope)
+        return self._active_grant_for_update(account_id, scope=scope)
+
+    def _active_grant_for_update(
+        self,
+        account_id: str,
+        *,
+        scope: str = APPLICATION_SCOPE,
+    ) -> GrantRecord | None:
         row = self.conn.execute(
             """
             SELECT * FROM hh_autopilot_grants
@@ -750,6 +821,156 @@ class AutopilotRepository:
             (scope,),
         ).fetchall()
         return [self._grant_from_row(row) for row in rows]
+
+    def reconcile_authorization_projection(
+        self,
+        projections: Mapping[str, tuple[bool, int | None]],
+        *,
+        actor: str,
+        reason: str,
+        policy_hashes: Mapping[str, str] | None = None,
+        policy_errors: Mapping[str, str] | None = None,
+    ) -> AuthorizationReconciliationRecord:
+        """Atomically reconcile current grants/runs to an authoritative projection.
+
+        Policy annotations are optional so startup reconciliation never depends on
+        an AI/model/material resolver. All active grants are re-read only after
+        ``BEGIN IMMEDIATE`` and current generations are revoked in that transaction.
+        """
+        validated = _authorization_projections(projections)
+        actor = _required_text(actor, field="actor")
+        reason = _required_text(reason, field="reason")
+        del actor, reason  # The exact Task 4 schema has no revocation audit columns.
+        account_ids = set(validated)
+        hashes = _authorization_annotations(
+            policy_hashes,
+            field="policy_hashes",
+            accounts=account_ids,
+        )
+        errors = _authorization_annotations(
+            policy_errors,
+            field="policy_errors",
+            accounts=account_ids,
+        )
+
+        with self.immediate():
+            grant_rows = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_grants
+                WHERE scope = ? AND active = 1
+                ORDER BY account_profile_id ASC, id ASC
+                """,
+                (APPLICATION_SCOPE,),
+            ).fetchall()
+            grants = {
+                str(row["account_profile_id"]): self._grant_from_row(row)
+                for row in grant_rows
+            }
+            running_rows = self.conn.execute(
+                """
+                SELECT DISTINCT account_profile_id
+                FROM hh_autopilot_runs
+                WHERE status = 'running'
+                ORDER BY account_profile_id ASC
+                """
+            ).fetchall()
+            running_accounts = {
+                str(row["account_profile_id"]) for row in running_rows
+            }
+
+            mismatches: dict[str, str] = {}
+            blocked: set[str] = set()
+            for account_id, (enabled, generation) in validated.items():
+                grant = grants.get(account_id)
+                if not enabled:
+                    blocked.add(account_id)
+                    continue
+                if grant is None or generation != grant.generation:
+                    mismatches[account_id] = "authorization_state_mismatch"
+                    blocked.add(account_id)
+                    continue
+                if account_id in errors:
+                    mismatches[account_id] = errors[account_id]
+                    blocked.add(account_id)
+                    continue
+                expected_hash = hashes.get(account_id)
+                if expected_hash is not None and expected_hash != grant.policy_hash:
+                    mismatches[account_id] = "policy_hash_mismatch"
+                    blocked.add(account_id)
+
+            known_runtime_accounts = set(grants) | running_accounts
+            blocked.update(known_runtime_accounts.difference(validated))
+            revoked_accounts = tuple(
+                account_id for account_id in grants if account_id in blocked
+            )
+            stopped_accounts = tuple(
+                sorted(account_id for account_id in running_accounts if account_id in blocked)
+            )
+            if revoked_accounts:
+                placeholders = ",".join("?" for _ in revoked_accounts)
+                self.conn.execute(
+                    f"""
+                    UPDATE hh_autopilot_grants
+                    SET active = 0, revoked_at = ?
+                    WHERE scope = ? AND active = 1
+                      AND account_profile_id IN ({placeholders})
+                    """,
+                    (_utc_now(), APPLICATION_SCOPE, *revoked_accounts),
+                )
+            if blocked:
+                self._request_stop(sorted(blocked))
+            return AuthorizationReconciliationRecord(
+                mismatches=dict(mismatches),
+                revoked_accounts=revoked_accounts,
+                stopped_accounts=stopped_accounts,
+            )
+
+    def validate_live_authorization_snapshot(
+        self,
+        account_id: str,
+        *,
+        generation: int,
+        policy_hash: str,
+        run_id: int,
+        fencing_token: int,
+    ) -> LiveAuthorizationSnapshot:
+        """Validate the mutable DB authorization state in one transaction.
+
+        Task 9 must call this again at the final pre-dispatch boundary because a
+        snapshot can be revoked immediately after this method returns.
+        """
+        account_id = _canonical_identifier(account_id, field="account_id")
+        generation = _integer(generation, field="generation", minimum=1)
+        policy_hash = _required_text(policy_hash, field="policy_hash")
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        fencing_token = _integer(fencing_token, field="fencing_token")
+        with self.immediate():
+            grant = self._active_grant_for_update(account_id)
+            if grant is None or grant.generation != generation:
+                raise RepositoryAuthorizationDenied("authorization_state_mismatch")
+            if grant.policy_hash != policy_hash:
+                raise RepositoryAuthorizationDenied("policy_hash_mismatch")
+            if self._pause_active_for_update(account_id):
+                raise RepositoryAuthorizationDenied("autopilot_disabled_or_paused")
+            if self._kill_switch_active_for_update(account_id):
+                raise RepositoryAuthorizationDenied("kill_switch_active")
+            row = self.conn.execute(
+                "SELECT * FROM hh_autopilot_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise RepositoryAuthorizationDenied("run_not_found")
+            run = self._run_from_row(row)
+            if run.account_id != account_id:
+                raise RepositoryAuthorizationDenied("run_account_mismatch")
+            if run.status != "running":
+                raise RepositoryAuthorizationDenied("run_not_active")
+            if run.policy_hash != grant.policy_hash:
+                raise RepositoryAuthorizationDenied("run_policy_mismatch")
+            if run.grant_id is not None and run.grant_id != grant.id:
+                raise RepositoryAuthorizationDenied("run_grant_mismatch")
+            if run.fencing_token != fencing_token:
+                raise RepositoryAuthorizationDenied("run_fencing_token_mismatch")
+            return LiveAuthorizationSnapshot(grant=grant, run=run)
 
     def revoke_grants(
         self,
@@ -933,6 +1154,9 @@ class AutopilotRepository:
 
     def pause_active(self, account_id: str) -> bool:
         account_id = _canonical_identifier(account_id, field="account_id")
+        return self._pause_active_for_update(account_id)
+
+    def _pause_active_for_update(self, account_id: str) -> bool:
         row = self.conn.execute(
             """
             SELECT 1 FROM hh_autopilot_controls
@@ -1262,14 +1486,17 @@ class AutopilotRepository:
 
 __all__ = [
     "AccountStateRecord",
+    "AuthorizationReconciliationRecord",
     "AutopilotRepository",
     "ChallengeRecord",
     "ControlRecord",
     "GrantRecord",
     "ItemRecord",
     "LeaseRecord",
+    "LiveAuthorizationSnapshot",
     "KillSwitchActive",
     "LostLease",
     "RunRecord",
+    "RepositoryAuthorizationDenied",
     "StaleWrite",
 ]

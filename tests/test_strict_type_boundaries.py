@@ -247,6 +247,20 @@ def test_hh_dispatch_guard_accepts_only_exact_typed_authorizations():
             "default",
             True,
         ),
+        (
+            LiteralConfirmation(account_id="default", reference_id="manual\0evil"),
+            "default",
+            "default",
+            7,
+        ),
+        (
+            LiveAuthorization(
+                1, "applications", "default", 2, 7, "hash\0evil"
+            ),
+            "default",
+            "default",
+            7,
+        ),
     ],
 )
 def test_hh_dispatch_guard_rejects_mismatches_and_bool_as_int(

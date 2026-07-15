@@ -62,6 +62,7 @@ def require_hh_dispatch_authorization(
         if (
             not isinstance(literal.reference_id, str)
             or not literal.reference_id.strip()
+            or "\0" in literal.reference_id
         ):
             raise PermissionError("invalid literal HH application authorization")
         return
@@ -77,5 +78,6 @@ def require_hh_dispatch_authorization(
         or live.run_id < 1
         or not isinstance(live.policy_hash, str)
         or not live.policy_hash.strip()
+        or "\0" in live.policy_hash
     ):
         raise PermissionError("invalid live HH application authorization")

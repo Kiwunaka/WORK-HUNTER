@@ -1028,17 +1028,52 @@ class WorkHunter:
     def storage(self) -> Storage:
         if self._storage is None:
             storage = Storage(database_path(self.root))
+            try:
+                self._reconcile_hh_autopilot_startup(storage)
+                profile_ids = _effective_hh_auth_profile_ids(
+                    self.config,
+                    root=self.root,
+                )
+                if len(profile_ids) == 1:
+                    try:
+                        storage.reassign_legacy_application_account(profile_ids[0])
+                    except sqlite3.IntegrityError:
+                        pass
+            except BaseException:
+                storage.close()
+                raise
             self._storage = storage
-            profile_ids = _effective_hh_auth_profile_ids(
-                self.config,
-                root=self.root,
-            )
-            if len(profile_ids) == 1:
-                try:
-                    storage.reassign_legacy_application_account(profile_ids[0])
-                except sqlite3.IntegrityError:
-                    pass
         return self._storage
+
+    def _reconcile_hh_autopilot_startup(self, storage: Storage) -> None:
+        # Local imports keep the general service/config import graph acyclic.
+        from .hh_autopilot.config import (
+            AutopilotConfigError,
+            parse_autopilot_settings,
+        )
+        from .hh_autopilot.repository import AutopilotRepository
+
+        projections: dict[str, tuple[bool, int | None]] = {}
+        if self.config_path.exists():
+            try:
+                settings = parse_autopilot_settings(self.config)
+            except AutopilotConfigError:
+                # A malformed autonomous policy is not repairable at startup.
+                # Empty projection revokes/stops every current autopilot account.
+                pass
+            else:
+                projections = {
+                    account.profile_id: (
+                        account.enabled,
+                        account.authorization_generation,
+                    )
+                    for account in settings.accounts
+                }
+        AutopilotRepository(storage).reconcile_authorization_projection(
+            projections,
+            actor="startup",
+            reason="startup_config_projection",
+        )
 
     def application_identity_migration_report(self) -> dict[str, Any]:
         rows = self.storage.list_legacy_application_identities()
@@ -1221,8 +1256,8 @@ class WorkHunter:
     def _replace_config(self, config: dict[str, Any]) -> None:
         with _HH_IDENTITY_WRITE_LOCK:
             replacement = copy.deepcopy(config)
-            save_config(self.config_path, replacement)
-            self._accept_config(replacement, config)
+            persisted = save_config(self.config_path, replacement)
+            self._accept_config(persisted, config)
             self.config = config
 
     def _accept_config(

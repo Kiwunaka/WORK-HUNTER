@@ -525,6 +525,57 @@ def test_save_config_preserves_managed_authorization_fields(tmp_path):
     assert account["authorization_generation"] == 5
 
 
+def test_save_config_returns_exact_protected_persisted_snapshot(tmp_path):
+    path = tmp_path / "config.json"
+    stored = default_config()
+    stored_account = stored["sources"]["hh"]["autopilot"]["accounts"][0]
+    stored_account.update(enabled=False, authorization_generation=None)
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    submitted = copy.deepcopy(stored)
+    submitted_account = submitted["sources"]["hh"]["autopilot"]["accounts"][0]
+    submitted_account.update(enabled=True, authorization_generation=999)
+
+    persisted = save_config(path, submitted)
+
+    assert persisted == json.loads(path.read_text(encoding="utf-8"))
+    account = persisted["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is False
+    assert account["authorization_generation"] is None
+    persisted["sources"]["hh"]["autopilot"]["accounts"][0]["enabled"] = True
+    assert json.loads(path.read_text(encoding="utf-8")) != persisted
+
+
+def test_save_config_does_not_mask_permission_error_reading_existing_file(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "config.json"
+    path.write_text("{}\n", encoding="utf-8")
+    original_open = Path.open
+
+    def deny_target(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("config read denied")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_target)
+
+    with pytest.raises(PermissionError, match="config read denied"):
+        save_config(path, default_config())
+
+    with original_open(path, "r", encoding="utf-8") as fh:
+        assert fh.read() == "{}\n"
+
+
+def test_save_config_rejects_corrupt_existing_json_without_overwrite(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"broken":', encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        save_config(path, default_config())
+
+    assert path.read_text(encoding="utf-8") == '{"broken":'
+
+
 def test_first_ordinary_save_cannot_self_authorize_new_account(tmp_path):
     path = tmp_path / "config.json"
     submitted = default_config()
@@ -585,3 +636,44 @@ def test_merge_masked_config_preserves_managed_enabled_projection():
     account = merged["sources"]["hh"]["autopilot"]["accounts"][0]
     assert account["enabled"] is True
     assert account["authorization_generation"] == 6
+
+
+def test_work_hunter_init_overwrite_accepts_exact_protected_snapshot(tmp_path):
+    from work_hunter.services import WorkHunter
+
+    config = default_config()
+    path = config_module.config_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config), encoding="utf-8")
+    app = WorkHunter(tmp_path)
+    account = app.config["sources"]["hh"]["autopilot"]["accounts"][0]
+    account.update(enabled=True, authorization_generation=91)
+
+    app.init(overwrite=True)
+
+    disk = load_config(path)
+    assert app.config == disk
+    account = app.config["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is False
+    assert account["authorization_generation"] is None
+    app.storage.close()
+
+
+def test_work_hunter_reset_defaults_keeps_disk_and_memory_identical(tmp_path):
+    from work_hunter.services import WorkHunter
+
+    config = default_config()
+    account = config["sources"]["hh"]["autopilot"]["accounts"][0]
+    account.update(enabled=True, authorization_generation=7)
+    path = config_module.config_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config), encoding="utf-8")
+    app = WorkHunter(tmp_path)
+
+    app.reset_config_defaults()
+
+    disk = load_config(path)
+    assert app.config == disk
+    account = app.config["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is True
+    assert account["authorization_generation"] == 7

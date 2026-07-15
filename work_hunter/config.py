@@ -630,21 +630,22 @@ def _config_values_equal(baseline: Any, desired: Any) -> bool:
     return bool(baseline == desired)
 
 
-def save_config(path: str | Path, config: dict[str, Any]) -> None:
+def save_config(path: str | Path, config: dict[str, Any]) -> dict[str, Any]:
     path = Path(path)
     with _CONFIG_WRITE_LOCK:
         with _config_file_lock(path):
-            stored: dict[str, Any] = {}
-            if path.exists():
-                try:
-                    with path.open("r", encoding="utf-8") as fh:
-                        loaded = json.load(fh)
-                    if isinstance(loaded, dict):
-                        stored = loaded
-                except (OSError, ValueError):
-                    stored = {}
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+            except FileNotFoundError:
+                stored: dict[str, Any] = {}
+            else:
+                if not isinstance(loaded, dict):
+                    raise ValueError("configuration root must be an object")
+                stored = loaded
             protected = preserve_managed_autopilot_fields(stored, config)
             _save_config(path, protected)
+            return copy.deepcopy(protected)
 
 
 def _update_autopilot_authorization_projection(
@@ -696,7 +697,7 @@ def _update_autopilot_authorization_projection(
             if path.exists():
                 current = load_config(path)
             else:
-                current = copy.deepcopy(fallback)
+                current = preserve_managed_autopilot_fields({}, fallback)
             accounts = _account_index(
                 current, field="persisted autopilot accounts"
             )

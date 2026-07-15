@@ -3,11 +3,12 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
-from work_hunter.config import default_config
+from work_hunter.config import config_path, database_path, default_config
 from work_hunter.hh_autopilot.authorization import (
     AuthorizationDenied,
     HHAutopilotAuthorizer,
@@ -16,6 +17,17 @@ from work_hunter.hh_autopilot.config import PolicyMaterial
 from work_hunter.hh_autopilot.repository import AutopilotRepository
 from work_hunter.hh_autopilot.types import LiveAuthorization
 from work_hunter.storage import Storage
+
+
+def _two_account_config(config: dict[str, object]) -> dict[str, object]:
+    expanded = copy.deepcopy(config)
+    accounts = expanded["sources"]["hh"]["autopilot"]["accounts"]  # type: ignore[index]
+    second = copy.deepcopy(accounts[0])
+    second["profile_id"] = "second"
+    second["candidate_profile_id"] = "second"
+    accounts.append(second)
+    expanded["profiles"]["second"] = {"name": "Second"}  # type: ignore[index]
+    return expanded
 
 
 def _canonical(value: str) -> str:
@@ -359,6 +371,63 @@ def test_enable_revalidates_exact_active_db_generation_after_projection(
     assert active.policy_hash == "newer-hash"
 
 
+def test_missing_file_enable_sanitizes_unselected_fallback_projections(
+    repository, tmp_path, valid_config
+) -> None:
+    config = _two_account_config(valid_config)
+    accounts = config["sources"]["hh"]["autopilot"]["accounts"]
+    accounts[0].update(enabled=True, authorization_generation=41)
+    accounts[1].update(enabled=True, authorization_generation=42)
+    path = tmp_path / "missing-config.json"
+    authorizer = HHAutopilotAuthorizer(
+        repository,
+        config_path=path,
+        policy_material_resolver=_material,
+    )
+
+    enabled = authorizer.enable(
+        ["default"], config, confirm=True, actor="cli", source="test"
+    )
+
+    projected = enabled.config["sources"]["hh"]["autopilot"]["accounts"]
+    assert projected[0]["enabled"] is True
+    assert projected[0]["authorization_generation"] == 1
+    assert projected[1]["enabled"] is False
+    assert projected[1]["authorization_generation"] is None
+    assert json.loads(path.read_text(encoding="utf-8")) == enabled.config
+
+
+def test_missing_file_pause_only_sanitizes_every_fallback_projection(
+    repository, tmp_path, valid_config
+) -> None:
+    config = _two_account_config(valid_config)
+    accounts = config["sources"]["hh"]["autopilot"]["accounts"]
+    accounts[0].update(enabled=True, authorization_generation=41)
+    accounts[1].update(enabled=True, authorization_generation=42)
+    path = tmp_path / "missing-pause-config.json"
+    authorizer = HHAutopilotAuthorizer(
+        repository,
+        config_path=path,
+        policy_material_resolver=_material,
+    )
+
+    paused = authorizer.set_pause(
+        "account",
+        "default",
+        config,
+        paused=True,
+        confirm=True,
+        actor="cli",
+    )
+
+    projected = paused.config["sources"]["hh"]["autopilot"]["accounts"]
+    assert projected[0]["paused"] is True
+    for account in projected:
+        assert account["enabled"] is False
+        assert account["authorization_generation"] is None
+    assert json.loads(path.read_text(encoding="utf-8")) == paused.config
+
+
 def test_repository_create_grants_validates_all_requests_before_begin(
     repository,
 ) -> None:
@@ -466,6 +535,147 @@ def test_repository_exposes_fresh_canonical_account_state_read(repository) -> No
     assert first == second
     assert first.account_id == "default"
     assert first.hh_reset == {"remaining": 2}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {
+            "projections": {
+                "default": (False, None),
+                "second": (True, True),
+            }
+        },
+        {
+            "projections": {"default": (True, 1)},
+            "policy_hashes": {"other": "hash"},
+        },
+        {
+            "projections": {"default": (True, 1)},
+            "policy_errors": {"other": "policy_material_unavailable"},
+        },
+    ],
+)
+def test_reconcile_authorization_projection_validates_everything_before_begin(
+    repository, kwargs
+) -> None:
+    statements: list[str] = []
+    repository.conn.set_trace_callback(statements.append)
+    try:
+        with pytest.raises((TypeError, ValueError)):
+            repository.reconcile_authorization_projection(
+                actor="startup",
+                reason="test",
+                **kwargs,
+            )
+    finally:
+        repository.conn.set_trace_callback(None)
+
+    assert not any(statement.startswith("BEGIN") for statement in statements)
+
+
+def test_reconcile_authorization_projection_rolls_back_revoke_when_stop_fails(
+    repository,
+) -> None:
+    generation = repository.create_grants(
+        [("default", "hash", "cli", "test")]
+    )["default"]
+    grant = repository.active_grant("default", "applications")
+    run = repository.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="hash",
+        grant_id=grant.id,
+    )
+    repository.conn.execute(
+        """
+        CREATE TRIGGER abort_reconciliation_stop
+        BEFORE UPDATE OF status ON hh_autopilot_runs
+        WHEN NEW.status = 'stop_requested'
+        BEGIN
+            SELECT RAISE(ABORT, 'reconciliation stop failure');
+        END
+        """
+    )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="reconciliation stop failure"
+    ):
+        repository.reconcile_authorization_projection(
+            {"default": (False, generation)},
+            actor="startup",
+            reason="test",
+        )
+
+    assert repository.active_grant("default", "applications") is not None
+    assert repository.get_run(run.id).status == "running"
+
+
+def test_reconcile_authorization_projection_revokes_current_replacement_generation(
+    repository,
+) -> None:
+    generation = repository.create_grants(
+        [("default", "hash", "cli", "first")]
+    )["default"]
+    first = repository.active_grant("default", "applications")
+    run = repository.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="hash",
+        grant_id=first.id,
+    )
+    replacement_generation = repository.create_grants(
+        [("default", "hash", "scheduler", "replacement")]
+    )["default"]
+    assert replacement_generation == generation + 1
+
+    result = repository.reconcile_authorization_projection(
+        {"default": (True, generation)},
+        actor="startup",
+        reason="test",
+    )
+
+    assert result.mismatches == {"default": "authorization_state_mismatch"}
+    assert result.revoked_accounts == ("default",)
+    assert result.stopped_accounts == ("default",)
+    assert repository.active_grant("default", "applications") is None
+    assert repository.get_run(run.id).status == "stop_requested"
+
+
+def test_reconcile_authorization_projection_result_order_is_stable(repository) -> None:
+    repository.create_grants(
+        [
+            ("second", "hash", "cli", "test"),
+            ("default", "hash", "cli", "test"),
+        ]
+    )
+    repository.create_run("second", trigger="manual", policy_hash="hash")
+    repository.create_run("default", trigger="manual", policy_hash="hash")
+
+    result = repository.reconcile_authorization_projection(
+        {}, actor="startup", reason="missing_config"
+    )
+
+    assert result.revoked_accounts == ("default", "second")
+    assert result.stopped_accounts == ("default", "second")
+
+
+def test_live_authorization_snapshot_validates_request_before_begin(repository) -> None:
+    statements: list[str] = []
+    repository.conn.set_trace_callback(statements.append)
+    try:
+        with pytest.raises(TypeError, match="run_id"):
+            repository.validate_live_authorization_snapshot(
+                "default",
+                generation=1,
+                policy_hash="hash",
+                run_id=True,
+                fencing_token=1,
+            )
+    finally:
+        repository.conn.set_trace_callback(None)
+
+    assert not any(statement.startswith("BEGIN") for statement in statements)
 
 
 def test_disable_transaction_rolls_back_grant_when_stop_update_fails(
@@ -771,6 +981,96 @@ def test_reconciliation_revokes_grant_for_account_removed_from_config(
     assert authorizer.repository.active_grant("default", "applications") is None
 
 
+def test_reconciliation_revokes_current_generation_created_during_policy_resolution(
+    authorizer, enabled_result
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    expected_hash = enabled_result.policy_hashes["default"]
+    raced = False
+
+    def racing_material(config, account_id):
+        nonlocal raced
+        if not raced:
+            raced = True
+            authorizer.repository.create_grants(
+                [("default", expected_hash, "scheduler", "concurrent")]
+            )
+        return _material(config, account_id)
+
+    authorizer.policy_material_resolver = racing_material
+
+    result = authorizer.reconcile_config_projection(
+        enabled_result.config, actor="startup"
+    )
+
+    assert raced is True
+    assert result.mismatches == {"default": "authorization_state_mismatch"}
+    assert result.revoked_accounts == ("default",)
+    assert authorizer.repository.active_grant("default", "applications") is None
+    assert authorizer.repository.get_run(run.id).status == "stop_requested"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "survives"),
+    [
+        ("disabled", False),
+        ("generation_mismatch", False),
+        ("removed", False),
+        ("missing_config", False),
+        ("malformed", False),
+        ("matching", True),
+    ],
+)
+def test_work_hunter_startup_reconciles_authoritative_projection(
+    tmp_path, scenario, survives
+) -> None:
+    from work_hunter.services import WorkHunter
+
+    storage = Storage(database_path(tmp_path))
+    repository = AutopilotRepository(storage)
+    generation = repository.create_grants(
+        [("default", "stored-policy", "cli", "seed")]
+    )["default"]
+    grant = repository.active_grant("default", "applications")
+    run = repository.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="stored-policy",
+        grant_id=grant.id,
+        fencing_token=1,
+    )
+    storage.close()
+
+    config = default_config()
+    account = config["sources"]["hh"]["autopilot"]["accounts"][0]
+    account.update(enabled=True, authorization_generation=generation)
+    if scenario == "disabled":
+        account["enabled"] = False
+    elif scenario == "generation_mismatch":
+        account["authorization_generation"] = generation + 1
+    elif scenario == "removed":
+        config = _two_account_config(config)
+        config["sources"]["hh"]["autopilot"]["accounts"] = [
+            config["sources"]["hh"]["autopilot"]["accounts"][1]
+        ]
+    elif scenario == "malformed":
+        config["sources"]["hh"]["autopilot"]["accounts"] = "broken"
+    if scenario != "missing_config":
+        path = config_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config), encoding="utf-8")
+
+    app = WorkHunter(tmp_path)
+    restarted_repository = AutopilotRepository(app.storage)
+    active = restarted_repository.active_grant("default", "applications")
+
+    assert (active is not None) is survives
+    assert restarted_repository.get_run(run.id).status == (
+        "running" if survives else "stop_requested"
+    )
+    app.storage.close()
+
+
 @pytest.mark.parametrize("status", ["stop_requested", "completed", "failed"])
 def test_stopped_or_terminal_run_cannot_receive_live_authorization(
     authorizer, enabled_result, status
@@ -848,3 +1148,52 @@ def test_live_authorization_requires_exact_run_fencing_token(
         authorizer.issue_live_authorization(
             "default", enabled_result.config, run_id=run.id, fencing_token=12
         )
+
+
+def test_live_authorization_observes_pause_committed_while_resolver_is_blocked(
+    authorizer, enabled_result
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    resolver_started = threading.Event()
+    pause_committed = threading.Event()
+    worker_errors: list[BaseException] = []
+    database = authorizer.repository.storage.path
+
+    def blocking_material(config, account_id):
+        resolver_started.set()
+        assert pause_committed.wait(timeout=5)
+        return _material(config, account_id)
+
+    def commit_pause() -> None:
+        try:
+            assert resolver_started.wait(timeout=5)
+            storage = Storage(database)
+            try:
+                AutopilotRepository(storage).set_pause(
+                    "account", "default", True
+                )
+            finally:
+                storage.close()
+            pause_committed.set()
+        except BaseException as exc:
+            worker_errors.append(exc)
+            pause_committed.set()
+
+    authorizer.policy_material_resolver = blocking_material
+    worker = threading.Thread(target=commit_pause)
+    worker.start()
+    try:
+        with pytest.raises(
+            AuthorizationDenied, match="autopilot_disabled_or_paused"
+        ):
+            authorizer.issue_live_authorization(
+                "default",
+                enabled_result.config,
+                run_id=run.id,
+                fencing_token=11,
+            )
+    finally:
+        worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+    assert worker_errors == []

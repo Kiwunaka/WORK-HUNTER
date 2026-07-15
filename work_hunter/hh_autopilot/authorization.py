@@ -14,7 +14,11 @@ from .config import (
     parse_autopilot_settings,
     policy_hash,
 )
-from .repository import AutopilotRepository, KillSwitchActive
+from .repository import (
+    AutopilotRepository,
+    KillSwitchActive,
+    RepositoryAuthorizationDenied,
+)
 from .types import LiveAuthorization
 
 
@@ -29,6 +33,8 @@ class AuthorizationDenied(RuntimeError):
 
 @dataclass(frozen=True)
 class EnableResult:
+    """Result record with detached, intentionally caller-mutable mapping snapshots."""
+
     config: dict[str, Any]
     generations: dict[str, int]
     policy_hashes: dict[str, str]
@@ -41,6 +47,8 @@ class AuthorizationMutationResult:
 
 @dataclass(frozen=True)
 class ReconciliationResult:
+    """Detached reconciliation snapshot; mutating it cannot change repository state."""
+
     mismatches: dict[str, str]
     revoked_accounts: tuple[str, ...]
 
@@ -200,48 +208,35 @@ class HHAutopilotAuthorizer:
     ) -> ReconciliationResult:
         actor = _required_text(actor, field="actor")
         settings = parse_autopilot_settings(config)
-        mismatches: dict[str, str] = {}
-        revoke: dict[str, int] = {}
-        configured_account_ids = {
-            self._account_key(account) for account in settings.accounts
+        projections = {
+            self._account_key(account): (
+                account.enabled,
+                account.authorization_generation,
+            )
+            for account in settings.accounts
         }
+        policy_hashes: dict[str, str] = {}
+        policy_errors: dict[str, str] = {}
         for account in settings.accounts:
             account_id = self._account_key(account)
-            grant = self.repository.active_grant(account_id, "applications")
             if not account.enabled:
-                if grant is not None:
-                    revoke[account_id] = grant.generation
-                continue
-            if grant is None:
-                mismatches[account_id] = "authorization_state_mismatch"
-                continue
-            if account.authorization_generation != grant.generation:
-                mismatches[account_id] = "authorization_state_mismatch"
-                revoke[account_id] = grant.generation
                 continue
             try:
-                current_hash = self._policy_hash(
+                policy_hashes[account_id] = self._policy_hash(
                     config, settings, account.profile_id
                 )
             except AuthorizationDenied as exc:
-                mismatches[account_id] = exc.code
-                revoke[account_id] = grant.generation
-                continue
-            if current_hash != grant.policy_hash:
-                mismatches[account_id] = "policy_hash_mismatch"
-                revoke[account_id] = grant.generation
-        for grant in self.repository.list_active_grants("applications"):
-            if grant.account_id not in configured_account_ids:
-                revoke[grant.account_id] = grant.generation
-        if revoke:
-            self.repository.revoke_exact_generations(
-                revoke,
-                actor=actor,
-                reason="config_projection_reconciliation",
-            )
+                policy_errors[account_id] = exc.code
+        reconciled = self.repository.reconcile_authorization_projection(
+            projections,
+            actor=actor,
+            reason="config_projection_reconciliation",
+            policy_hashes=policy_hashes,
+            policy_errors=policy_errors,
+        )
         return ReconciliationResult(
-            mismatches=dict(mismatches),
-            revoked_accounts=tuple(revoke),
+            mismatches=dict(reconciled.mismatches),
+            revoked_accounts=reconciled.revoked_accounts,
         )
 
     def issue_live_authorization(
@@ -257,47 +252,30 @@ class HHAutopilotAuthorizer:
         fencing_token = _fencing_token(fencing_token)
         settings = parse_autopilot_settings(config)
         account = self._find_account(settings, canonical_account)
-        grant = self.repository.active_grant(
-            canonical_account, "applications"
-        )
-        if (
-            grant is None
-            or account.authorization_generation != grant.generation
-        ):
+        if account.authorization_generation is None:
             raise AuthorizationDenied("authorization_state_mismatch")
-        if (
-            not account.enabled
-            or account.paused
-            or self.repository.pause_active(canonical_account)
-        ):
+        if not account.enabled or account.paused:
             raise AuthorizationDenied("autopilot_disabled_or_paused")
         current_hash = self._policy_hash(
             config, settings, account.profile_id
         )
-        if grant.policy_hash != current_hash:
-            raise AuthorizationDenied("policy_hash_mismatch")
-        if self.repository.kill_switch_active(canonical_account):
-            raise AuthorizationDenied("kill_switch_active")
-        run = self.repository.get_run(run_id)
-        if run is None:
-            raise AuthorizationDenied("run_not_found")
-        if run.account_id != canonical_account:
-            raise AuthorizationDenied("run_account_mismatch")
-        if run.status != "running":
-            raise AuthorizationDenied("run_not_active")
-        if run.policy_hash != grant.policy_hash:
-            raise AuthorizationDenied("run_policy_mismatch")
-        if run.grant_id is not None and run.grant_id != grant.id:
-            raise AuthorizationDenied("run_grant_mismatch")
-        if run.fencing_token != fencing_token:
-            raise AuthorizationDenied("run_fencing_token_mismatch")
+        try:
+            snapshot = self.repository.validate_live_authorization_snapshot(
+                canonical_account,
+                generation=account.authorization_generation,
+                policy_hash=current_hash,
+                run_id=run_id,
+                fencing_token=fencing_token,
+            )
+        except RepositoryAuthorizationDenied as exc:
+            raise AuthorizationDenied(exc.code) from exc
         return LiveAuthorization(
-            grant_id=grant.id,
+            grant_id=snapshot.grant.id,
             scope="applications",
             account_id=canonical_account,
-            run_id=run.id,
+            run_id=snapshot.run.id,
             fencing_token=fencing_token,
-            policy_hash=grant.policy_hash,
+            policy_hash=snapshot.grant.policy_hash,
         )
 
     def set_pause(
