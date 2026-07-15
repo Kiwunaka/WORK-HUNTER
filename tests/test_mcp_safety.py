@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from work_hunter import mcp_server
+from work_hunter.safety import require_hh_dispatch_authorization
 from work_hunter.sources import PUBLIC_BOARD_SOURCE_NAMES
 
 
@@ -100,3 +103,19 @@ def test_mcp_research_and_apply_requires_literal_true_confirmation(
     assert json.loads(result[0].text)["status"] == "ok"
     assert calls[0]["plan_apply"] is True
     assert calls[0]["confirm_apply"] is False
+
+
+def test_hh_dispatch_guard_rejects_mcp_shaped_authorization():
+    for authorization in (
+        {"account_id": "default", "scope": "applications", "fencing_token": 7},
+        {"confirm": True},
+        True,
+        False,
+    ):
+        with pytest.raises(PermissionError, match="typed HH application authorization"):
+            require_hh_dispatch_authorization(
+                authorization,
+                account_id="default",
+                lease_account_id="default",
+                fencing_token=7,
+            )

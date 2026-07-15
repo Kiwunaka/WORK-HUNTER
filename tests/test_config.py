@@ -1,3 +1,4 @@
+import copy
 import errno
 import json
 import os
@@ -8,7 +9,14 @@ from pathlib import Path
 import pytest
 
 import work_hunter.config as config_module
-from work_hunter.config import active_profile, default_config, load_config, mask_secrets, save_config
+from work_hunter.config import (
+    active_profile,
+    default_config,
+    load_config,
+    mask_secrets,
+    save_config,
+    update_config,
+)
 
 
 def test_save_and_load_config(tmp_path):
@@ -440,3 +448,140 @@ def test_clear_config_secret_value_supports_existing_profile_names_with_dots():
     )
 
     assert cleared["hh_account_profiles"]["work.prod"]["client_secret"] == ""
+
+
+def test_preserve_managed_autopilot_fields_matches_canonical_profile_ids():
+    stored = default_config()
+    stored_account = stored["sources"]["hh"]["autopilot"]["accounts"][0]
+    stored_account.update(
+        profile_id=" Default ", enabled=True, authorization_generation=7
+    )
+    submitted = copy.deepcopy(stored)
+    submitted_account = submitted["sources"]["hh"]["autopilot"]["accounts"][0]
+    submitted_account.update(
+        profile_id="DEFAULT", enabled=False, authorization_generation=999
+    )
+
+    preserved = config_module.preserve_managed_autopilot_fields(stored, submitted)
+
+    account = preserved["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is True
+    assert account["authorization_generation"] == 7
+
+
+def test_preserve_managed_autopilot_fields_disables_new_accounts_and_allows_missing():
+    stored = default_config()
+    stored_account = stored["sources"]["hh"]["autopilot"]["accounts"][0]
+    stored_account.update(enabled=True, authorization_generation=4)
+    submitted = copy.deepcopy(stored)
+    submitted["sources"]["hh"]["autopilot"]["accounts"] = [
+        {
+            **copy.deepcopy(stored_account),
+            "profile_id": "new",
+            "enabled": True,
+            "authorization_generation": 999,
+        }
+    ]
+
+    preserved = config_module.preserve_managed_autopilot_fields(stored, submitted)
+
+    assert preserved["sources"]["hh"]["autopilot"]["accounts"][0]["enabled"] is False
+    assert (
+        preserved["sources"]["hh"]["autopilot"]["accounts"][0][
+            "authorization_generation"
+        ]
+        is None
+    )
+
+
+def test_preserve_managed_autopilot_fields_rejects_canonical_duplicates():
+    stored = default_config()
+    submitted = copy.deepcopy(stored)
+    duplicate = copy.deepcopy(
+        submitted["sources"]["hh"]["autopilot"]["accounts"][0]
+    )
+    duplicate["profile_id"] = " DEFAULT "
+    submitted["sources"]["hh"]["autopilot"]["accounts"].append(duplicate)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        config_module.preserve_managed_autopilot_fields(stored, submitted)
+
+
+def test_save_config_preserves_managed_authorization_fields(tmp_path):
+    path = tmp_path / "config.json"
+    stored = default_config()
+    stored_account = stored["sources"]["hh"]["autopilot"]["accounts"][0]
+    stored_account.update(enabled=True, authorization_generation=5)
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    submitted = copy.deepcopy(stored)
+    submitted_account = submitted["sources"]["hh"]["autopilot"]["accounts"][0]
+    submitted_account.update(enabled=False, authorization_generation=999)
+
+    save_config(path, submitted)
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    account = persisted["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is True
+    assert account["authorization_generation"] == 5
+
+
+def test_first_ordinary_save_cannot_self_authorize_new_account(tmp_path):
+    path = tmp_path / "config.json"
+    submitted = default_config()
+    account = submitted["sources"]["hh"]["autopilot"]["accounts"][0]
+    account.update(enabled=True, authorization_generation=999)
+
+    save_config(path, submitted)
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    account = persisted["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is False
+    assert account["authorization_generation"] is None
+
+
+def test_update_config_preserves_managed_authorization_fields(tmp_path):
+    path = tmp_path / "config.json"
+    stored = default_config()
+    stored_account = stored["sources"]["hh"]["autopilot"]["accounts"][0]
+    stored_account.update(enabled=True, authorization_generation=3)
+    path.write_text(json.dumps(stored), encoding="utf-8")
+
+    updated = update_config(
+        path,
+        lambda config: config["sources"]["hh"]["autopilot"]["accounts"][0].update(
+            enabled=False,
+            authorization_generation=123,
+        ),
+    )
+
+    account = updated["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is True
+    assert account["authorization_generation"] == 3
+
+
+def test_update_config_missing_file_cannot_authorize_through_fallback(tmp_path):
+    path = tmp_path / "missing.json"
+    fallback = default_config()
+    account = fallback["sources"]["hh"]["autopilot"]["accounts"][0]
+    account.update(enabled=True, authorization_generation=77)
+
+    updated = update_config(path, lambda config: None, fallback=fallback)
+
+    account = updated["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is False
+    assert account["authorization_generation"] is None
+
+
+def test_merge_masked_config_preserves_managed_enabled_projection():
+    stored = default_config()
+    stored_account = stored["sources"]["hh"]["autopilot"]["accounts"][0]
+    stored_account.update(enabled=True, authorization_generation=6)
+    submitted = copy.deepcopy(stored)
+    submitted_account = submitted["sources"]["hh"]["autopilot"]["accounts"][0]
+    submitted_account["enabled"] = False
+
+    merged = config_module.merge_masked_config(stored, submitted)
+
+    account = merged["sources"]["hh"]["autopilot"]["accounts"][0]
+    assert account["enabled"] is True
+    assert account["authorization_generation"] == 6

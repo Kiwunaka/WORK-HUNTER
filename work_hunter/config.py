@@ -39,6 +39,9 @@ _MISSING_CONFIG_VALUE = object()
 _CONFIG_WRITE_LOCK = threading.RLock()
 _CONFIG_LOCK_STATE = threading.local()
 _CONFIG_LOCK_FDS: set[int] = set()
+AUTOPILOT_MANAGED_ACCOUNT_KEYS = frozenset(
+    {"enabled", "authorization_generation"}
+)
 
 
 def _reset_config_state_after_fork() -> None:
@@ -410,17 +413,7 @@ def merge_masked_config(
                     )
 
     merged = _merge_masked_value(stored, submitted)
-    merged_accounts = _autopilot_accounts(merged)
-    if merged_accounts is None:
-        return merged
-
-    for item in merged_accounts:
-        if not isinstance(item, dict):
-            continue
-        profile_id = item.get("profile_id")
-        key = profile_id.strip().casefold() if isinstance(profile_id, str) else ""
-        item["authorization_generation"] = copy.deepcopy(generations.get(key))
-    return merged
+    return preserve_managed_autopilot_fields(stored, merged)
 
 
 def _autopilot_accounts(config: Any) -> list[Any] | None:
@@ -437,6 +430,54 @@ def _autopilot_accounts(config: Any) -> list[Any] | None:
         return None
     accounts = autopilot.get("accounts")
     return accounts if isinstance(accounts, list) else None
+
+
+def _canonical_profile_id(value: Any, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string")
+    canonical = value.strip().casefold()
+    if not canonical:
+        raise ValueError(f"{field} must not be empty")
+    if "\0" in canonical:
+        raise ValueError(f"{field} must not contain NUL")
+    return canonical
+
+
+def _account_index(config: Any, *, field: str) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(_autopilot_accounts(config) or []):
+        if not isinstance(item, dict):
+            continue
+        profile_id = _canonical_profile_id(
+            item.get("profile_id"), field=f"{field}[{index}].profile_id"
+        )
+        if profile_id in indexed:
+            raise ValueError(f"{field} contains a duplicate profile_id")
+        indexed[profile_id] = item
+    return indexed
+
+
+def preserve_managed_autopilot_fields(
+    stored: dict[str, Any], submitted: dict[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(stored, dict) or not isinstance(submitted, dict):
+        raise TypeError("stored and submitted configuration must be dictionaries")
+    merged = copy.deepcopy(submitted)
+    stored_accounts = _account_index(stored, field="stored autopilot accounts")
+    submitted_accounts = _account_index(
+        merged, field="submitted autopilot accounts"
+    )
+    for profile_id, item in submitted_accounts.items():
+        old = stored_accounts.get(profile_id)
+        if old is None:
+            item["enabled"] = False
+            item["authorization_generation"] = None
+            continue
+        item["enabled"] = copy.deepcopy(old.get("enabled", False))
+        item["authorization_generation"] = copy.deepcopy(
+            old.get("authorization_generation")
+        )
+    return merged
 
 
 def clear_config_secret_value(
@@ -593,7 +634,82 @@ def save_config(path: str | Path, config: dict[str, Any]) -> None:
     path = Path(path)
     with _CONFIG_WRITE_LOCK:
         with _config_file_lock(path):
-            _save_config(path, config)
+            stored: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    with path.open("r", encoding="utf-8") as fh:
+                        loaded = json.load(fh)
+                    if isinstance(loaded, dict):
+                        stored = loaded
+                except (OSError, ValueError):
+                    stored = {}
+            protected = preserve_managed_autopilot_fields(stored, config)
+            _save_config(path, protected)
+
+
+def _update_autopilot_authorization_projection(
+    path: str | Path,
+    fallback: dict[str, Any],
+    projections: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Update service-owned HH autopilot fields under the config write lock."""
+    if not isinstance(fallback, dict):
+        raise TypeError("fallback configuration must be a dictionary")
+    if not isinstance(projections, dict) or not projections:
+        raise ValueError("projections must be a non-empty dictionary")
+    validated: dict[str, dict[str, Any]] = {}
+    allowed = AUTOPILOT_MANAGED_ACCOUNT_KEYS | {"paused"}
+    for raw_account_id, raw_values in projections.items():
+        account_id = _canonical_profile_id(
+            raw_account_id, field="projection account_id"
+        )
+        if account_id in validated:
+            raise ValueError("projections contains a duplicate account identifier")
+        if not isinstance(raw_values, dict) or not raw_values:
+            raise TypeError("projection values must be a non-empty dictionary")
+        unknown = set(raw_values).difference(allowed)
+        if unknown:
+            raise ValueError(
+                f"unsupported autopilot projection field: {sorted(unknown)[0]}"
+            )
+        values = copy.deepcopy(raw_values)
+        if "enabled" in values and type(values["enabled"]) is not bool:
+            raise TypeError("projection enabled must be a boolean")
+        if "paused" in values and type(values["paused"]) is not bool:
+            raise TypeError("projection paused must be a boolean")
+        if "authorization_generation" in values:
+            generation = values["authorization_generation"]
+            if generation is not None and (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 1
+            ):
+                raise ValueError(
+                    "projection authorization_generation must be positive or null"
+                )
+        validated[account_id] = values
+
+    path = Path(path)
+    owner_pid = os.getpid()
+    with _CONFIG_WRITE_LOCK:
+        with _config_file_lock(path):
+            if path.exists():
+                current = load_config(path)
+            else:
+                current = copy.deepcopy(fallback)
+            accounts = _account_index(
+                current, field="persisted autopilot accounts"
+            )
+            missing = sorted(set(validated).difference(accounts))
+            if missing:
+                raise ValueError(
+                    f"unknown HH autopilot projection account: {missing[0]}"
+                )
+            for account_id, values in validated.items():
+                accounts[account_id].update(copy.deepcopy(values))
+            _assert_config_transaction_owner(owner_pid)
+            _save_config(path, current)
+            return copy.deepcopy(current)
 
 
 def _save_config(path: str | Path, config: dict[str, Any]) -> None:
@@ -731,11 +847,14 @@ def update_config(
     owner_pid = os.getpid()
     with _CONFIG_WRITE_LOCK:
         with _config_file_lock(path):
-            if path.exists():
+            existed = path.exists()
+            if existed:
                 config = load_config(path)
             else:
                 config = copy.deepcopy(fallback or default_config())
+            stored = copy.deepcopy(config) if existed else {}
             update(config)
+            config = preserve_managed_autopilot_fields(stored, config)
             _assert_config_transaction_owner(owner_pid)
             _save_config(path, config)
             return config

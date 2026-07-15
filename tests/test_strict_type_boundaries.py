@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from work_hunter.hh_autopilot.types import (
+    LiteralConfirmation,
+    LiveAuthorization,
+    RecoveryProvenance,
+)
+from work_hunter.safety import require_hh_dispatch_authorization
 from work_hunter.services import WorkHunter
 
 
@@ -166,3 +172,108 @@ def test_run_strategy_accepts_valid_missing_and_zero_result_count(
     assert result["imported"] == expected_count
     assert score_calls == [True]
     assert campaign_calls[0]["limit"] == expected_campaign_limit
+
+
+def test_hh_dispatch_guard_accepts_only_exact_typed_authorizations():
+    require_hh_dispatch_authorization(
+        LiteralConfirmation(account_id="default", reference_id="manual-1"),
+        account_id="default",
+        lease_account_id="default",
+        fencing_token=7,
+    )
+    require_hh_dispatch_authorization(
+        LiveAuthorization(
+            grant_id=1,
+            scope="applications",
+            account_id="default",
+            run_id=2,
+            fencing_token=7,
+            policy_hash="hash",
+        ),
+        account_id="default",
+        lease_account_id="default",
+        fencing_token=7,
+    )
+
+
+@pytest.mark.parametrize(
+    ("authorization", "account_id", "lease_account_id", "fencing_token"),
+    [
+        (
+            LiteralConfirmation(account_id="other", reference_id="manual-1"),
+            "default",
+            "default",
+            7,
+        ),
+        (
+            LiteralConfirmation(account_id="default", reference_id="manual-1"),
+            "default",
+            "other",
+            7,
+        ),
+        (
+            LiveAuthorization(1, "wrong", "default", 2, 7, "hash"),
+            "default",
+            "default",
+            7,
+        ),
+        (
+            LiveAuthorization(1, "applications", "default", 2, 8, "hash"),
+            "default",
+            "default",
+            7,
+        ),
+        (
+            LiveAuthorization(1, "applications", "default", 2, True, "hash"),
+            "default",
+            "default",
+            1,
+        ),
+        (
+            LiveAuthorization(True, "applications", "default", 2, 7, "hash"),
+            "default",
+            "default",
+            7,
+        ),
+        (
+            LiveAuthorization(1, "applications", "default", True, 7, "hash"),
+            "default",
+            "default",
+            7,
+        ),
+        (
+            LiteralConfirmation(account_id="default", reference_id="manual-1"),
+            "default",
+            "default",
+            True,
+        ),
+    ],
+)
+def test_hh_dispatch_guard_rejects_mismatches_and_bool_as_int(
+    authorization, account_id, lease_account_id, fencing_token
+):
+    with pytest.raises(PermissionError):
+        require_hh_dispatch_authorization(
+            authorization,
+            account_id=account_id,
+            lease_account_id=lease_account_id,
+            fencing_token=fencing_token,
+        )
+
+
+def test_hh_dispatch_guard_rejects_recovery_provenance():
+    recovery = RecoveryProvenance(
+        attempt_id=1,
+        account_id="default",
+        authorization_kind="recovery",
+        authorization_ref="attempt-1",
+        policy_hash="hash",
+    )
+
+    with pytest.raises(PermissionError, match="typed HH application authorization"):
+        require_hh_dispatch_authorization(
+            recovery,
+            account_id="default",
+            lease_account_id="default",
+            fencing_token=7,
+        )

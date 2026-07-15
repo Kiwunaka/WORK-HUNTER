@@ -32,6 +32,9 @@ INITIAL_RUN_STATUSES = frozenset({"created", "running"})
 TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "interrupted", "cancelled"}
 )
+APPLICATION_SCOPE = "applications"
+CONTROL_SCOPE_TYPES = frozenset({"global", "account"})
+GLOBAL_CONTROL_SCOPE_ID = "global"
 
 
 class StaleWrite(RuntimeError):
@@ -39,6 +42,10 @@ class StaleWrite(RuntimeError):
 
 
 class LostLease(RuntimeError):
+    pass
+
+
+class KillSwitchActive(RuntimeError):
     pass
 
 
@@ -122,6 +129,54 @@ class ChallengeRecord:
     @property
     def metadata_json(self) -> dict[str, Any]:
         return _json_copy(self.metadata)
+
+
+@dataclass(frozen=True)
+class GrantRecord:
+    id: int
+    account_id: str
+    scope: str
+    policy_hash: str
+    generation: int
+    active: bool
+    actor: str
+    source: str
+    created_at: str
+    revoked_at: str
+
+    @property
+    def account_profile_id(self) -> str:
+        return self.account_id
+
+
+@dataclass(frozen=True)
+class ControlRecord:
+    scope_type: str
+    scope_id: str
+    paused: bool
+    kill_switch: bool
+    version: int
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class AccountStateRecord:
+    account_id: str
+    blocked_until: str
+    block_reason: str
+    hh_reset: dict[str, Any]
+    last_scheduled_at: str
+    next_scheduled_at: str
+    version: int
+    updated_at: str
+
+    @property
+    def account_profile_id(self) -> str:
+        return self.account_id
+
+    @property
+    def hh_reset_json(self) -> dict[str, Any]:
+        return _json_copy(self.hh_reset)
 
 
 def _utc_now() -> str:
@@ -220,6 +275,39 @@ def _timestamp(value: datetime | str, *, field: str) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field} must be timezone-aware")
     return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _scope(value: Any) -> str:
+    value = _required_text(value, field="scope")
+    if value != APPLICATION_SCOPE:
+        raise ValueError("scope must be applications")
+    return value
+
+
+def _control_identity(scope_type: Any, scope_id: Any) -> tuple[str, str]:
+    scope_type = _required_text(scope_type, field="scope_type").casefold()
+    if scope_type not in CONTROL_SCOPE_TYPES:
+        raise ValueError("scope_type must be global or account")
+    if scope_type == "global":
+        supplied = _required_text(scope_id, field="scope_id").casefold()
+        if supplied not in {GLOBAL_CONTROL_SCOPE_ID, "*"}:
+            raise ValueError("global control scope_id must be global")
+        return scope_type, GLOBAL_CONTROL_SCOPE_ID
+    return scope_type, _canonical_identifier(scope_id, field="scope_id")
+
+
+def _account_ids(values: Any, *, field: str = "account_ids") -> list[str]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+        raise TypeError(f"{field} must be a list of account identifiers")
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        account_id = _canonical_identifier(value, field=f"{field}[{index}]")
+        if account_id in seen:
+            raise ValueError(f"{field} contains a duplicate account identifier")
+        seen.add(account_id)
+        canonical.append(account_id)
+    return canonical
 
 
 class AutopilotRepository:
@@ -556,6 +644,400 @@ class AutopilotRepository:
         ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
+    def create_grants(
+        self,
+        requests: list[tuple[str, str, str, str]],
+    ) -> dict[str, int]:
+        """Create every requested application grant in one transaction."""
+        if not isinstance(requests, list):
+            raise TypeError("requests must be a list")
+        validated: list[tuple[str, str, str, str]] = []
+        seen: set[str] = set()
+        for index, request in enumerate(requests):
+            if not isinstance(request, tuple) or len(request) != 4:
+                raise TypeError(
+                    f"requests[{index}] must be an account/policy/actor/source tuple"
+                )
+            account_id = _canonical_identifier(
+                request[0], field=f"requests[{index}].account_id"
+            )
+            if account_id in seen:
+                raise ValueError("requests contains a duplicate account identifier")
+            seen.add(account_id)
+            validated.append(
+                (
+                    account_id,
+                    _required_text(
+                        request[1], field=f"requests[{index}].policy_hash"
+                    ),
+                    _required_text(request[2], field=f"requests[{index}].actor"),
+                    _required_text(request[3], field=f"requests[{index}].source"),
+                )
+            )
+        if not validated:
+            return {}
+
+        with self.immediate():
+            for account_id, _, _, _ in validated:
+                if self._kill_switch_active_for_update(account_id):
+                    raise KillSwitchActive(
+                        f"kill switch is active for account {account_id}"
+                    )
+            generations: dict[str, int] = {}
+            for account_id, policy_hash, actor, source in validated:
+                row = self.conn.execute(
+                    """
+                    SELECT COALESCE(MAX(generation), 0) AS generation
+                    FROM hh_autopilot_grants
+                    WHERE account_profile_id = ? AND scope = ?
+                    """,
+                    (account_id, APPLICATION_SCOPE),
+                ).fetchone()
+                generation = int(row["generation"]) + 1
+                now = _utc_now()
+                self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_grants
+                    SET active = 0, revoked_at = ?
+                    WHERE account_profile_id = ? AND scope = ? AND active = 1
+                    """,
+                    (now, account_id, APPLICATION_SCOPE),
+                )
+                self.conn.execute(
+                    """
+                    INSERT INTO hh_autopilot_grants (
+                        account_profile_id, scope, policy_hash, generation,
+                        active, actor, source, created_at
+                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        APPLICATION_SCOPE,
+                        policy_hash,
+                        generation,
+                        actor,
+                        source,
+                        now,
+                    ),
+                )
+                generations[account_id] = generation
+            return generations
+
+    def active_grant(
+        self, account_id: str, scope: str = APPLICATION_SCOPE
+    ) -> GrantRecord | None:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        scope = _scope(scope)
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_grants
+            WHERE account_profile_id = ? AND scope = ? AND active = 1
+            """,
+            (account_id, scope),
+        ).fetchone()
+        return self._grant_from_row(row) if row is not None else None
+
+    def list_active_grants(
+        self, scope: str = APPLICATION_SCOPE
+    ) -> list[GrantRecord]:
+        scope = _scope(scope)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_grants
+            WHERE scope = ? AND active = 1
+            ORDER BY account_profile_id ASC, id ASC
+            """,
+            (scope,),
+        ).fetchall()
+        return [self._grant_from_row(row) for row in rows]
+
+    def revoke_grants(
+        self,
+        account_ids: list[str],
+        *,
+        actor: str,
+        reason: str,
+    ) -> None:
+        account_ids = _account_ids(account_ids)
+        _required_text(actor, field="actor")
+        _required_text(reason, field="reason")
+        if not account_ids:
+            return
+        with self.immediate():
+            self._revoke_accounts(account_ids, _utc_now())
+
+    def revoke_exact_generations(
+        self,
+        generations: dict[str, int],
+        *,
+        actor: str,
+        reason: str,
+    ) -> None:
+        if not isinstance(generations, dict):
+            raise TypeError("generations must be a dictionary")
+        _required_text(actor, field="actor")
+        _required_text(reason, field="reason")
+        validated: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for raw_account_id, raw_generation in generations.items():
+            account_id = _canonical_identifier(raw_account_id, field="account_id")
+            if account_id in seen:
+                raise ValueError("generations contains a duplicate account identifier")
+            seen.add(account_id)
+            validated.append(
+                (
+                    account_id,
+                    _integer(raw_generation, field="generation", minimum=1),
+                )
+            )
+        if not validated:
+            return
+        with self.immediate():
+            now = _utc_now()
+            self.conn.executemany(
+                """
+                UPDATE hh_autopilot_grants
+                SET active = 0, revoked_at = ?
+                WHERE account_profile_id = ? AND scope = ?
+                  AND generation = ? AND active = 1
+                """,
+                [
+                    (now, account_id, APPLICATION_SCOPE, generation)
+                    for account_id, generation in validated
+                ],
+            )
+
+    def disable_accounts(
+        self,
+        account_ids: list[str],
+        *,
+        actor: str,
+        reason: str = "disabled",
+    ) -> None:
+        account_ids = _account_ids(account_ids)
+        _required_text(actor, field="actor")
+        _required_text(reason, field="reason")
+        if not account_ids:
+            return
+        with self.immediate():
+            self._revoke_accounts(account_ids, _utc_now())
+            self._request_stop(account_ids)
+
+    def request_stop(self, account_ids: list[str]) -> None:
+        account_ids = _account_ids(account_ids)
+        if not account_ids:
+            return
+        with self.immediate():
+            self._request_stop(account_ids)
+
+    def run_stop_requested(self, run_id: int) -> bool:
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        row = self.conn.execute(
+            "SELECT status FROM hh_autopilot_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"run {run_id} does not exist")
+        return str(row["status"]) == "stop_requested"
+
+    def get_account_state(
+        self, account_id: str
+    ) -> AccountStateRecord | None:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_account_state
+            WHERE account_profile_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        return self._account_state_from_row(row) if row is not None else None
+
+    def get_control(self, scope_type: str, scope_id: str) -> ControlRecord | None:
+        scope_type, scope_id = _control_identity(scope_type, scope_id)
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_controls
+            WHERE scope_type = ? AND scope_id = ?
+            """,
+            (scope_type, scope_id),
+        ).fetchone()
+        return self._control_from_row(row) if row is not None else None
+
+    def set_pause(self, scope_type: str, scope_id: str, paused: bool) -> ControlRecord:
+        scope_type, scope_id = _control_identity(scope_type, scope_id)
+        if type(paused) is not bool:
+            raise TypeError("paused must be a boolean")
+        with self.immediate():
+            self._upsert_control(
+                scope_type,
+                scope_id,
+                paused=paused,
+                kill_switch=None,
+            )
+            return self._control_for_update(scope_type, scope_id)
+
+    def set_kill_switch(
+        self,
+        scope_type: str,
+        scope_id: str,
+        *,
+        actor: str,
+    ) -> ControlRecord:
+        scope_type, scope_id = _control_identity(scope_type, scope_id)
+        _required_text(actor, field="actor")
+        with self.immediate():
+            self._upsert_control(
+                scope_type,
+                scope_id,
+                paused=None,
+                kill_switch=True,
+            )
+            if scope_type == "global":
+                self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_grants
+                    SET active = 0, revoked_at = ?
+                    WHERE scope = ? AND active = 1
+                    """,
+                    (_utc_now(), APPLICATION_SCOPE),
+                )
+                self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_runs
+                    SET status = 'stop_requested'
+                    WHERE status = 'running'
+                    """
+                )
+            else:
+                self._revoke_accounts([scope_id], _utc_now())
+                self._request_stop([scope_id])
+            return self._control_for_update(scope_type, scope_id)
+
+    def clear_kill_switch(
+        self,
+        scope_type: str,
+        scope_id: str,
+        *,
+        actor: str,
+    ) -> ControlRecord:
+        scope_type, scope_id = _control_identity(scope_type, scope_id)
+        _required_text(actor, field="actor")
+        with self.immediate():
+            self._upsert_control(
+                scope_type,
+                scope_id,
+                paused=None,
+                kill_switch=False,
+            )
+            return self._control_for_update(scope_type, scope_id)
+
+    def pause_active(self, account_id: str) -> bool:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM hh_autopilot_controls
+            WHERE paused = 1 AND (
+                (scope_type = 'global' AND scope_id = ?)
+                OR (scope_type = 'account' AND scope_id = ?)
+            )
+            LIMIT 1
+            """,
+            (GLOBAL_CONTROL_SCOPE_ID, account_id),
+        ).fetchone()
+        return row is not None
+
+    def kill_switch_active(self, account_id: str) -> bool:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        return self._kill_switch_active_for_update(account_id)
+
+    def _kill_switch_active_for_update(self, account_id: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM hh_autopilot_controls
+            WHERE kill_switch = 1 AND (
+                (scope_type = 'global' AND scope_id = ?)
+                OR (scope_type = 'account' AND scope_id = ?)
+            )
+            LIMIT 1
+            """,
+            (GLOBAL_CONTROL_SCOPE_ID, account_id),
+        ).fetchone()
+        return row is not None
+
+    def _revoke_accounts(self, account_ids: list[str], revoked_at: str) -> None:
+        placeholders = ",".join("?" for _ in account_ids)
+        self.conn.execute(
+            f"""
+            UPDATE hh_autopilot_grants
+            SET active = 0, revoked_at = ?
+            WHERE account_profile_id IN ({placeholders})
+              AND scope = ? AND active = 1
+            """,
+            (revoked_at, *account_ids, APPLICATION_SCOPE),
+        )
+
+    def _request_stop(self, account_ids: list[str]) -> None:
+        placeholders = ",".join("?" for _ in account_ids)
+        self.conn.execute(
+            f"""
+            UPDATE hh_autopilot_runs
+            SET status = 'stop_requested'
+            WHERE account_profile_id IN ({placeholders}) AND status = 'running'
+            """,
+            tuple(account_ids),
+        )
+
+    def _upsert_control(
+        self,
+        scope_type: str,
+        scope_id: str,
+        *,
+        paused: bool | None,
+        kill_switch: bool | None,
+    ) -> None:
+        current = self.conn.execute(
+            """
+            SELECT paused, kill_switch FROM hh_autopilot_controls
+            WHERE scope_type = ? AND scope_id = ?
+            """,
+            (scope_type, scope_id),
+        ).fetchone()
+        current_paused = bool(current["paused"]) if current is not None else False
+        current_kill = bool(current["kill_switch"]) if current is not None else False
+        self.conn.execute(
+            """
+            INSERT INTO hh_autopilot_controls (
+                scope_type, scope_id, paused, kill_switch, version, updated_at
+            ) VALUES (?, ?, ?, ?, 0, ?)
+            ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+                paused = excluded.paused,
+                kill_switch = excluded.kill_switch,
+                version = hh_autopilot_controls.version + 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                scope_type,
+                scope_id,
+                int(current_paused if paused is None else paused),
+                int(current_kill if kill_switch is None else kill_switch),
+                _utc_now(),
+            ),
+        )
+
+    def _control_for_update(
+        self, scope_type: str, scope_id: str
+    ) -> ControlRecord:
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_controls
+            WHERE scope_type = ? AND scope_id = ?
+            """,
+            (scope_type, scope_id),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite("control row disappeared")
+        return self._control_from_row(row)
+
     def get_lease(self, account_id: str) -> LeaseRecord | None:
         account_id = _canonical_identifier(account_id, field="account_id")
         row = self.conn.execute(
@@ -711,6 +1193,58 @@ class AutopilotRepository:
         )
 
     @staticmethod
+    def _grant_from_row(row: sqlite3.Row) -> GrantRecord:
+        scope = str(row["scope"])
+        if scope != APPLICATION_SCOPE:
+            raise ValueError(f"invalid grant scope in storage: {scope}")
+        active = int(row["active"])
+        if active not in {0, 1}:
+            raise ValueError(f"invalid grant active flag in storage: {active}")
+        return GrantRecord(
+            id=int(row["id"]),
+            account_id=str(row["account_profile_id"]),
+            scope=scope,
+            policy_hash=str(row["policy_hash"]),
+            generation=int(row["generation"]),
+            active=bool(active),
+            actor=str(row["actor"]),
+            source=str(row["source"]),
+            created_at=str(row["created_at"]),
+            revoked_at=str(row["revoked_at"]),
+        )
+
+    @staticmethod
+    def _control_from_row(row: sqlite3.Row) -> ControlRecord:
+        scope_type = str(row["scope_type"])
+        if scope_type not in CONTROL_SCOPE_TYPES:
+            raise ValueError(f"invalid control scope in storage: {scope_type}")
+        paused = int(row["paused"])
+        kill_switch = int(row["kill_switch"])
+        if paused not in {0, 1} or kill_switch not in {0, 1}:
+            raise ValueError("invalid control flag in storage")
+        return ControlRecord(
+            scope_type=scope_type,
+            scope_id=str(row["scope_id"]),
+            paused=bool(paused),
+            kill_switch=bool(kill_switch),
+            version=int(row["version"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _account_state_from_row(row: sqlite3.Row) -> AccountStateRecord:
+        return AccountStateRecord(
+            account_id=str(row["account_profile_id"]),
+            blocked_until=str(row["blocked_until"]),
+            block_reason=str(row["block_reason"]),
+            hh_reset=_json_loads(row["hh_reset_json"], field="hh_reset_json"),
+            last_scheduled_at=str(row["last_scheduled_at"]),
+            next_scheduled_at=str(row["next_scheduled_at"]),
+            version=int(row["version"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
     def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": int(row["id"]),
@@ -727,10 +1261,14 @@ class AutopilotRepository:
 
 
 __all__ = [
+    "AccountStateRecord",
     "AutopilotRepository",
     "ChallengeRecord",
+    "ControlRecord",
+    "GrantRecord",
     "ItemRecord",
     "LeaseRecord",
+    "KillSwitchActive",
     "LostLease",
     "RunRecord",
     "StaleWrite",
