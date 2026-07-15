@@ -228,6 +228,18 @@ def test_timezone_rejects_non_iana_legacy_ids(timezone: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "timezone", ["Europe/Moscow", "Etc/UTC", "UTC", "GMT", "US/Eastern"]
+)
+def test_timezone_accepts_zoneinfo_iana_ids_and_aliases(timezone: str) -> None:
+    config = default_config()
+    _autopilot(config)["timezone"] = timezone
+
+    settings = parse_autopilot_settings(config)
+
+    assert settings.timezone == timezone
+
+
+@pytest.mark.parametrize(
     ("language", "normalized"),
     [
         ("en", "en"),
@@ -617,6 +629,62 @@ def test_canonical_arrays_reject_duplicates_after_normalization() -> None:
         canonicalize_policy_payload(
             {"candidate_profile": {"skills": [" Python ", "python"]}}
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "noncanonical", "canonical"),
+    [
+        ("area", "01", "1"),
+        ("professional_role", "01", "1"),
+        ("employer_id", "01", "1"),
+        ("excluded_employer_id", "01", "1"),
+        ("industry", "07.0540", "7.540"),
+    ],
+)
+def test_hh_preset_id_normalization_does_not_change_policy_hash(
+    field: str, noncanonical: str, canonical: str
+) -> None:
+    settings = parse_autopilot_settings(default_config())
+    first = _material()
+    first.presets["backend"] = {field: [noncanonical]}
+    second = _material()
+    second.presets["backend"] = {field: [canonical]}
+
+    assert policy_hash(settings, "default", first) == policy_hash(
+        settings, "default", second
+    )
+
+
+def test_candidate_profile_hh_professional_role_ids_do_not_change_policy_hash() -> None:
+    settings = parse_autopilot_settings(default_config())
+    first = _material()
+    first.candidate_profile["professional_roles"] = ["01"]
+    second = _material()
+    second.candidate_profile["professional_roles"] = ["1"]
+
+    assert policy_hash(settings, "default", first) == policy_hash(
+        settings, "default", second
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "noncanonical", "canonical"),
+    [
+        ("areas", "01", "1"),
+        ("citizenships", "01", "1"),
+        ("area", "01", "1"),
+        ("professional_role", "01", "1"),
+        ("professional_roles", "01", "1"),
+        ("employer_id", "01", "1"),
+        ("excluded_employer_id", "01", "1"),
+        ("industry", "07.0540", "7.540"),
+    ],
+)
+def test_hh_id_arrays_reject_duplicates_after_parser_normalization(
+    field: str, noncanonical: str, canonical: str
+) -> None:
+    with pytest.raises(AutopilotConfigError, match="duplicate"):
+        canonicalize_policy_payload({field: [noncanonical, canonical]})
 
 
 @pytest.mark.parametrize(

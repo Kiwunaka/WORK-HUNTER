@@ -142,6 +142,7 @@ def test_release_metadata_declares_safe_bounds_and_build_tools():
         "mcp>=1.27,<2",
         "requests>=2.32,<3",
         "starlette>=1.3.1,<2",
+        "tzdata>=2025.2; sys_platform == 'win32'",
     ]
     extras = project["project"]["optional-dependencies"]
     assert extras["dev"] == [

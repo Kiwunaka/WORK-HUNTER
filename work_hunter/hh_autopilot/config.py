@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import copy
-import ctypes
 import hashlib
 import json
 import math
 import re
-import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from enum import StrEnum
@@ -955,44 +953,6 @@ def _parse_retention(raw: Any) -> dict[str, Any]:
 
 def _timezone(name: str, value: Any) -> str:
     parsed = _text(name, value)
-    if sys.platform == "win32":
-        try:
-            icu = ctypes.WinDLL("icu.dll")
-            validate = icu.ucal_getCanonicalTimeZoneID
-            uchar = ctypes.c_uint16
-            validate.argtypes = [
-                ctypes.POINTER(uchar),
-                ctypes.c_int32,
-                ctypes.POINTER(uchar),
-                ctypes.c_int32,
-                ctypes.POINTER(ctypes.c_int8),
-                ctypes.POINTER(ctypes.c_int32),
-            ]
-            validate.restype = ctypes.c_int32
-            encoded = parsed.encode("utf-16-le")
-            source_length = len(encoded) // 2
-            source = (uchar * source_length).from_buffer_copy(encoded)
-            destination = (uchar * 128)()
-            is_system_id = ctypes.c_int8()
-            error_code = ctypes.c_int32()
-            canonical_length = validate(
-                source,
-                source_length,
-                destination,
-                len(destination),
-                ctypes.byref(is_system_id),
-                ctypes.byref(error_code),
-            )
-            canonical = bytes(destination)[: canonical_length * 2].decode("utf-16-le")
-            if (
-                error_code.value == 0
-                and is_system_id.value
-                and (canonical == parsed or parsed == "UTC")
-            ):
-                return parsed
-            raise AutopilotConfigError(f"{name} must be a valid IANA timezone")
-        except (AttributeError, OSError):
-            pass
     try:
         ZoneInfo(parsed)
     except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -1518,6 +1478,18 @@ _CASEFOLD_VALUE_KEYS = frozenset(
         "effective_auth_profile_id",
     }
 )
+_HH_ID_ARRAY_KEYS = frozenset(
+    {
+        "areas",
+        "citizenships",
+        "area",
+        "professional_role",
+        "professional_roles",
+        "employer_id",
+        "excluded_employer_id",
+    }
+)
+_COMPOSITE_HH_ID_ARRAY_KEYS = frozenset({"industry"})
 _NORMALIZED_MAPPING_KEY_PARENTS = frozenset(
     {"presets", "prompt_versions", "secret_versions"}
 )
@@ -1619,6 +1591,16 @@ def _canonicalize(value: Any, path: tuple[str, ...]) -> Any:
     if isinstance(value, (list, tuple)):
         normalized_items = [_canonicalize(item, (*path, "[]")) for item in value]
         key = path[-1] if path else ""
+        if key in _HH_ID_ARRAY_KEYS:
+            normalized_items = [
+                _hh_id(f"policy.{key}[{index}]", item)
+                for index, item in enumerate(normalized_items)
+            ]
+        elif key in _COMPOSITE_HH_ID_ARRAY_KEYS:
+            normalized_items = [
+                _composite_hh_id(f"policy.{key}[{index}]", item)
+                for index, item in enumerate(normalized_items)
+            ]
         if key in _CASEFOLD_ARRAY_KEYS:
             normalized_items = [
                 item.casefold() if isinstance(item, str) else item
