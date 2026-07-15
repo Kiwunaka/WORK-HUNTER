@@ -96,6 +96,7 @@ Stable outcome families include:
 - `external_applied`
 - `ambiguous_remote_result`
 - `ambiguous_application`
+- `unresolved_ambiguity`
 - `vacancy_closed`
 - `forbidden`
 - `hard_filter:<filter_name>`
@@ -154,17 +155,17 @@ A reservation is never expired merely by wall clock while its attempt is `applyi
 
 ### `hh_autopilot_challenges`
 
-Stores scope (`item` or `account`), type, account, optional related item, sanitized URL, optional local screenshot path, status, expiry, resolution timestamp, resolution actor, resolution action, and masked metadata. Status transitions are `open -> in_progress -> resolved`, `open|in_progress -> dismissed`, and `open|in_progress -> expired`.
+Stores scope (`item` or `account`), type, account, optional related item, sanitized URL, optional local screenshot path, status, expiry, resolution timestamp, resolution actor, resolution action, and masked metadata. General status transitions are `open -> in_progress -> resolved`, `open|in_progress -> dismissed`, and `open|in_progress -> expired`. For `ambiguous_application` only, late classification additionally permits `dismissed|expired -> resolved` with one of the explicit applied/not-applied resolution actions below.
 
 - `manual_captcha` and `manual_assessment`: successful completion returns the item to `ready`; dismissal/expiry moves it to `skipped`.
 - `manual_auth`: account-scoped, pauses dispatch for that account only, and does not auto-expire. If raised by a definite pre-dispatch/401 rejection, the reservation is released and resolution returns the item to its stored retry stage. If raised while reconciling a possibly-sent attempt, the reservation is held and resolution returns the item to `reconciling` with that same reservation.
-- `ambiguous_application`: retains a `held` quota reservation. Resolution actions are `confirmed_applied` (atomically consume and move to `applied`), `confirmed_not_applied_retry` (release and move to `ready`), `confirmed_not_applied_skip` (release and move to `skipped`), or `retry_reconciliation` (retain and move to `reconciling`). Dismissal/expiry moves the item to `dead` but retains the hold until an explicit applied/not-applied resolution; it never silently returns to `ready`.
+- `ambiguous_application`: retains a `held` quota reservation. Resolution actions are `confirmed_applied` (atomically consume and move to `applied`), `confirmed_not_applied_retry` (release and move to `ready`), `confirmed_not_applied_skip` (release and move to `skipped`), or `retry_reconciliation` (retain and move to `reconciling`). Dismissal/expiry moves the item to `dead` but retains the hold until an explicit applied/not-applied resolution; it never silently returns to `ready`. Generic dead-item retry/requeue rejects such an item with `unresolved_ambiguity` until the challenge is legally resolved.
 
 Default item-challenge expiry is 24 hours and account authentication challenges do not auto-expire. Both policies are configurable.
 
 ### `hh_autopilot_search_cycles` and `hh_autopilot_search_checkpoints`
 
-A search cycle stores account, configuration hash, origin run, current owner run, claim version, fencing token, and status (`running`, `complete`, `failed`, or `interrupted`). Checkpoints reference the cycle and store resume, preset/query key, next page, reported total, unique vacancy count, and status (`pending`, `running`, `complete`, or `failed`). Updating a checkpoint and persisting normalized page results occurs in one transaction.
+A search cycle stores account, configuration hash, origin run, current owner run, claim version, fencing token, and status (`running`, `complete`, `failed`, `interrupted`, or `superseded`). Legal terminal transitions include `running|interrupted -> superseded` on policy-hash mismatch. Checkpoints reference the cycle and store resume, preset/query key, next page, reported total, unique vacancy count, and status (`pending`, `running`, `complete`, or `failed`). Updating a checkpoint and persisting normalized page results occurs in one transaction.
 
 When a matching active grant still exists, an authorized `recovery` run may compare-and-swap claim an interrupted search cycle with its new run ID, claim version, and fencing token. It never rewrites `origin_run_id`. Only the current claimed run may advance checkpoints. Claim requires the cycle configuration hash to equal the current authorized policy hash. On mismatch, the old cycle is marked `superseded` and its never-dispatched candidate items reset for policy re-evaluation; obsolete pagination is never resumed. The next authorized live run (or isolated shadow run) starts a new cycle at page zero. The grant-independent application recovery sweep never claims or advances search cycles.
 
@@ -314,7 +315,9 @@ All numeric values have explicit bounds: page size `1..100`, pages `1..100`, run
 
 Array and identifier domains are also fixed: accounts `1..100`; resume mappings `1..500` per account; preset names `0..100` per mapping; keyword and role lists `0..1000` strings of `1..200` characters; areas/citizenships `0..500` HH ID strings; schedules, employment types, and experience levels `0..100` values from the current HH dictionaries; languages `0..100` BCP-47 tags; and required application capabilities from `direct|screening|form`. All arrays reject duplicates after normalization. Query preset fields are validated by the existing HH search schema before hashing or execution. Boolean fields accept JSON booleans only.
 
-Validation also requires valid IANA timezone, unique weekday integers `1..7`, valid `HH:MM` values with `start <= end`, positive interval, `per_run_success <= daily_success`, minimum send delay not above maximum, `borderline_low <= minimum_score <= borderline_high`, AI confidence in `0..1`, lease TTL at least request timeout plus renewal margin, unique account mappings, existing HH and candidate profiles/presets, at least one resolvable published resume, supported modes, a usable application transport, and an active application grant before a live run. Unknown configuration keys are rejected. Invalid configuration cannot enable or start the autopilot.
+Structural validation requires valid IANA timezone, unique weekday integers `1..7`, valid `HH:MM` values with `start <= end`, positive interval, `per_run_success <= daily_success`, minimum send delay not above maximum, `borderline_low <= minimum_score <= borderline_high`, AI confidence in `0..1`, lease TTL at least request timeout plus renewal margin, unique account mappings, existing HH and candidate profiles/presets, at least one resolvable published resume, supported modes, and a usable application transport. Unknown configuration keys are rejected.
+
+Authorization validation depends on run mode: autonomous schedule/run-now requires a matching active grant; manual campaign and canary require a valid one-shot `LiteralConfirmation`; shadow requires neither because it cannot mutate HH; grant-independent recovery requires immutable attempt provenance and cannot send a new POST. The enable command performs structural validation first and creates the grant only after it passes. Invalid structure cannot enable or start any live mode.
 
 ## Search And Deduplication
 
@@ -580,6 +583,7 @@ Implementation follows test-driven development. Every behavior is first represen
 - score normalization, AI modes, and resume tie-breaking;
 - quota reservation/consume/release, compare-and-swap races, abandoned reservation recovery, and local-day rollover;
 - held ambiguous reservations and account cooldown enforcement;
+- late ambiguity resolution after expiry/dismissal and requeue rejection while unresolved;
 - account-aware application migration, legacy sentinel reporting, and unique account/job/resume identity;
 - retry classification, backoff, `Retry-After`, and exhaustion;
 - configuration validation and masking;
