@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .hh_autopilot.config import default_autopilot_config
 from .sources.public_boards import PUBLIC_BOARD_SOURCE_NAMES, public_board_default_config
 
 
@@ -165,6 +166,7 @@ def default_config() -> dict[str, Any]:
                 "hh_applicant_tool_command": "hh-applicant-tool",
                 "hh_applicant_tool_config_dir": "",
                 "allow_broad_apply": False,
+                "autopilot": default_autopilot_config(),
             },
             "habr": {
                 "enabled": True,
@@ -377,7 +379,64 @@ def merge_masked_config(
     stored: dict[str, Any],
     submitted: dict[str, Any],
 ) -> dict[str, Any]:
-    return _merge_masked_value(stored, submitted)
+    submitted_accounts = _autopilot_accounts(submitted)
+    generations: dict[str, Any] = {}
+    for item in _autopilot_accounts(stored) or []:
+        if not isinstance(item, dict):
+            continue
+        profile_id = item.get("profile_id")
+        if isinstance(profile_id, str) and profile_id.strip():
+            generations[profile_id.strip().casefold()] = copy.deepcopy(
+                item.get("authorization_generation")
+            )
+    if submitted_accounts is not None:
+        for item in submitted_accounts:
+            if isinstance(item, dict) and "authorization_generation" in item:
+                profile_id = item.get("profile_id")
+                key = (
+                    profile_id.strip().casefold()
+                    if isinstance(profile_id, str)
+                    else ""
+                )
+                submitted_generation = item.get("authorization_generation")
+                stored_generation = generations.get(key, _MISSING_CONFIG_VALUE)
+                unchanged = (
+                    stored_generation is not _MISSING_CONFIG_VALUE
+                    and _config_values_equal(stored_generation, submitted_generation)
+                )
+                if not unchanged:
+                    raise ValueError(
+                        "HH autopilot authorization_generation is service-managed"
+                    )
+
+    merged = _merge_masked_value(stored, submitted)
+    merged_accounts = _autopilot_accounts(merged)
+    if merged_accounts is None:
+        return merged
+
+    for item in merged_accounts:
+        if not isinstance(item, dict):
+            continue
+        profile_id = item.get("profile_id")
+        key = profile_id.strip().casefold() if isinstance(profile_id, str) else ""
+        item["authorization_generation"] = copy.deepcopy(generations.get(key))
+    return merged
+
+
+def _autopilot_accounts(config: Any) -> list[Any] | None:
+    if not isinstance(config, dict):
+        return None
+    sources = config.get("sources")
+    if not isinstance(sources, dict):
+        return None
+    hh = sources.get("hh")
+    if not isinstance(hh, dict):
+        return None
+    autopilot = hh.get("autopilot")
+    if not isinstance(autopilot, dict):
+        return None
+    accounts = autopilot.get("accounts")
+    return accounts if isinstance(accounts, list) else None
 
 
 def clear_config_secret_value(
