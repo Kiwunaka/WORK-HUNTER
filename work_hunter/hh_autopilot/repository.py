@@ -34,6 +34,8 @@ TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "interrupted", "cancel
 APPLICATION_SCOPE = "applications"
 CONTROL_SCOPE_TYPES = frozenset({"global", "account"})
 GLOBAL_CONTROL_SCOPE_ID = "global"
+LEASE_TOMBSTONE_OWNER = ""
+LEASE_TOMBSTONE_EXPIRY = "0001-01-01T00:00:00+00:00"
 ACTIVE_QUOTA_STATES = (
     QuotaReservationState.RESERVED.value,
     QuotaReservationState.HELD.value,
@@ -333,6 +335,18 @@ def _integer(value: Any, *, field: str, minimum: int = 0) -> int:
     return value
 
 
+def _persisted_integer(
+    value: Any,
+    *,
+    field: str,
+    minimum: int = 0,
+    error_type: type[RuntimeError] = StaleWrite,
+) -> int:
+    if type(value) is not int or value < minimum:
+        raise error_type(f"{field} is not a valid persisted integer")
+    return value
+
+
 def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
     lastrowid = cursor.lastrowid
     if lastrowid is None:
@@ -428,6 +442,20 @@ def _stored_lease_expiry(value: Any, *, account_id: str) -> datetime:
         return _instant(str(value), field="lease expiry")
     except (TypeError, ValueError) as exc:
         raise LostLease(f"account {account_id} lease expiry is invalid") from exc
+
+
+def _stored_lease_owner(value: Any, *, account_id: str) -> str:
+    if type(value) is not str:
+        raise LostLease(f"account {account_id} lease owner is invalid")
+    if value == LEASE_TOMBSTONE_OWNER:
+        return value
+    try:
+        normalized = _required_text(value, field="lease owner")
+    except (TypeError, ValueError) as exc:
+        raise LostLease(f"account {account_id} lease owner is invalid") from exc
+    if normalized != value:
+        raise LostLease(f"account {account_id} lease owner is invalid")
+    return value
 
 
 def _stored_fencing_token(value: Any, *, account_id: str) -> int:
@@ -1681,14 +1709,24 @@ class AutopilotRepository:
                 fencing_token = 1
                 expires_at = requested_expiry
             else:
+                current_owner = _stored_lease_owner(
+                    row["owner_token"], account_id=account_id
+                )
                 current_expiry = _stored_lease_expiry(
                     row["expires_at"], account_id=account_id
                 )
                 current_token = _stored_fencing_token(
                     row["fencing_token"], account_id=account_id
                 )
-                if current_expiry > instant:
-                    if str(row["owner_token"]) != owner_token:
+                if current_owner == LEASE_TOMBSTONE_OWNER:
+                    if row["expires_at"] != LEASE_TOMBSTONE_EXPIRY:
+                        raise LostLease(
+                            f"account {account_id} lease tombstone is invalid"
+                        )
+                    fencing_token = current_token + 1
+                    expires_at = requested_expiry
+                elif current_expiry > instant:
+                    if current_owner != owner_token:
                         return None
                     fencing_token = current_token
                     expires_at = max(current_expiry, requested_expiry)
@@ -1744,11 +1782,15 @@ class AutopilotRepository:
             current_expiry = _stored_lease_expiry(
                 row["expires_at"], account_id=account_id
             )
+            current_owner = _stored_lease_owner(
+                row["owner_token"], account_id=account_id
+            )
             current_token = _stored_fencing_token(
                 row["fencing_token"], account_id=account_id
             )
             if (
-                str(row["owner_token"]) != owner_token
+                current_owner == LEASE_TOMBSTONE_OWNER
+                or current_owner != owner_token
                 or current_token != fencing_token
                 or current_expiry <= instant
             ):
@@ -1778,11 +1820,19 @@ class AutopilotRepository:
         with self.immediate():
             cursor = self.conn.execute(
                 """
-                DELETE FROM hh_autopilot_leases
+                UPDATE hh_autopilot_leases
+                SET owner_token = ?, expires_at = ?, updated_at = ?
                 WHERE account_profile_id = ? AND owner_token = ?
                   AND fencing_token = ?
                 """,
-                (account_id, owner_token, fencing_token),
+                (
+                    LEASE_TOMBSTONE_OWNER,
+                    LEASE_TOMBSTONE_EXPIRY,
+                    _utc_now(),
+                    account_id,
+                    owner_token,
+                    fencing_token,
+                ),
             )
             return cursor.rowcount == 1
 
@@ -1869,26 +1919,40 @@ class AutopilotRepository:
             raise StaleWrite(f"attempt {attempt_id} does not exist")
         if str(attempt["account_profile_id"]) != account_id:
             raise ValueError("attempt account does not match reservation account")
-        if (
-            attempt["autopilot_run_id"] is None
-            or int(attempt["autopilot_run_id"]) != run_id
-        ):
+        if attempt["autopilot_run_id"] is None:
+            raise ValueError("attempt run does not match reservation run")
+        attempt_run_id = _persisted_integer(
+            attempt["autopilot_run_id"],
+            field="attempt autopilot_run_id",
+            minimum=1,
+        )
+        if attempt_run_id != run_id:
             raise ValueError("attempt run does not match reservation run")
         if attempt["autopilot_item_id"] is None:
             raise ValueError("attempt item is required for dispatch reservation")
+        attempt_item_id = _persisted_integer(
+            attempt["autopilot_item_id"],
+            field="attempt autopilot_item_id",
+            minimum=1,
+        )
         item_row = self.conn.execute(
             """
             SELECT account_profile_id, last_run_id
             FROM hh_autopilot_items
             WHERE id = ?
             """,
-            (int(attempt["autopilot_item_id"]),),
+            (attempt_item_id,),
         ).fetchone()
         if item_row is None:
             raise StaleWrite("attempt item does not exist")
         if str(item_row["account_profile_id"]) != account_id:
             raise ValueError("attempt item account does not match reservation")
-        if int(item_row["last_run_id"]) != run_id:
+        item_last_run_id = _persisted_integer(
+            item_row["last_run_id"],
+            field="item last_run_id",
+            minimum=1,
+        )
+        if item_last_run_id != run_id:
             raise ValueError("attempt item run does not match reservation")
 
         existing_row = self.conn.execute(
@@ -2008,6 +2072,191 @@ class AutopilotRepository:
             now=now,
         )
 
+    def adopt_reservation_for_recovery(
+        self,
+        reservation_id: int,
+        recovery_run_id: int,
+        fencing_token: int,
+        *,
+        expected_fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> QuotaReservationRecord:
+        reservation_id = _integer(reservation_id, field="reservation_id", minimum=1)
+        recovery_run_id = _integer(
+            recovery_run_id,
+            field="recovery_run_id",
+            minimum=1,
+        )
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        expected_fencing_token = _integer(
+            expected_fencing_token,
+            field="expected_fencing_token",
+            minimum=1,
+        )
+        instant = _instant(now, field="now")
+
+        with self.immediate():
+            return self._adopt_reservation_for_recovery_for_update(
+                reservation_id,
+                recovery_run_id,
+                fencing_token,
+                expected_fencing_token=expected_fencing_token,
+                instant=instant,
+            )
+
+    def _adopt_reservation_for_recovery_for_update(
+        self,
+        reservation_id: int,
+        recovery_run_id: int,
+        fencing_token: int,
+        *,
+        expected_fencing_token: int,
+        instant: datetime,
+    ) -> QuotaReservationRecord:
+        """Adopt an unresolved reservation inside the caller's transaction."""
+        current = self._reservation_for_update(reservation_id)
+        self._assert_fence(current.account_id, fencing_token, instant)
+
+        try:
+            recovery_run = self._run_for_update(recovery_run_id)
+        except KeyError as exc:
+            raise StaleWrite(f"recovery run {recovery_run_id} does not exist") from exc
+        if recovery_run.trigger != "recovery":
+            raise StaleWrite(f"run {recovery_run_id} is not a recovery run")
+        if recovery_run.status != "running":
+            raise StaleWrite(f"recovery run {recovery_run_id} is not running")
+        if recovery_run.account_id != current.account_id:
+            raise StaleWrite("recovery run account does not match reservation")
+        if recovery_run.fencing_token != fencing_token:
+            raise LostLease(f"recovery run {recovery_run_id} fencing token is stale")
+
+        if current.source != "dispatch":
+            raise StaleWrite("only dispatch reservations can be adopted")
+        if current.state not in {
+            QuotaReservationState.RESERVED,
+            QuotaReservationState.HELD,
+        }:
+            raise StaleWrite(f"reservation {reservation_id} is already resolved")
+        if current.attempt_id is None or current.run_id is None:
+            raise StaleWrite("reservation attempt/run provenance is incomplete")
+        is_replay = current.fencing_token == fencing_token
+        if expected_fencing_token >= fencing_token:
+            raise StaleWrite("expected fencing token must be lower than current token")
+        if not is_replay and current.fencing_token != expected_fencing_token:
+            raise StaleWrite("reservation fencing token changed from expected value")
+
+        try:
+            original_run = self._run_for_update(current.run_id)
+        except KeyError as exc:
+            raise StaleWrite(
+                f"reservation run {current.run_id} does not exist"
+            ) from exc
+        if original_run.account_id != current.account_id:
+            raise StaleWrite("reservation run account does not match reservation")
+        if original_run.fencing_token < 1:
+            raise LostLease(
+                f"reservation run {current.run_id} fencing token is invalid"
+            )
+        if original_run.fencing_token > expected_fencing_token:
+            raise StaleWrite("reservation run is newer than expected fencing token")
+
+        attempt = self.conn.execute(
+            """
+            SELECT account_profile_id, autopilot_run_id, autopilot_item_id
+            FROM hh_application_attempts
+            WHERE id = ?
+            """,
+            (current.attempt_id,),
+        ).fetchone()
+        if attempt is None:
+            raise StaleWrite(f"attempt {current.attempt_id} does not exist")
+        if str(attempt["account_profile_id"]) != current.account_id:
+            raise StaleWrite("attempt account does not match reservation")
+        attempt_run_id = _persisted_integer(
+            attempt["autopilot_run_id"],
+            field="attempt autopilot_run_id",
+            minimum=1,
+        )
+        if attempt_run_id != current.run_id:
+            raise StaleWrite("attempt run does not match reservation")
+        attempt_item_id = _persisted_integer(
+            attempt["autopilot_item_id"],
+            field="attempt autopilot_item_id",
+            minimum=1,
+        )
+
+        item = self.conn.execute(
+            """
+            SELECT account_profile_id, last_run_id, active_attempt_id, state
+            FROM hh_autopilot_items
+            WHERE id = ?
+            """,
+            (attempt_item_id,),
+        ).fetchone()
+        if item is None:
+            raise StaleWrite(f"item {attempt_item_id} does not exist")
+        if str(item["account_profile_id"]) != current.account_id:
+            raise StaleWrite("item account does not match reservation")
+        item_active_attempt_id = _persisted_integer(
+            item["active_attempt_id"],
+            field="item active_attempt_id",
+            minimum=1,
+        )
+        if item_active_attempt_id != current.attempt_id:
+            raise StaleWrite("item active attempt does not match reservation")
+        item_last_run_id = _persisted_integer(
+            item["last_run_id"],
+            field="item last_run_id",
+            minimum=1,
+        )
+        item_state = str(item["state"])
+        if item_state == AutopilotState.APPLYING.value:
+            if item_last_run_id != current.run_id:
+                raise StaleWrite("applying item does not belong to reservation run")
+        elif item_state == AutopilotState.RECONCILING.value:
+            if item_last_run_id == current.run_id:
+                pass
+            elif item_last_run_id == recovery_run_id:
+                pass
+            else:
+                try:
+                    previous_recovery_run = self._run_for_update(item_last_run_id)
+                except KeyError as exc:
+                    raise StaleWrite(
+                        f"item recovery run {item_last_run_id} does not exist"
+                    ) from exc
+                if (
+                    previous_recovery_run.account_id != current.account_id
+                    or previous_recovery_run.trigger != "recovery"
+                    or previous_recovery_run.fencing_token < 1
+                    or previous_recovery_run.fencing_token > expected_fencing_token
+                ):
+                    raise StaleWrite(
+                        "item previous recovery run does not match expected fence"
+                    )
+        else:
+            raise StaleWrite("item is not applying or reconciling")
+
+        if is_replay:
+            return current
+
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_quota_reservations
+            SET fencing_token = ?
+            WHERE id = ? AND fencing_token = ? AND state = ?
+            """,
+            (
+                fencing_token,
+                reservation_id,
+                expected_fencing_token,
+                current.state.value,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite(f"reservation {reservation_id} adoption CAS failed")
+        return self._reservation_for_update(reservation_id)
+
     def sync_external_quota(
         self,
         account_id: str,
@@ -2049,13 +2298,31 @@ class AutopilotRepository:
                     or existing.state is not QuotaReservationState.CONSUMED
                 ):
                     raise StaleWrite("remote negotiation has a contradictory quota row")
-                if existing.source == "external_sync" and (
-                    existing.timezone != timezone_name
-                    or existing.local_date != local_date
-                ):
-                    raise StaleWrite(
-                        "remote negotiation replay changed timezone or local date"
-                    )
+                if existing.source == "external_sync":
+                    if (
+                        existing.timezone != timezone_name
+                        or existing.local_date != local_date
+                    ):
+                        raise StaleWrite(
+                            "remote negotiation replay changed timezone or local date"
+                        )
+                    try:
+                        created_at = _instant(
+                            existing.created_at,
+                            field="external quota created_at",
+                        )
+                        resolved_at = _instant(
+                            existing.resolved_at,
+                            field="external quota resolved_at",
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise StaleWrite(
+                            "remote negotiation occurrence timestamp is invalid"
+                        ) from exc
+                    if created_at != occurred or resolved_at != occurred:
+                        raise StaleWrite(
+                            "remote negotiation replay changed occurrence instant"
+                        )
                 return existing
 
             cursor = self.conn.execute(
@@ -2161,7 +2428,14 @@ class AutopilotRepository:
             "SELECT * FROM hh_autopilot_leases WHERE account_profile_id = ?",
             (account_id,),
         ).fetchone()
-        return self._lease_from_row(row) if row is not None else None
+        if row is None:
+            return None
+        owner_token = _stored_lease_owner(row["owner_token"], account_id=account_id)
+        if owner_token == LEASE_TOMBSTONE_OWNER:
+            if row["expires_at"] != LEASE_TOMBSTONE_EXPIRY:
+                raise LostLease(f"account {account_id} lease tombstone is invalid")
+            return None
+        return self._lease_from_row(row)
 
     def get_challenge(self, challenge_id: int) -> ChallengeRecord | None:
         challenge_id = _integer(challenge_id, field="challenge_id", minimum=1)
@@ -2349,7 +2623,7 @@ class AutopilotRepository:
     ) -> None:
         row = self.conn.execute(
             """
-            SELECT fencing_token, expires_at
+            SELECT owner_token, fencing_token, expires_at
             FROM hh_autopilot_leases
             WHERE account_profile_id = ?
             """,
@@ -2362,6 +2636,9 @@ class AutopilotRepository:
         )
         if stored_token != fencing_token:
             raise LostLease(f"account {account_id} lease was lost")
+        stored_owner = _stored_lease_owner(row["owner_token"], account_id=account_id)
+        if stored_owner == LEASE_TOMBSTONE_OWNER:
+            raise LostLease(f"account {account_id} lease was released")
         expires_at = _stored_lease_expiry(row["expires_at"], account_id=account_id)
         if expires_at <= instant:
             raise LostLease(f"account {account_id} lease expired")
@@ -2436,7 +2713,11 @@ class AutopilotRepository:
             status=status,
             grant_id=None if row["grant_id"] is None else int(row["grant_id"]),
             policy_hash=str(row["policy_hash"]),
-            fencing_token=int(row["fencing_token"]),
+            fencing_token=_persisted_integer(
+                row["fencing_token"],
+                field="run fencing_token",
+                error_type=LostLease,
+            ),
             counters=_json_loads(row["counters_json"], field="counters_json"),
             error=str(row["error"]),
             started_at=str(row["started_at"]),
@@ -2449,7 +2730,11 @@ class AutopilotRepository:
         return ItemRecord(
             id=int(row["id"]),
             origin_run_id=int(row["origin_run_id"]),
-            last_run_id=int(row["last_run_id"]),
+            last_run_id=_persisted_integer(
+                row["last_run_id"],
+                field="item last_run_id",
+                minimum=1,
+            ),
             account_id=str(row["account_profile_id"]),
             vacancy_id=str(row["vacancy_id"]),
             resume_id=str(row["resume_id"]),
@@ -2459,7 +2744,11 @@ class AutopilotRepository:
             active_attempt_id=(
                 None
                 if row["active_attempt_id"] is None
-                else int(row["active_attempt_id"])
+                else _persisted_integer(
+                    row["active_attempt_id"],
+                    field="item active_attempt_id",
+                    minimum=1,
+                )
             ),
         )
 
@@ -2480,8 +2769,24 @@ class AutopilotRepository:
             raise ValueError(f"invalid quota reservation source: {source}")
         return QuotaReservationRecord(
             id=int(row["id"]),
-            attempt_id=(None if row["attempt_id"] is None else int(row["attempt_id"])),
-            run_id=None if row["run_id"] is None else int(row["run_id"]),
+            attempt_id=(
+                None
+                if row["attempt_id"] is None
+                else _persisted_integer(
+                    row["attempt_id"],
+                    field="reservation attempt_id",
+                    minimum=1,
+                )
+            ),
+            run_id=(
+                None
+                if row["run_id"] is None
+                else _persisted_integer(
+                    row["run_id"],
+                    field="reservation run_id",
+                    minimum=1,
+                )
+            ),
             source=source,
             remote_negotiation_id=(
                 None
@@ -2492,7 +2797,11 @@ class AutopilotRepository:
             timezone=str(row["timezone"]),
             local_date=str(row["local_date"]),
             state=QuotaReservationState(str(row["state"])),
-            fencing_token=int(row["fencing_token"]),
+            fencing_token=_persisted_integer(
+                row["fencing_token"],
+                field="reservation fencing_token",
+                minimum=1,
+            ),
             created_at=str(row["created_at"]),
             resolved_at=str(row["resolved_at"]),
         )

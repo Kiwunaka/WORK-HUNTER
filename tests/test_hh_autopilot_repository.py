@@ -2281,3 +2281,762 @@ def test_task9_primitives_compose_without_nested_begin_and_roll_back(repo) -> No
     ]
     assert repo.get_reservation(1) is None
     assert repo.get_account_state("default") is None
+
+
+def test_release_tombstone_preserves_fence_high_water_and_public_absence(repo) -> None:
+    first = repo.acquire_lease("default", "same-owner", ttl_seconds=60, now=LEASE_START)
+    assert first is not None
+
+    assert repo.release_lease(first) is True
+    assert repo.get_lease("default") is None
+    tombstone = repo.conn.execute(
+        "SELECT * FROM hh_autopilot_leases WHERE account_profile_id = 'default'"
+    ).fetchone()
+    assert tombstone is not None
+    assert tombstone["owner_token"] == ""
+    assert tombstone["fencing_token"] == first.fencing_token
+    assert tombstone["expires_at"] == "0001-01-01T00:00:00+00:00"
+
+    reacquired = repo.acquire_lease(
+        "default", "same-owner", ttl_seconds=60, now=LEASE_START
+    )
+    assert reacquired is not None
+    assert reacquired.fencing_token == first.fencing_token + 1
+    assert repo.release_lease(first) is False
+    assert repo.get_lease("default") == reacquired
+
+
+def test_release_tombstone_rejects_historical_fence_and_old_protected_write(
+    repo,
+) -> None:
+    first, run, _item, attempt_id = _dispatch_context(repo)
+    assert repo.release_lease(first) is True
+    with pytest.raises(LostLease):
+        repo.assert_fence(
+            "default",
+            first.fencing_token,
+            now=datetime.min.replace(tzinfo=UTC),
+        )
+
+    reacquired = repo.acquire_lease(
+        "default", "new-owner", ttl_seconds=120, now=LEASE_START
+    )
+    assert reacquired is not None
+    with pytest.raises(LostLease):
+        repo.reserve_quota(
+            "default",
+            run.id,
+            attempt_id,
+            "UTC",
+            10,
+            10,
+            first.fencing_token,
+            now=LEASE_START,
+        )
+    assert (
+        repo.conn.execute(
+            "SELECT COUNT(*) FROM hh_autopilot_quota_reservations"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def _lease_release_worker(
+    database_path: Any,
+    barrier: Barrier,
+    lease: LeaseRecord,
+) -> bool:
+    storage = Storage(database_path)
+    worker_repo = AutopilotRepository(storage)
+    try:
+        barrier.wait()
+        return worker_repo.release_lease(lease)
+    finally:
+        storage.close()
+
+
+def test_concurrent_exact_release_has_one_winner_and_keeps_high_water(repo) -> None:
+    lease = repo.acquire_lease("default", "owner", ttl_seconds=60, now=LEASE_START)
+    assert lease is not None
+    barrier = Barrier(2)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = [
+            future.result()
+            for future in [
+                pool.submit(
+                    _lease_release_worker,
+                    repo.storage.path,
+                    barrier,
+                    lease,
+                )
+                for _ in range(2)
+            ]
+        ]
+
+    assert sorted(outcomes) == [False, True]
+    assert repo.get_lease("default") is None
+    next_lease = repo.acquire_lease("default", "owner", ttl_seconds=60, now=LEASE_START)
+    assert next_lease is not None
+    assert next_lease.fencing_token == lease.fencing_token + 1
+
+
+def _recovery_adoption_context(
+    repo: AutopilotRepository,
+    *,
+    reservation_state: str,
+) -> tuple[Any, Any, RunRecord, ItemRecord, int, Any]:
+    old_lease, old_run, item, attempt_id = _dispatch_context(repo)
+    before_takeover = LEASE_START + timedelta(seconds=1)
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_items
+        SET state = 'applying', active_attempt_id = ?
+        WHERE id = ?
+        """,
+        (attempt_id, item.id),
+    )
+    repo.conn.commit()
+    reservation = repo.reserve_quota(
+        "default",
+        old_run.id,
+        attempt_id,
+        "UTC",
+        10,
+        10,
+        old_lease.fencing_token,
+        now=before_takeover,
+    )
+    if reservation_state == "held":
+        reservation = repo.hold_reservation(
+            reservation.id,
+            old_lease.fencing_token,
+            now=before_takeover,
+        )
+    else:
+        assert reservation_state == "reserved"
+
+    takeover_at = LEASE_START + timedelta(seconds=120)
+    current_lease = repo.acquire_lease(
+        "default",
+        "recovery-owner",
+        ttl_seconds=120,
+        now=takeover_at,
+    )
+    assert current_lease is not None
+    recovery_run = repo.create_run(
+        "default",
+        trigger="recovery",
+        policy_hash="policy-hash",
+        fencing_token=current_lease.fencing_token,
+    )
+    if reservation_state == "held":
+        repo.conn.execute(
+            """
+            UPDATE hh_autopilot_items
+            SET state = 'reconciling', last_run_id = ?
+            WHERE id = ?
+            """,
+            (recovery_run.id, item.id),
+        )
+        repo.conn.commit()
+    return (
+        old_lease,
+        current_lease,
+        recovery_run,
+        item,
+        attempt_id,
+        reservation,
+    )
+
+
+def test_recovery_adopts_reserved_applying_then_normal_cas_resolves(repo) -> None:
+    old, current, recovery_run, _item, _attempt_id, reservation = (
+        _recovery_adoption_context(repo, reservation_state="reserved")
+    )
+    now = LEASE_START + timedelta(seconds=120)
+
+    adopted = repo.adopt_reservation_for_recovery(
+        reservation.id,
+        recovery_run.id,
+        current.fencing_token,
+        expected_fencing_token=old.fencing_token,
+        now=now,
+    )
+    replay = repo.adopt_reservation_for_recovery(
+        reservation.id,
+        recovery_run.id,
+        current.fencing_token,
+        expected_fencing_token=old.fencing_token,
+        now=now,
+    )
+
+    assert replay == adopted
+    assert adopted.state is autopilot_types.QuotaReservationState.RESERVED
+    assert adopted.fencing_token == current.fencing_token
+    held = repo.hold_reservation(
+        adopted.id,
+        current.fencing_token,
+        now=now,
+    )
+    assert held.state is autopilot_types.QuotaReservationState.HELD
+
+
+def test_recovery_primitive_adopts_held_reconciling_then_release_resolves(repo) -> None:
+    old, current, recovery_run, _item, _attempt_id, reservation = (
+        _recovery_adoption_context(repo, reservation_state="held")
+    )
+    now = LEASE_START + timedelta(seconds=120)
+
+    with repo.immediate():
+        adopted = repo._adopt_reservation_for_recovery_for_update(
+            reservation.id,
+            recovery_run.id,
+            current.fencing_token,
+            expected_fencing_token=old.fencing_token,
+            instant=now,
+        )
+
+    assert adopted.state is autopilot_types.QuotaReservationState.HELD
+    assert adopted.fencing_token == current.fencing_token
+    released = repo.release_reservation(
+        adopted.id,
+        current.fencing_token,
+        now=now,
+    )
+    assert released.state is autopilot_types.QuotaReservationState.RELEASED
+
+
+def test_recovery_adopts_held_reconciling_with_original_dispatch_last_run(repo) -> None:
+    old_lease, old_run, item, attempt_id = _dispatch_context(repo)
+    before_takeover = LEASE_START + timedelta(seconds=1)
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_items
+        SET state = 'applying', active_attempt_id = ?
+        WHERE id = ?
+        """,
+        (attempt_id, item.id),
+    )
+    repo.conn.commit()
+    reservation = repo.reserve_quota(
+        "default",
+        old_run.id,
+        attempt_id,
+        "UTC",
+        10,
+        10,
+        old_lease.fencing_token,
+        now=before_takeover,
+    )
+    reservation = repo.hold_reservation(
+        reservation.id,
+        old_lease.fencing_token,
+        now=before_takeover,
+    )
+    repo.conn.execute(
+        "UPDATE hh_autopilot_items SET state = 'reconciling' WHERE id = ?",
+        (item.id,),
+    )
+    repo.conn.commit()
+    assert repo.get_item(item.id).last_run_id == old_run.id
+
+    takeover_at = LEASE_START + timedelta(seconds=120)
+    current_lease = repo.acquire_lease(
+        "default",
+        "recovery-owner",
+        ttl_seconds=120,
+        now=takeover_at,
+    )
+    assert current_lease is not None
+    recovery_run = repo.create_run(
+        "default",
+        trigger="recovery",
+        policy_hash="policy-hash",
+        fencing_token=current_lease.fencing_token,
+    )
+
+    adopted = repo.adopt_reservation_for_recovery(
+        reservation.id,
+        recovery_run.id,
+        current_lease.fencing_token,
+        expected_fencing_token=old_lease.fencing_token,
+        now=takeover_at,
+    )
+
+    assert adopted.state is autopilot_types.QuotaReservationState.HELD
+    assert adopted.fencing_token == current_lease.fencing_token
+    assert repo.get_item(item.id).last_run_id == old_run.id
+
+
+def test_recovery_adoption_supports_repeated_takeovers_without_item_rewrite(
+    repo,
+) -> None:
+    old, current, recovery_run, item, _attempt_id, reservation = (
+        _recovery_adoption_context(repo, reservation_state="held")
+    )
+    first_takeover_at = LEASE_START + timedelta(seconds=120)
+    adopted = repo.adopt_reservation_for_recovery(
+        reservation.id,
+        recovery_run.id,
+        current.fencing_token,
+        expected_fencing_token=old.fencing_token,
+        now=first_takeover_at,
+    )
+    repo.finish_run(recovery_run.id, status="interrupted")
+
+    previous_lease = current
+    for takeover_index, elapsed_seconds in enumerate((300, 480), start=2):
+        takeover_at = LEASE_START + timedelta(seconds=elapsed_seconds)
+        next_lease = repo.acquire_lease(
+            "default",
+            f"recovery-owner-{takeover_index}",
+            ttl_seconds=120,
+            now=takeover_at,
+        )
+        assert next_lease is not None
+        assert next_lease.fencing_token == previous_lease.fencing_token + 1
+        next_recovery_run = repo.create_run(
+            "default",
+            trigger="recovery",
+            policy_hash="policy-hash",
+            fencing_token=next_lease.fencing_token,
+        )
+
+        adopted = repo.adopt_reservation_for_recovery(
+            adopted.id,
+            next_recovery_run.id,
+            next_lease.fencing_token,
+            expected_fencing_token=previous_lease.fencing_token,
+            now=takeover_at,
+        )
+        repo.finish_run(next_recovery_run.id, status="interrupted")
+        previous_lease = next_lease
+
+    assert adopted.state is autopilot_types.QuotaReservationState.HELD
+    assert adopted.fencing_token == old.fencing_token + 3
+    assert repo.get_item(item.id).last_run_id == recovery_run.id
+
+
+def test_recovery_adoption_rejects_wrong_trigger_status_and_expected_fence(
+    repo,
+) -> None:
+    old, current, recovery_run, _item, _attempt_id, reservation = (
+        _recovery_adoption_context(repo, reservation_state="reserved")
+    )
+    now = LEASE_START + timedelta(seconds=120)
+    manual_run = repo.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="hash",
+        fencing_token=current.fencing_token,
+    )
+
+    with pytest.raises(StaleWrite, match="recovery"):
+        repo.adopt_reservation_for_recovery(
+            reservation.id,
+            manual_run.id,
+            current.fencing_token,
+            expected_fencing_token=old.fencing_token,
+            now=now,
+        )
+    repo.finish_run(recovery_run.id, status="completed")
+    with pytest.raises(StaleWrite, match="running"):
+        repo.adopt_reservation_for_recovery(
+            reservation.id,
+            recovery_run.id,
+            current.fencing_token,
+            expected_fencing_token=old.fencing_token,
+            now=now,
+        )
+    next_recovery_run = repo.create_run(
+        "default",
+        trigger="recovery",
+        policy_hash="hash",
+        fencing_token=current.fencing_token,
+    )
+    with pytest.raises(StaleWrite, match="expected"):
+        repo.adopt_reservation_for_recovery(
+            reservation.id,
+            next_recovery_run.id,
+            current.fencing_token,
+            expected_fencing_token=current.fencing_token + 10,
+            now=now,
+        )
+    assert repo.get_reservation(reservation.id).fencing_token == old.fencing_token
+
+
+def test_recovery_adoption_rolls_back_on_fence_cas_trigger(repo) -> None:
+    old, current, recovery_run, _item, _attempt_id, reservation = (
+        _recovery_adoption_context(repo, reservation_state="held")
+    )
+    repo.conn.execute(
+        f"""
+        CREATE TRIGGER abort_reservation_adoption
+        BEFORE UPDATE ON hh_autopilot_quota_reservations
+        WHEN NEW.fencing_token = {current.fencing_token}
+        BEGIN
+            SELECT RAISE(ABORT, 'adoption rejected');
+        END
+        """
+    )
+    repo.conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="adoption rejected"):
+        repo.adopt_reservation_for_recovery(
+            reservation.id,
+            recovery_run.id,
+            current.fencing_token,
+            expected_fencing_token=old.fencing_token,
+            now=LEASE_START + timedelta(seconds=120),
+        )
+    row = repo.conn.execute(
+        "SELECT fencing_token, state FROM hh_autopilot_quota_reservations WHERE id = ?",
+        (reservation.id,),
+    ).fetchone()
+    assert row["fencing_token"] == old.fencing_token
+    assert row["state"] == "held"
+
+
+def test_recovery_adoption_validates_every_input_before_begin(repo) -> None:
+    old, current, recovery_run, _item, _attempt_id, reservation = (
+        _recovery_adoption_context(repo, reservation_state="reserved")
+    )
+    valid = (
+        reservation.id,
+        recovery_run.id,
+        current.fencing_token,
+        old.fencing_token,
+    )
+    invalid_calls = [
+        lambda: repo.adopt_reservation_for_recovery(
+            True, valid[1], valid[2], expected_fencing_token=valid[3]
+        ),
+        lambda: repo.adopt_reservation_for_recovery(
+            valid[0], True, valid[2], expected_fencing_token=valid[3]
+        ),
+        lambda: repo.adopt_reservation_for_recovery(
+            valid[0], valid[1], True, expected_fencing_token=valid[3]
+        ),
+        lambda: repo.adopt_reservation_for_recovery(
+            valid[0], valid[1], valid[2], expected_fencing_token=True
+        ),
+        lambda: repo.adopt_reservation_for_recovery(
+            valid[0],
+            valid[1],
+            valid[2],
+            expected_fencing_token=valid[3],
+            now=LEASE_START.replace(tzinfo=None),
+        ),
+    ]
+    for invalid_call in invalid_calls:
+        statements: list[str] = []
+        repo.conn.set_trace_callback(statements.append)
+        try:
+            with pytest.raises((TypeError, ValueError)):
+                invalid_call()
+        finally:
+            repo.conn.set_trace_callback(None)
+        assert not any(statement.startswith("BEGIN") for statement in statements)
+
+
+def _unsafe_real_update(
+    repo: AutopilotRepository,
+    statement: str,
+    parameters: tuple[Any, ...],
+) -> None:
+    repo.conn.commit()
+    repo.conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        repo.conn.execute(statement, parameters)
+        repo.conn.commit()
+    finally:
+        repo.conn.execute("PRAGMA foreign_keys = ON")
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_error"),
+    [
+        ("run_fence", LostLease),
+        ("attempt_run", StaleWrite),
+        ("attempt_item", StaleWrite),
+        ("item_last_run", StaleWrite),
+    ],
+)
+def test_reserve_rejects_lossy_real_provenance_without_mutation(
+    repo,
+    corruption,
+    expected_error,
+) -> None:
+    lease, run, item, attempt_id = _dispatch_context(repo)
+    if corruption == "run_fence":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_runs SET fencing_token = 1.5 WHERE id = ?",
+            (run.id,),
+        )
+        repo.conn.commit()
+    elif corruption == "attempt_run":
+        repo.conn.execute(
+            "UPDATE hh_application_attempts SET autopilot_run_id = 1.5 WHERE id = ?",
+            (attempt_id,),
+        )
+        repo.conn.commit()
+    elif corruption == "attempt_item":
+        repo.conn.execute(
+            "UPDATE hh_application_attempts SET autopilot_item_id = 1.5 WHERE id = ?",
+            (attempt_id,),
+        )
+        repo.conn.commit()
+    else:
+        _unsafe_real_update(
+            repo,
+            "UPDATE hh_autopilot_items SET last_run_id = 1.5 WHERE id = ?",
+            (item.id,),
+        )
+
+    with pytest.raises(expected_error):
+        repo.reserve_quota(
+            "default",
+            run.id,
+            attempt_id,
+            "UTC",
+            10,
+            10,
+            lease.fencing_token,
+            now=LEASE_START + timedelta(seconds=1),
+        )
+    assert (
+        repo.conn.execute(
+            "SELECT COUNT(*) FROM hh_autopilot_quota_reservations"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_reservation_cas_rejects_real_fence_before_update(repo) -> None:
+    lease, run, _item, attempt_id = _dispatch_context(repo)
+    reservation = repo.reserve_quota(
+        "default",
+        run.id,
+        attempt_id,
+        "UTC",
+        10,
+        10,
+        lease.fencing_token,
+        now=LEASE_START + timedelta(seconds=1),
+    )
+    repo.conn.execute(
+        "UPDATE hh_autopilot_quota_reservations SET fencing_token = 1.5 WHERE id = ?",
+        (reservation.id,),
+    )
+    repo.conn.commit()
+    statements: list[str] = []
+    repo.conn.set_trace_callback(statements.append)
+    try:
+        with pytest.raises(StaleWrite, match="fencing"):
+            repo.hold_reservation(
+                reservation.id,
+                lease.fencing_token,
+                now=LEASE_START + timedelta(seconds=1),
+            )
+    finally:
+        repo.conn.set_trace_callback(None)
+
+    assert not any(
+        "UPDATE hh_autopilot_quota_reservations" in statement
+        for statement in statements
+    )
+    row = repo.conn.execute(
+        "SELECT state, fencing_token FROM hh_autopilot_quota_reservations WHERE id = ?",
+        (reservation.id,),
+    ).fetchone()
+    assert row["state"] == "reserved"
+    assert row["fencing_token"] == 1.5
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "reservation_attempt_null",
+        "reservation_run_real",
+        "reservation_fence_real",
+        "attempt_account",
+        "attempt_run_real",
+        "attempt_item_real",
+        "item_active_real",
+        "item_state_ready",
+    ],
+)
+def test_recovery_adoption_rejects_wrong_or_lossy_provenance(repo, corruption) -> None:
+    old, current, recovery_run, item, attempt_id, reservation = (
+        _recovery_adoption_context(repo, reservation_state="held")
+    )
+    expected_stored_fence: int | float = old.fencing_token
+    if corruption == "reservation_attempt_null":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_quota_reservations SET attempt_id = NULL WHERE id = ?",
+            (reservation.id,),
+        )
+        repo.conn.commit()
+    elif corruption == "reservation_run_real":
+        _unsafe_real_update(
+            repo,
+            "UPDATE hh_autopilot_quota_reservations SET run_id = 1.5 WHERE id = ?",
+            (reservation.id,),
+        )
+    elif corruption == "reservation_fence_real":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_quota_reservations SET fencing_token = 1.5 WHERE id = ?",
+            (reservation.id,),
+        )
+        repo.conn.commit()
+        expected_stored_fence = 1.5
+    elif corruption == "attempt_account":
+        repo.conn.execute(
+            "UPDATE hh_application_attempts SET account_profile_id = 'other' WHERE id = ?",
+            (attempt_id,),
+        )
+        repo.conn.commit()
+    elif corruption == "attempt_run_real":
+        repo.conn.execute(
+            "UPDATE hh_application_attempts SET autopilot_run_id = 1.5 WHERE id = ?",
+            (attempt_id,),
+        )
+        repo.conn.commit()
+    elif corruption == "attempt_item_real":
+        repo.conn.execute(
+            "UPDATE hh_application_attempts SET autopilot_item_id = 1.5 WHERE id = ?",
+            (attempt_id,),
+        )
+        repo.conn.commit()
+    elif corruption == "item_active_real":
+        _unsafe_real_update(
+            repo,
+            "UPDATE hh_autopilot_items SET active_attempt_id = 1.5 WHERE id = ?",
+            (item.id,),
+        )
+    else:
+        repo.conn.execute(
+            "UPDATE hh_autopilot_items SET state = 'ready' WHERE id = ?",
+            (item.id,),
+        )
+        repo.conn.commit()
+
+    with pytest.raises(StaleWrite):
+        repo.adopt_reservation_for_recovery(
+            reservation.id,
+            recovery_run.id,
+            current.fencing_token,
+            expected_fencing_token=old.fencing_token,
+            now=LEASE_START + timedelta(seconds=120),
+        )
+    raw = repo.conn.execute(
+        "SELECT fencing_token, state FROM hh_autopilot_quota_reservations WHERE id = ?",
+        (reservation.id,),
+    ).fetchone()
+    assert raw["fencing_token"] == expected_stored_fence
+    assert raw["state"] == "held"
+
+
+def test_external_sync_replay_requires_exact_occurrence_instant(repo) -> None:
+    lease = repo.acquire_lease("default", "owner", ttl_seconds=120, now=LEASE_START)
+    assert lease is not None
+    occurred = LEASE_START + timedelta(seconds=10)
+    first = repo.sync_external_quota(
+        "default",
+        "neg-exact-time",
+        "UTC",
+        lease.fencing_token,
+        occurred_at=occurred,
+        now=LEASE_START,
+    )
+
+    with pytest.raises(StaleWrite, match="occurrence"):
+        repo.sync_external_quota(
+            "default",
+            "neg-exact-time",
+            "UTC",
+            lease.fencing_token,
+            occurred_at=occurred + timedelta(seconds=1),
+            now=LEASE_START,
+        )
+
+    assert repo.get_reservation(first.id) == first
+    assert (
+        repo.conn.execute(
+            "SELECT COUNT(*) FROM hh_autopilot_quota_reservations"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "stored_value"),
+    [
+        ("created_at", "not-a-time"),
+        ("created_at", "2099-01-01T09:00:10"),
+        ("resolved_at", "not-a-time"),
+        ("resolved_at", "2099-01-01T09:00:10"),
+    ],
+)
+def test_external_sync_replay_rejects_malformed_stored_occurrence(
+    repo,
+    column,
+    stored_value,
+) -> None:
+    lease = repo.acquire_lease("default", "owner", ttl_seconds=120, now=LEASE_START)
+    assert lease is not None
+    occurred = LEASE_START + timedelta(seconds=10)
+    reservation = repo.sync_external_quota(
+        "default",
+        "neg-malformed-time",
+        "UTC",
+        lease.fencing_token,
+        occurred_at=occurred,
+        now=LEASE_START,
+    )
+    repo.conn.execute(
+        f"UPDATE hh_autopilot_quota_reservations SET {column} = ? WHERE id = ?",
+        (stored_value, reservation.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises(StaleWrite, match="occurrence"):
+        repo.sync_external_quota(
+            "default",
+            "neg-malformed-time",
+            "UTC",
+            lease.fencing_token,
+            occurred_at=occurred,
+            now=LEASE_START,
+        )
+
+
+def test_dispatch_remote_replay_keeps_occurrence_compatibility(repo) -> None:
+    lease, run, _item, attempt_id = _dispatch_context(repo)
+    reserved = repo.reserve_quota(
+        "default",
+        run.id,
+        attempt_id,
+        "UTC",
+        10,
+        10,
+        lease.fencing_token,
+        now=LEASE_START + timedelta(seconds=1),
+    )
+    consumed = repo.consume_reservation(
+        reserved.id,
+        lease.fencing_token,
+        remote_negotiation_id="neg-dispatch-time",
+        now=LEASE_START + timedelta(seconds=1),
+    )
+
+    replay = repo.sync_external_quota(
+        "default",
+        "neg-dispatch-time",
+        "Europe/Moscow",
+        lease.fencing_token,
+        occurred_at=LEASE_START + timedelta(seconds=50),
+        now=LEASE_START + timedelta(seconds=2),
+    )
+    assert replay == consumed
