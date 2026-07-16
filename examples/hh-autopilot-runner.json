@@ -1,0 +1,6 @@
+{
+  "tasks": [
+    {"task": "hh-autopilot-recover"},
+    {"task": "hh-autopilot-tick"}
+  ]
+}

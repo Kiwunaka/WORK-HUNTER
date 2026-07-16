@@ -54,6 +54,14 @@ class FakeApp:
         self.calls.append(("hh-campaign-plan", kwargs))
         return {"status": "planned", "id": 42, "count": 5}
 
+    def recover_hh_autopilot(self, *, account=None):
+        self.calls.append(("hh-autopilot-recover", {"account": account}))
+        return {"status": "ok"}
+
+    def tick_hh_autopilot(self):
+        self.calls.append(("hh-autopilot-tick", {}))
+        return {"status": "ok"}
+
 
 def test_safe_task_runner_runs_whitelisted_tasks_and_writes_json_report(tmp_path):
     app = FakeApp(tmp_path)
@@ -251,6 +259,29 @@ def test_safe_task_runner_uses_lock_file_to_prevent_overlap(tmp_path):
     assert report["counts"]["blocked"] == 1
     assert report["items"][0]["reason"] == "runner_locked"
     assert app.calls == []
+
+
+def test_autopilot_runner_routes_exact_tasks_and_rejects_extra_parameters(tmp_path):
+    app = FakeApp(tmp_path)
+    runner = SafeTaskRunner(app, root=tmp_path)
+
+    accepted = runner.run(
+        [
+            {"task": "hh-autopilot-recover", "account": "default"},
+            {"task": "hh-autopilot-tick"},
+        ]
+    )
+    rejected = runner.run(
+        [{"task": "hh-autopilot-tick", "confirm": True, "vacancy_id": "v-1"}]
+    )
+
+    assert [item["status"] for item in accepted["items"]] == ["completed", "completed"]
+    assert app.calls == [
+        ("hh-autopilot-recover", {"account": "default"}),
+        ("hh-autopilot-tick", {}),
+    ]
+    assert rejected["items"][0]["status"] == "blocked"
+    assert rejected["items"][0]["reason"] == "invalid_autopilot_task_parameters"
 
 
 def test_scheduler_cli_runs_plan_file_and_outputs_report(monkeypatch, tmp_path, capsys):

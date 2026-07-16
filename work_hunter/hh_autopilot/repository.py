@@ -4083,6 +4083,96 @@ class AutopilotRepository:
         ).fetchone()
         return self._account_state_from_row(row) if row is not None else None
 
+    def last_scheduled_at(self, account_id: str) -> datetime | None:
+        state = self.get_account_state(account_id)
+        if state is None or not state.last_scheduled_at.strip():
+            return None
+        return _instant(state.last_scheduled_at, field="last_scheduled_at")
+
+    def next_scheduled_at(self, account_id: str) -> datetime | None:
+        state = self.get_account_state(account_id)
+        if state is None or not state.next_scheduled_at.strip():
+            return None
+        return _instant(state.next_scheduled_at, field="next_scheduled_at")
+
+    def claim_schedule_slot(
+        self,
+        account_id: str,
+        scheduled_at: datetime | str,
+        next_scheduled_at: datetime | str,
+        *,
+        interval_minutes: int,
+    ) -> bool:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        instant = _instant(scheduled_at, field="scheduled_at")
+        following = _instant(next_scheduled_at, field="next_scheduled_at")
+        interval_minutes = _integer(
+            interval_minutes,
+            field="interval_minutes",
+            minimum=1,
+        )
+        if interval_minutes > 1440:
+            raise ValueError("interval_minutes must be at most 1440")
+        if following <= instant:
+            raise ValueError("next_scheduled_at must be after scheduled_at")
+
+        with self.immediate():
+            try:
+                self._assert_cooldown_for_update(account_id, instant)
+            except CooldownActive:
+                return False
+            lease = self.conn.execute(
+                """
+                SELECT owner_token, expires_at
+                FROM hh_autopilot_leases
+                WHERE account_profile_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            if lease is not None and str(lease["owner_token"]):
+                try:
+                    if _instant(str(lease["expires_at"]), field="lease expires_at") > instant:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+
+            current = self.conn.execute(
+                """
+                SELECT last_scheduled_at
+                FROM hh_autopilot_account_state
+                WHERE account_profile_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            if current is not None and str(current["last_scheduled_at"]).strip():
+                last = _instant(
+                    str(current["last_scheduled_at"]),
+                    field="last_scheduled_at",
+                )
+                if instant < last + timedelta(minutes=interval_minutes):
+                    return False
+
+            self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_account_state (
+                    account_profile_id, last_scheduled_at,
+                    next_scheduled_at, version, updated_at
+                ) VALUES (?, ?, ?, 0, ?)
+                ON CONFLICT(account_profile_id) DO UPDATE SET
+                    last_scheduled_at = excluded.last_scheduled_at,
+                    next_scheduled_at = excluded.next_scheduled_at,
+                    version = hh_autopilot_account_state.version + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    account_id,
+                    instant.isoformat(),
+                    following.isoformat(),
+                    instant.isoformat(),
+                ),
+            )
+            return True
+
     def set_account_cooldown(
         self,
         account_id: str,

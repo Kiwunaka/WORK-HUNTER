@@ -15,6 +15,8 @@ SAFE_TASKS = {
     "hh-refresh-token",
     "hh-update-resumes",
     "hh-campaign-plan",
+    "hh-autopilot-recover",
+    "hh-autopilot-tick",
 }
 
 
@@ -110,6 +112,13 @@ class SafeTaskRunner:
         )
 
     def _run_task(self, task_name: str, task: dict[str, Any]) -> dict[str, Any]:
+        invalid = _invalid_autopilot_parameters(task_name, task)
+        if invalid:
+            return {
+                "task": task_name,
+                "status": "blocked",
+                "reason": "invalid_autopilot_task_parameters",
+            }
         try:
             if task_name == "sync":
                 result = self.app.sync_sources(
@@ -136,6 +145,13 @@ class SafeTaskRunner:
                     ai_filter_mode=str(task.get("ai_filter_mode") or task.get("ai-filter-mode") or "off"),
                     resume_id=task.get("resume_id") or task.get("resume-id"),
                 )
+            elif task_name == "hh-autopilot-recover":
+                if "account" in task:
+                    result = self.app.recover_hh_autopilot(account=task["account"])
+                else:
+                    result = self.app.recover_hh_autopilot()
+            elif task_name == "hh-autopilot-tick":
+                result = self.app.tick_hh_autopilot()
             else:
                 return {"task": task_name, "status": "blocked", "reason": "task_not_safe"}
             safe_result = mask_secrets(result)
@@ -235,6 +251,19 @@ def _command_log_entry(
 
 def _explicit_real(task: dict[str, Any]) -> bool:
     return bool(task.get("confirm") is True or task.get("real") is True or task.get("dry_run") is False)
+
+
+def _invalid_autopilot_parameters(task_name: str, task: dict[str, Any]) -> bool:
+    if task_name == "hh-autopilot-tick":
+        return bool(set(task) - {"task", "name"})
+    if task_name == "hh-autopilot-recover":
+        if set(task) - {"task", "name", "account"}:
+            return True
+        account = task.get("account")
+        return account is not None and (
+            not isinstance(account, str) or not account.strip()
+        )
+    return False
 
 
 def _report_error_summary(report: dict[str, Any]) -> str:
