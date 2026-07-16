@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from work_hunter.models import Job
+from work_hunter.hh_autopilot.types import DeliveryCertainty, DispatchOutcome
 from work_hunter.services import WorkHunter
 
 
@@ -20,7 +21,10 @@ class FakeHHOutcomeClient:
             "relations": {"id": vacancy_id, "relations": ["got_response"]},
             "test": {"id": vacancy_id, "has_test": True},
         }
-        return payloads.get(vacancy_id, {"id": vacancy_id})
+        return payloads.get(
+            vacancy_id,
+            {"id": vacancy_id, "name": "Python", "archived": False, "has_test": False},
+        )
 
     def suitable_resumes(self, vacancy_id: str):
         return [{"id": "resume-1"}]
@@ -30,6 +34,15 @@ class FakeHHOutcomeClient:
 
     def apply(self, vacancy_id: str, resume_id: str, message: str):
         return self.apply_result
+
+    def apply_outcome(self, vacancy_id, resume_id, message, *, timeout_seconds=None):
+        result = self.apply(vacancy_id, resume_id, message)
+        code = "applied" if result.get("status") == "created" else "hh_daily_limit"
+        return DispatchOutcome(
+            code=code,
+            certainty=DeliveryCertainty.DEFINITE_RESPONSE,
+            status_code=result.get("status_code"),
+        )
 
 
 def _save_hh_job(app: WorkHunter, source_id: str, title: str = "Python") -> int:
@@ -90,6 +103,9 @@ def test_confirm_apply_preserves_limit_outcome(monkeypatch, tmp_path):
     }
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
+    app.config["sources"]["hh"]["autopilot"]["ranking"].update(
+        {"minimum_score": 0, "borderline_low": 0, "ai_mode": "off"}
+    )
     job_id = _save_hh_job(app, "ready")
 
     result = app.confirm_apply(job_id, resume_id="resume-1", confirm=True)

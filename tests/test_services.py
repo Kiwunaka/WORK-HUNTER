@@ -1,13 +1,126 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from work_hunter import __version__
 from work_hunter import services as services_module
 from work_hunter.models import Job, JobScore
+from work_hunter.hh_autopilot.types import RunReport
 from work_hunter.services import WorkHunter, _package_details
 from work_hunter.sources import PUBLIC_BOARD_SOURCE_NAMES
+
+
+class _AutopilotProbeRepository:
+    def __init__(self) -> None:
+        self.authorizations: list[dict[str, object]] = []
+
+    def create_one_shot_authorization(self, reference_id, **kwargs) -> None:
+        self.authorizations.append({"reference_id": reference_id, **kwargs})
+
+    def status(self, account_id=None):
+        return {"account": account_id, "quota": {"used": 1}}
+
+    def history(self, account_id=None, vacancy_id=None, limit=100):
+        return {"events": [{"account": account_id, "vacancy_id": vacancy_id, "limit": limit}]}
+
+    def challenges(self, account_id=None, limit=100):
+        return {"challenges": [{"account": account_id, "limit": limit}]}
+
+
+class _AutopilotProbeEngine:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def run(self, request):
+        self.requests.append(request)
+        return RunReport(
+            account_id=request.account_id,
+            trigger=request.trigger,
+            status="completed",
+            run_id=len(self.requests),
+            applied=1,
+        )
+
+
+def _autopilot_probe():
+    repository = _AutopilotProbeRepository()
+    engine = _AutopilotProbeEngine()
+    components = SimpleNamespace(
+        repository=repository,
+        engine=engine,
+        scheduler=SimpleNamespace(tick=lambda: {"runs": []}),
+        recovery=SimpleNamespace(run=lambda account_id=None: {"account": account_id}),
+    )
+    return components
+
+
+def test_hh_autopilot_facade_uses_one_cached_injectable_factory(tmp_path):
+    components = _autopilot_probe()
+    calls = []
+    app = WorkHunter(
+        tmp_path,
+        hh_autopilot_factory=lambda service: calls.append(service) or components,
+    )
+
+    assert app.tick_hh_autopilot() == {"runs": []}
+    assert app.recover_hh_autopilot("default") == {"account": "default"}
+    assert app.hh_autopilot_status("default")["quota"]["used"] == 1
+    assert app.hh_autopilot_history(account="default", vacancy_id="v-1")["events"]
+    assert app.hh_autopilot_challenges(account="default")["challenges"]
+    assert calls == [app]
+
+
+def test_confirm_apply_enters_common_engine_with_exact_literal_target(tmp_path):
+    components = _autopilot_probe()
+    app = WorkHunter(tmp_path, hh_autopilot_factory=lambda _service: components)
+    job_id = app.storage.upsert_job(
+        Job(source="hh", source_id="v-1", url="https://hh.ru/vacancy/v-1", title="Python")
+    )
+    app.prepare_apply_plan = lambda *args, **kwargs: {
+        "status": "ready",
+        "source": "hh",
+        "resume_id": "r-1",
+        "letter": "Hello",
+    }
+
+    result = app.confirm_apply(job_id, resume_id="r-1", account="default", confirm=True)
+
+    request = components.engine.requests[0]
+    authorization = components.repository.authorizations[0]
+    assert (request.account_id, request.resume_id, request.vacancy_id) == ("default", "r-1", "v-1")
+    assert request.authorization.reference_id == authorization["reference_id"]
+    assert authorization["targets"] == (("r-1", "v-1"),)
+    assert result["status"] == "applied"
+    assert result["run_id"] == 1
+
+
+def test_confirm_hh_campaign_freezes_targets_in_one_authorization(tmp_path):
+    components = _autopilot_probe()
+    app = WorkHunter(tmp_path, hh_autopilot_factory=lambda _service: components)
+    run_id = app.storage.create_hh_campaign_run()
+    for index in (1, 2):
+        job_id = app.storage.upsert_job(
+            Job(source="hh", source_id=f"v-{index}", url=f"https://hh.ru/vacancy/v-{index}", title="Python")
+        )
+        app.storage.save_hh_campaign_item(
+            services_module.HHCampaignItem(
+                run_id=run_id,
+                job_id=job_id,
+                vacancy_id=f"v-{index}",
+                resume_id="r-1",
+                letter=f"Letter {index}",
+            )
+        )
+
+    result = app.confirm_hh_campaign(run_id, confirm=True)
+
+    authorization = components.repository.authorizations[0]
+    assert authorization["targets"] == (("r-1", "v-1"), ("r-1", "v-2"))
+    assert len(components.repository.authorizations) == 1
+    assert {request.vacancy_id for request in components.engine.requests} == {"v-1", "v-2"}
+    assert result["counts"]["applied"] == 2
 
 
 class _FakeDistribution:

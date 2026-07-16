@@ -7,6 +7,7 @@ from http.server import ThreadingHTTPServer
 
 from work_hunter.cli import main as cli_main
 from work_hunter.models import Job, JobScore
+from work_hunter.hh_autopilot.types import DeliveryCertainty, DispatchOutcome
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
 
@@ -52,6 +53,8 @@ class FakeHHFoundationClient:
     def get_vacancy(self, vacancy_id: str):
         return {
             "id": vacancy_id,
+            "name": "Python Backend",
+            "archived": False,
             "response_letter_required": vacancy_id == "letter",
             "has_test": vacancy_id == "test",
             "alternate_url": f"https://hh.ru/vacancy/{vacancy_id}",
@@ -65,6 +68,14 @@ class FakeHHFoundationClient:
             "location": f"/negotiations/{vacancy_id}",
             "raw_result": {},
         }
+
+    def apply_outcome(self, vacancy_id, resume_id, message, *, timeout_seconds=None):
+        self.apply(vacancy_id, resume_id, message)
+        return DispatchOutcome(
+            code="applied",
+            certainty=DeliveryCertainty.DEFINITE_RESPONSE,
+            status_code=201,
+        )
 
 
 def _hh_job(app: WorkHunter, source_id: str, title: str, score: int) -> int:
@@ -137,6 +148,9 @@ def test_hh_campaign_confirm_requires_confirmation_and_updates_items(monkeypatch
     FakeHHFoundationClient.apply_calls = []
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
+    app.config["sources"]["hh"]["autopilot"]["ranking"].update(
+        {"minimum_score": 0, "borderline_low": 0, "ai_mode": "off"}
+    )
     _hh_job(app, "good", "Python Backend", 95)
     run = app.plan_hh_campaign(limit=10, min_score=70)
 

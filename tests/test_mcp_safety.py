@@ -38,6 +38,27 @@ def test_mcp_source_enums_include_public_board_sources():
         assert source_name in list_enum
 
 
+def test_mcp_exposes_masked_read_only_autopilot_views(monkeypatch, tmp_path):
+    class ReadOnlyAutopilot:
+        def hh_autopilot_status(self, account=None):
+            return {"account": account, "access_token": "secret"}
+
+        def hh_autopilot_history(self, *, account=None, vacancy_id=None, limit=100):
+            return {"events": [], "account": account, "vacancy_id": vacancy_id, "limit": limit}
+
+        def hh_autopilot_challenges(self, *, account=None, limit=100):
+            return {"challenges": [], "account": account, "limit": limit}
+
+    monkeypatch.setattr(mcp_server, "_root", tmp_path)
+    monkeypatch.setattr(mcp_server, "WorkHunter", lambda _root: ReadOnlyAutopilot())
+
+    names = {tool.name for tool in asyncio.run(mcp_server.list_tools())}
+    assert {"hh_autopilot_status", "hh_autopilot_history", "hh_autopilot_challenges"} <= names
+    assert not names.intersection({"hh_autopilot_enable", "hh_autopilot_run_now", "hh_autopilot_resolve_challenge"})
+    result = asyncio.run(mcp_server.call_tool("hh_autopilot_status", {"account": "default"}))
+    assert json.loads(result[0].text)["access_token"] == "***"
+
+
 def test_mcp_run_strategy_requires_literal_true_confirmation(monkeypatch, tmp_path):
     calls = []
 

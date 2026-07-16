@@ -6,6 +6,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from work_hunter.models import Job
+from work_hunter.hh_autopilot.types import DeliveryCertainty, DispatchOutcome
 from work_hunter.services import WorkHunter
 from work_hunter.cli import main as cli_main
 from work_hunter.web.server import make_handler
@@ -24,13 +25,18 @@ class FakeHHClient:
     def get_vacancy(self, vacancy_id: str):
         return {
             "id": vacancy_id,
+            "name": "Python",
+            "archived": False,
             "response_letter_required": True,
             "has_test": False,
             "alternate_url": f"https://hh.ru/vacancy/{vacancy_id}",
         }
 
     def list_resumes(self):
-        return [{"id": "fallback-resume", "title": "Fallback"}]
+        return [
+            {"id": "resume-1", "title": "Python Backend"},
+            {"id": "fallback-resume", "title": "Fallback"},
+        ]
 
     def suitable_resumes(self, vacancy_id: str):
         return [{"id": "resume-1", "title": "Python Backend"}]
@@ -43,6 +49,14 @@ class FakeHHClient:
             "location": f"/negotiations/{vacancy_id}",
             "raw_result": {},
         }
+
+    def apply_outcome(self, vacancy_id, resume_id, message, *, timeout_seconds=None):
+        self.apply(vacancy_id, resume_id, message)
+        return DispatchOutcome(
+            code="applied",
+            certainty=DeliveryCertainty.DEFINITE_RESPONSE,
+            status_code=201,
+        )
 
 
 def test_prepare_apply_plan_for_hh_uses_exact_vacancy_without_sending(monkeypatch, tmp_path):
@@ -85,6 +99,9 @@ def test_confirm_apply_posts_exact_vacancy_after_confirmation(monkeypatch, tmp_p
     FakeHHClient.apply_calls = []
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
+    app.config["sources"]["hh"]["autopilot"]["ranking"].update(
+        {"minimum_score": 0, "borderline_low": 0, "ai_mode": "off"}
+    )
     job_id = app.storage.upsert_job(
         Job(source="hh", source_id="123", url="https://hh.ru/vacancy/123", title="Python", company="Acme")
     )

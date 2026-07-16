@@ -2,6 +2,8 @@
 
 import copy
 import csv
+from dataclasses import asdict, dataclass, is_dataclass
+import hashlib
 import importlib.metadata
 import importlib.util
 import io
@@ -15,7 +17,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Callable
@@ -1016,14 +1019,292 @@ def _effective_hh_auth_profile_ids(
     return sorted(effective)
 
 
+@dataclass(frozen=True)
+class HHAutopilotComponents:
+    repository: Any
+    engine: Any
+    scheduler: Any
+    recovery: Any
+
+
+def _result_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return copy.deepcopy(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        result = to_dict()
+        if isinstance(result, dict):
+            return result
+    if is_dataclass(value):
+        result = asdict(value)  # type: ignore[arg-type]
+        if isinstance(result, dict):
+            return result
+    raise TypeError("HH autopilot component returned an invalid report")
+
+
+class _ReadOnlyHHNegotiations:
+    def __init__(self, client: HHApplyClient) -> None:
+        self._client = client
+
+    def negotiation_snapshots(self, account_id: str | None = None):
+        return self._client.negotiation_snapshots(account_id)
+
+
+class _StoredHHCoverLetters:
+    def __init__(self, storage: Storage) -> None:
+        self._storage = storage
+
+    def render(self, context: Any) -> str:
+        row = self._storage.conn.execute(
+            "SELECT id FROM jobs WHERE source = 'hh' AND source_id = ?",
+            (context.vacancy_id,),
+        ).fetchone()
+        if row is None:
+            return ""
+        draft = self._storage.get_latest_letter(int(row["id"]))
+        return "" if draft is None else draft.body
+
+
+def _published_hh_resumes(client: HHApplyClient) -> list[dict[str, Any]]:
+    resumes: list[dict[str, Any]] = []
+    for raw in client.list_resumes():
+        if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+            continue
+        status = raw.get("status")
+        if isinstance(status, dict):
+            status = status.get("id") or status.get("value")
+        if status and str(status).strip().casefold() != "published":
+            continue
+        resume = copy.deepcopy(raw)
+        if not any(resume.get(key) for key in ("content_hash", "version_hash", "version")):
+            resume["content_hash"] = hashlib.sha256(
+                json.dumps(resume, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+        resumes.append(resume)
+    return resumes
+
+
+def _hh_policy_material(
+    service: "WorkHunter",
+    config: dict[str, Any],
+    account_id: str,
+    *,
+    resumes: list[dict[str, Any]] | None = None,
+):
+    from .hh_autopilot.config import PolicyMaterial, parse_autopilot_settings
+
+    settings = parse_autopilot_settings(config)
+    account = next(
+        value
+        for value in settings.accounts
+        if value.profile_id.strip().casefold() == account_id.strip().casefold()
+    )
+    profiles = config.get("profiles") or {}
+    candidate = copy.deepcopy(profiles.get(account.candidate_profile_id) or active_profile(config))
+    available = resumes or _published_hh_resumes(service._hh_client_for_account(account.profile_id))
+    return PolicyMaterial(
+        effective_auth_profile_id=account.profile_id,
+        candidate_profile=candidate,
+        candidate_profile_version="config",
+        resumes=available,
+        presets=copy.deepcopy(config.get("hh_campaign_presets") or {}),
+        model_id=str((config.get("ai") or {}).get("model") or ""),
+        cover_letter_template_version="stored",
+        transport_identity={"kind": "hh_api", "account_id": account.profile_id},
+    )
+
+
+def _hh_engine_context(
+    service: "WorkHunter",
+    repository: Any,
+    account_id: str,
+    client: HHApplyClient,
+):
+    from .hh_autopilot.config import parse_autopilot_settings, policy_hash
+    from .hh_autopilot.engine import EngineRunContext, EngineSearchMapping
+
+    config = copy.deepcopy(service.config)
+    settings = parse_autopilot_settings(config)
+    account = next(
+        value
+        for value in settings.accounts
+        if value.profile_id.strip().casefold() == account_id.strip().casefold()
+    )
+    resumes = _published_hh_resumes(client)
+    by_id = {str(value["id"]).strip().casefold(): value for value in resumes}
+    presets = config.get("hh_campaign_presets") or {}
+    mappings: list[EngineSearchMapping] = []
+    for query in account.resume_queries:
+        wanted = str(query["resume_id"]).strip().casefold()
+        selected = resumes if wanted == "published:*" else ([by_id[wanted]] if wanted in by_id else [])
+        names = list(query["preset_names"]) or [""]
+        for resume in selected:
+            for name in names:
+                params = copy.deepcopy(presets.get(name) or {}) if name else {}
+                mappings.append(
+                    EngineSearchMapping(
+                        resume_id=str(resume["id"]),
+                        resume=resume,
+                        query_key=str(name or "__recommendations__"),
+                        params=params,
+                    )
+                )
+    material = _hh_policy_material(service, config, account.profile_id, resumes=resumes)
+    applied = [
+        str(row["source_id"])
+        for row in repository.conn.execute(
+            """
+            SELECT job.source_id FROM applications AS application
+            JOIN jobs AS job ON job.id = application.job_id
+            WHERE application.account_profile_id = ? AND job.source = 'hh'
+            """,
+            (account.profile_id,),
+        ).fetchall()
+    ]
+    active = [
+        str(row["vacancy_id"])
+        for row in repository.conn.execute(
+            """
+            SELECT vacancy_id FROM hh_autopilot_items
+            WHERE account_profile_id = ? AND state IN
+              ('discovered','eligible','ranked','ready','applying','reconciling','retry_wait','manual_challenge')
+            """,
+            (account.profile_id,),
+        ).fetchall()
+    ]
+    skipped = [item.vacancy_id for item in service.storage.list_hh_skipped_vacancies()]
+    profiles = config.get("profiles") or {}
+    candidate = copy.deepcopy(profiles.get(account.candidate_profile_id) or active_profile(config))
+    return EngineRunContext(
+        raw_config=config,
+        settings=settings,
+        policy_hash=policy_hash(settings, account.profile_id, material),
+        candidate_profile=candidate,
+        mappings=tuple(mappings),
+        filter_context={
+            "history": {
+                "applied_vacancy_ids": applied,
+                "active_vacancy_ids": active,
+                "permanently_skipped_vacancy_ids": skipped,
+            },
+            "blacklist": {"vacancy_ids": [], "employer_ids": []},
+            "supported_application_capabilities": ["direct"],
+        },
+    )
+
+
+def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
+    from .hh_autopilot.authorization import HHAutopilotAuthorizer
+    from .hh_autopilot.config import parse_autopilot_settings
+    from .hh_autopilot.engine import HHAutopilot
+    from .hh_autopilot.executor import HHApplicationExecutor
+    from .hh_autopilot.policy import HardFilter
+    from .hh_autopilot.ranking import DeterministicRanker, RankingPolicy, StructuredAIRanker
+    from .hh_autopilot.reconcile import HHApplicationReconciler
+    from .hh_autopilot.search import HHSearchProvider, normalize_vacancy
+
+    client = service._hh_client_for_account(account_id)
+    context = _hh_engine_context(service, repository, account_id, client)
+    def settings_provider():
+        return parse_autopilot_settings(copy.deepcopy(service.config))
+
+    def policy_provider(wanted: str) -> str:
+        return _hh_engine_context(
+            service,
+            repository,
+            wanted,
+            service._hh_client_for_account(wanted),
+        ).policy_hash
+    authorizer = HHAutopilotAuthorizer(
+        repository,
+        service.config_path,
+        policy_material_resolver=lambda config, wanted: _hh_policy_material(
+            service, config, wanted
+        ),
+    )
+    executor = HHApplicationExecutor(
+        repository,
+        client,
+        _StoredHHCoverLetters(service.storage),
+        settings_provider=settings_provider,
+        policy_hash_provider=policy_provider,
+    )
+    reconciler = HHApplicationReconciler(
+        repository,
+        _ReadOnlyHHNegotiations(client),
+        settings_provider=settings_provider,
+    )
+    return HHAutopilot(
+        repository=repository,
+        authorizer=authorizer,
+        search_provider=HHSearchProvider(client, repository),
+        hard_filter=HardFilter(context.settings.filters),
+        deterministic_ranker=DeterministicRanker(),
+        ranking_policy=RankingPolicy(
+            context.settings.ranking,
+            StructuredAIRanker((context.raw_config.get("ai") or {})),
+        ),
+        executor=executor,
+        reconciler=reconciler,
+        context_provider=lambda _wanted: context,
+        vacancy_loader=lambda vacancy_id: normalize_vacancy(client.get_vacancy(vacancy_id)),
+        owner_token_factory=lambda: f"work-hunter:{uuid.uuid4().hex}",
+    )
+
+
+class _ConfiguredHHAutopilotEngine:
+    def __init__(self, service: "WorkHunter", repository: Any) -> None:
+        self._service = service
+        self._repository = repository
+
+    def run(self, request: Any):
+        return _build_hh_engine(self._service, self._repository, request.account_id).run(request)
+
+
+def build_hh_autopilot_components(service: "WorkHunter") -> HHAutopilotComponents:
+    from .hh_autopilot.config import parse_autopilot_settings
+    from .hh_autopilot.reconcile import HHApplicationReconciler, HHRecoverySweep
+    from .hh_autopilot.repository import AutopilotRepository
+    from .hh_autopilot.scheduler import HHAutopilotScheduler
+
+    repository = AutopilotRepository(service.storage)
+    def settings_provider():
+        return parse_autopilot_settings(copy.deepcopy(service.config))
+    engine = _ConfiguredHHAutopilotEngine(service, repository)
+    recovery = HHRecoverySweep(
+        repository,
+        reconciler_factory=lambda account: HHApplicationReconciler(
+            repository,
+            _ReadOnlyHHNegotiations(service._hh_client_for_account(account)),
+            settings_provider=settings_provider,
+        ),
+        settings_provider=settings_provider,
+        owner_token_factory=lambda: f"work-hunter-recovery:{uuid.uuid4().hex}",
+    )
+    scheduler = HHAutopilotScheduler(
+        repository=repository,
+        config_loader=settings_provider,
+        engine=engine,
+        recovery_sweep=recovery,
+    )
+    return HHAutopilotComponents(repository, engine, scheduler, recovery)
+
+
 class WorkHunter:
-    def __init__(self, root: str | Path | None = None):
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        hh_autopilot_factory: Callable[["WorkHunter"], Any] | None = None,
+    ):
         self.root = Path(root) if root is not None else Path.cwd()
         self.config_path = config_path(self.root)
         self.config = load_config(self.config_path)
         self._config_baseline = copy.deepcopy(self.config)
         self._config_aliases: list[dict[str, Any]] = []
         self._storage: Storage | None = None
+        self._hh_autopilot_factory = hh_autopilot_factory or build_hh_autopilot_components
+        self._hh_autopilot_components: Any | None = None
 
     @property
     def storage(self) -> Storage:
@@ -1054,6 +1335,128 @@ class WorkHunter:
                 raise
             self._storage = storage
         return self._storage
+
+    def _hh_autopilot(self) -> Any:
+        if self._hh_autopilot_components is None:
+            self._hh_autopilot_components = self._hh_autopilot_factory(self)
+        return self._hh_autopilot_components
+
+    def tick_hh_autopilot(self) -> dict[str, Any]:
+        return _result_dict(self._hh_autopilot().scheduler.tick())
+
+    def recover_hh_autopilot(self, account: str | None = None) -> dict[str, Any]:
+        return _result_dict(self._hh_autopilot().recovery.run(account_id=account))
+
+    def hh_autopilot_status(self, account: str | None = None) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        repository = self._hh_autopilot().repository
+        custom = getattr(repository, "status", None)
+        if callable(custom):
+            return custom(account_id)
+        conn = repository.conn
+        state_rows = conn.execute(
+            """
+            SELECT state, COUNT(*) AS total FROM hh_autopilot_items
+            WHERE account_profile_id = ? GROUP BY state ORDER BY state
+            """,
+            (account_id,),
+        ).fetchall()
+        run_rows = conn.execute(
+            """
+            SELECT id, trigger, status, counters_json, error, started_at, finished_at
+            FROM hh_autopilot_runs WHERE account_profile_id = ?
+            ORDER BY id DESC LIMIT 20
+            """,
+            (account_id,),
+        ).fetchall()
+        quota = conn.execute(
+            """
+            SELECT COUNT(*) AS used FROM hh_autopilot_quota_reservations
+            WHERE account_profile_id = ? AND state = 'consumed'
+              AND local_date = (SELECT MAX(local_date) FROM hh_autopilot_quota_reservations
+                                WHERE account_profile_id = ?)
+            """,
+            (account_id, account_id),
+        ).fetchone()
+        return {
+            "account": account_id,
+            "states": {str(row["state"]): int(row["total"]) for row in state_rows},
+            "quota": {"used": int(quota["used"] if quota is not None else 0)},
+            "runs": [
+                {
+                    "id": int(row["id"]),
+                    "trigger": str(row["trigger"]),
+                    "status": str(row["status"]),
+                    "counters": json.loads(str(row["counters_json"] or "{}")),
+                    "error": str(row["error"] or ""),
+                    "started_at": str(row["started_at"]),
+                    "finished_at": str(row["finished_at"] or ""),
+                }
+                for row in run_rows
+            ],
+        }
+
+    def hh_autopilot_history(
+        self,
+        *,
+        account: str | None = None,
+        vacancy_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        limit = max(1, min(500, int(limit)))
+        repository = self._hh_autopilot().repository
+        custom = getattr(repository, "history", None)
+        if callable(custom):
+            return custom(account_id, vacancy_id, limit)
+        clauses = ["item.account_profile_id = ?"]
+        params: list[Any] = [account_id]
+        if vacancy_id:
+            clauses.append("item.vacancy_id = ?")
+            params.append(str(vacancy_id))
+        params.append(limit)
+        rows = repository.conn.execute(
+            """
+            SELECT event.*, item.vacancy_id, item.resume_id
+            FROM hh_autopilot_events AS event
+            JOIN hh_autopilot_items AS item ON item.id = event.item_id
+            WHERE """
+            + " AND ".join(clauses)
+            + " ORDER BY event.id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        events = []
+        for row in rows:
+            event = repository._event_from_row(row)
+            event.update(vacancy_id=str(row["vacancy_id"]), resume_id=str(row["resume_id"]))
+            events.append(event)
+        return {"account": account_id, "events": events}
+
+    def hh_autopilot_challenges(
+        self,
+        *,
+        account: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        limit = max(1, min(500, int(limit)))
+        repository = self._hh_autopilot().repository
+        custom = getattr(repository, "challenges", None)
+        if callable(custom):
+            return custom(account_id, limit)
+        rows = repository.conn.execute(
+            """
+            SELECT id, scope, challenge_type, account_profile_id, item_id,
+                   sanitized_url, status, expires_at, created_at
+            FROM hh_autopilot_challenges WHERE account_profile_id = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (account_id, limit),
+        ).fetchall()
+        return {
+            "account": account_id,
+            "challenges": [dict(row) for row in rows],
+        }
 
     def _reconcile_hh_autopilot_startup(
         self,
@@ -1631,6 +2034,35 @@ class WorkHunter:
         backend = CallbackConfigBackend(config, save_identity_patch)
         return config, backend
 
+    def _hh_account_id(self, account: str | None = None) -> str:
+        value = str(account or self.config.get("hh_account_profile") or "default").strip()
+        if not value or "\0" in value:
+            raise ValueError("A valid HH account profile is required")
+        wanted = value.casefold()
+        profiles = self.config.get("hh_account_profiles") or {}
+        if not any(str(key).strip().casefold() == wanted for key in profiles):
+            raise ValueError(f"HH account profile '{value}' not found")
+        return wanted
+
+    def _hh_client_for_account(self, account: str) -> HHApplyClient:
+        account_id = self._hh_account_id(account)
+        source = copy.deepcopy((self.config.get("sources") or {}).get("hh") or {})
+        profiles = self.config.get("hh_account_profiles") or {}
+        profile = next(
+            (
+                value
+                for key, value in profiles.items()
+                if str(key).strip().casefold() == account_id and isinstance(value, dict)
+            ),
+            {},
+        )
+        source.update({key: value for key, value in profile.items() if value is not None})
+        backend = CallbackConfigBackend(
+            source,
+            lambda patch: self._persist_hh_identity_patch(account_id, patch),
+        )
+        return HHApplyClient(source, backend=backend)
+
     def _hh_client(self) -> HHApplyClient:
         config, backend = self._hh_runtime()
         return HHApplyClient(config, backend=backend)
@@ -2052,13 +2484,17 @@ class WorkHunter:
         *,
         resume_id: str | None = None,
         letter: str | None = None,
+        account: str | None = None,
         confirm: bool = False,
     ) -> dict[str, Any]:
-        if not confirm:
-            return {
-                "status": "blocked",
-                "message": "Explicit confirmation is required before sending a real application.",
-            }
+        blocked = require_mutation_confirmation(
+            confirm,
+            code="apply_requires_confirmation",
+            message="Explicit confirmation is required before sending a real application.",
+            risk_flags=("external_mutation", "job_application"),
+        )
+        if blocked:
+            return blocked
 
         plan = self.prepare_apply_plan(job_id, resume_id=resume_id, letter=letter)
         if plan.get("status") != "ready":
@@ -2081,20 +2517,98 @@ class WorkHunter:
                 "plan": plan,
             }
 
-        client = self._hh_client()
-        result = client.apply(job.source_id, selected_resume, str(plan.get("letter") or ""))
-        if result.get("status") == "created":
-            self.storage.save_application(job_id, "applied", json.dumps(result, ensure_ascii=False))
-            self.storage.set_status(job_id, "applied", "HH API application sent")
-            plan["status"] = "applied"
-        elif result.get("status") == "redirect":
-            self.storage.save_application(job_id, "external_redirect", json.dumps(result, ensure_ascii=False))
-            plan["status"] = "external_redirect"
-            plan["external_url"] = result.get("location") or plan.get("external_url", "")
-        else:
-            plan["status"] = _hh_apply_error_outcome(result)
-        plan["raw_result"] = result
+        account_id = self._hh_account_id(account)
+        body = str(plan.get("letter") or "")
+        if body:
+            self.storage.save_letter(LetterDraft(job_id=job_id, body=body, template_name="manual-confirmation"))
+        _confirmation, reports = self._run_hh_literal_targets(
+            account_id,
+            ((selected_resume, str(job.source_id)),),
+        )
+        report = reports[0]
+        report_data = _result_dict(report)
+        plan["status"] = self._legacy_hh_run_status(
+            report_data,
+            account_id=account_id,
+            vacancy_id=str(job.source_id),
+            resume_id=selected_resume,
+        )
+        if plan["status"] not in {"applied", "manual_challenge", "reconciling"}:
+            report_data.setdefault("error", plan["status"])
+        plan["run_id"] = report_data.get("run_id")
+        plan["raw_result"] = report_data
         return plan
+
+    def _run_hh_literal_targets(
+        self,
+        account_id: str,
+        targets: tuple[tuple[str, str], ...],
+    ) -> tuple[Any, list[Any]]:
+        from .hh_autopilot.config import parse_autopilot_settings
+        from .hh_autopilot.types import LiteralConfirmation, RunRequest
+
+        if not targets:
+            raise ValueError("literal HH application requires at least one exact target")
+        settings = parse_autopilot_settings(copy.deepcopy(self.config))
+        reference = f"manual:{account_id}:{uuid.uuid4().hex}"
+        components = self._hh_autopilot()
+        components.repository.create_one_shot_authorization(
+            reference,
+            authorization_type="manual",
+            account_id=account_id,
+            targets=targets,
+            max_success=min(len(targets), settings.limits.per_run_success),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        confirmation = LiteralConfirmation(account_id=account_id, reference_id=reference)
+        reports = [
+            components.engine.run(
+                RunRequest(
+                    account_id=account_id,
+                    trigger="manual",
+                    authorization=confirmation,
+                    resume_id=resume,
+                    vacancy_id=vacancy,
+                )
+            )
+            for resume, vacancy in targets[: settings.limits.per_run_success]
+        ]
+        return confirmation, reports
+
+    def _legacy_hh_run_status(
+        self,
+        report: dict[str, Any],
+        *,
+        account_id: str,
+        vacancy_id: str,
+        resume_id: str,
+    ) -> str:
+        if int(report.get("applied") or 0) > 0:
+            return "applied"
+        if int(report.get("manual") or 0) > 0:
+            return "manual_challenge"
+        repository = self._hh_autopilot().repository
+        conn = getattr(repository, "conn", None)
+        if conn is not None:
+            row = conn.execute(
+                """
+                SELECT state, last_outcome_code FROM hh_autopilot_items
+                WHERE account_profile_id = ? AND vacancy_id = ? AND resume_id = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (account_id, vacancy_id, resume_id),
+            ).fetchone()
+            if row is not None:
+                outcome = str(row["last_outcome_code"] or "")
+                if outcome == "hh_daily_limit":
+                    return "limit_exceeded"
+                if outcome:
+                    return outcome
+                return str(row["state"])
+        if int(report.get("retry_wait") or 0) > 0:
+            return "reconciling"
+        status = str(report.get("status") or "error")
+        return "skipped" if status == "completed" else status
 
     def confirm_apply_plan(self, plan_id: int, *, confirm: bool = False) -> dict[str, Any]:
         stored_plan = self.storage.get_apply_plan(plan_id)
@@ -4751,7 +5265,13 @@ class WorkHunter:
                 return item.reason or "skipped"
         return ""
 
-    def confirm_hh_campaign(self, run_id: int, *, confirm: bool = False) -> dict[str, Any]:
+    def confirm_hh_campaign(
+        self,
+        run_id: int,
+        *,
+        account: str | None = None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
         run = self.storage.get_hh_campaign_run(run_id)
         if run is None:
             raise ValueError(f"HH campaign run {run_id} not found")
@@ -4762,24 +5282,44 @@ class WorkHunter:
                 "id": run_id,
             }
         counts = _campaign_counts()
-        for item in self.storage.list_hh_campaign_items(run_id):
+        items = self.storage.list_hh_campaign_items(run_id)
+        ready = [item for item in items if item.status == "ready"]
+        account_id = self._hh_account_id(account)
+        targets = tuple((item.resume_id, item.vacancy_id) for item in ready)
+        for item in ready:
+            if item.letter:
+                self.storage.save_letter(
+                    LetterDraft(
+                        job_id=item.job_id,
+                        body=item.letter,
+                        template_name="campaign-confirmation",
+                    )
+                )
+        reports: list[Any] = []
+        if targets:
+            _confirmation, reports = self._run_hh_literal_targets(account_id, targets)
+        report_by_target = {
+            targets[index]: _result_dict(report)
+            for index, report in enumerate(reports)
+        }
+        for item in items:
             if item.status != "ready":
                 if item.status in counts:
                     counts[item.status] += 1
                 continue
-            result = self.confirm_apply(
-                item.job_id,
-                resume_id=item.resume_id or None,
-                letter=item.letter,
-                confirm=True,
+            report = report_by_target.get((item.resume_id, item.vacancy_id))
+            status = "run_limit" if report is None else self._legacy_hh_run_status(
+                report,
+                account_id=account_id,
+                vacancy_id=item.vacancy_id,
+                resume_id=item.resume_id,
             )
-            status = str(result.get("status") or "error")
             if status == "applied":
                 counts["applied"] += 1
                 self.storage.update_hh_campaign_item(
                     item.id,
                     status="applied",
-                    raw_result=result,
+                    raw_result=report,
                 )
             else:
                 counts["error"] += 1
@@ -4787,7 +5327,7 @@ class WorkHunter:
                     item.id,
                     status="error",
                     reason=status,
-                    raw_result=result,
+                    raw_result=report or {"status": status},
                 )
         self.storage.update_hh_campaign_run(
             run_id,

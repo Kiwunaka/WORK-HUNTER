@@ -9,6 +9,7 @@ import mcp.server.stdio
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
+from .config import mask_secrets
 from .hh_agent.mcp_handlers import HHMCPToolHandlers
 from .safety import is_literal_confirmation
 from .services import WorkHunter
@@ -168,6 +169,37 @@ async def list_tools() -> list[Tool]:
                 "properties": {"limit": {"type": "integer", "minimum": 1, "default": 10}},
             },
         ),
+        Tool(
+            name="hh_autopilot_status",
+            description="Read the masked HH autopilot status and quota view.",
+            inputSchema={
+                "type": "object",
+                "properties": {"account": {"type": "string"}},
+            },
+        ),
+        Tool(
+            name="hh_autopilot_history",
+            description="Read masked HH autopilot state history.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string"},
+                    "vacancy_id": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                },
+            },
+        ),
+        Tool(
+            name="hh_autopilot_challenges",
+            description="List masked HH autopilot challenges without resolving them.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                },
+            },
+        ),
         *HHMCPToolHandlers.tool_definitions(),
     ]
 
@@ -177,6 +209,27 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     args = arguments or {}
     service = WorkHunter(_root)
     try:
+        if name == "hh_autopilot_status":
+            return _json(mask_secrets(service.hh_autopilot_status(args.get("account"))))
+        if name == "hh_autopilot_history":
+            return _json(
+                mask_secrets(
+                    service.hh_autopilot_history(
+                        account=args.get("account"),
+                        vacancy_id=args.get("vacancy_id"),
+                        limit=args.get("limit", 100),
+                    )
+                )
+            )
+        if name == "hh_autopilot_challenges":
+            return _json(
+                mask_secrets(
+                    service.hh_autopilot_challenges(
+                        account=args.get("account"),
+                        limit=args.get("limit", 100),
+                    )
+                )
+            )
         hh_handlers = HHMCPToolHandlers(service)
         if hh_handlers.can_handle(name):
             return _json(hh_handlers.handle(name, args))
