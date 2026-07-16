@@ -10,12 +10,20 @@ from .types import FilterDecision, NormalizedVacancy
 
 _MARKUP = re.compile(r"<[^>]*>")
 _SPACES = re.compile(r"\s+")
+_SECRET_BEARING = re.compile(
+    r"(?i)(?:"
+    r"bearer\s+\S+|authorization|access[_ -]?token|refresh[_ -]?token|"
+    r"set-cookie|cookie|password|passwd|api[_ -]?key|credential|otp|secret|"
+    r"proxy(?:[_ -]?(?:url|password|credential))?"
+    r")"
+)
 _CLOSED_STATUSES = frozenset(
     {"archived", "closed", "deleted", "not_published", "unpublished"}
 )
 _CAPABILITIES = frozenset({"direct", "screening", "form"})
 _EVIDENCE_LIMIT = 20
 _FACT_LIMIT = 500
+_ABSENT = object()
 
 
 class _MissingFact(ValueError):
@@ -112,12 +120,62 @@ def _configured_list(
 
 
 def _bool_fact(source: Mapping[str, Any], key: str, *, field: str) -> bool | None:
-    if key not in source:
-        return None
-    value = source[key]
-    if type(value) is not bool:
-        raise _MalformedFact(field)
-    return value
+    return _bool_fact_from_keys(source, (key,), field=field)
+
+
+def _agree_aliases(
+    values: Sequence[Any],
+    *,
+    field: str,
+    set_like: bool = False,
+) -> Any:
+    present = [value for value in values if value is not _ABSENT]
+    if not present:
+        return _ABSENT
+    expected = frozenset(present[0]) if set_like else present[0]
+    for value in present[1:]:
+        actual = frozenset(value) if set_like else value
+        if actual != expected:
+            raise _MalformedFact(field)
+    if set_like:
+        return tuple(sorted(expected))
+    return present[0]
+
+
+def _bool_fact_from_keys(
+    source: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    field: str,
+) -> bool | None:
+    values: list[Any] = []
+    for key in keys:
+        if key not in source:
+            values.append(_ABSENT)
+            continue
+        value = source[key]
+        if type(value) is not bool:
+            raise _MalformedFact(field)
+        values.append(value)
+    agreed = _agree_aliases(values, field=field)
+    return None if agreed is _ABSENT else agreed
+
+
+def _text_fact_from_keys(
+    source: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    field: str,
+) -> str | object:
+    values = [
+        (
+            _normalized_text(source[key], field=field, allow_empty=True)
+            if key in source
+            else _ABSENT
+        )
+        for key in keys
+    ]
+    return _agree_aliases(values, field=field)
 
 
 def _first_text(
@@ -126,10 +184,8 @@ def _first_text(
     *,
     field: str,
 ) -> str:
-    for key in keys:
-        if key in source:
-            return _normalized_text(source[key], field=field, allow_empty=True)
-    return ""
+    value = _text_fact_from_keys(source, keys, field=field)
+    return "" if value is _ABSENT else str(value)
 
 
 def _id_set_from_keys(
@@ -138,14 +194,66 @@ def _id_set_from_keys(
     *,
     field: str,
 ) -> tuple[str, ...] | None:
-    for key in keys:
-        if key in source:
-            return _string_list(source[key], field=field)
-    return None
+    return _string_set_from_keys(
+        source,
+        keys,
+        field=field,
+        mapping_key="id",
+    )
+
+
+def _string_set_from_keys(
+    source: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    field: str,
+    mapping_key: str,
+) -> tuple[str, ...] | None:
+    values = [
+        (
+            _string_list(
+                source[key],
+                field=field,
+                mapping_key=mapping_key,
+            )
+            if key in source
+            else _ABSENT
+        )
+        for key in keys
+    ]
+    agreed = _agree_aliases(values, field=field, set_like=True)
+    return None if agreed is _ABSENT else agreed
+
+
+def _merge_text_facts(
+    first: str | object,
+    second: str | object,
+    *,
+    field: str,
+) -> str:
+    agreed = _agree_aliases((first, second), field=field)
+    return "" if agreed is _ABSENT else str(agreed)
+
+
+def _contains_term(text: str, term: str) -> bool:
+    start = 0
+    while True:
+        index = text.find(term, start)
+        if index < 0:
+            return False
+        before_ok = index == 0 or not text[index - 1].isalnum()
+        end = index + len(term)
+        after_ok = end == len(text) or not text[end].isalnum()
+        if before_ok and after_ok:
+            return True
+        start = index + 1
 
 
 def _safe_terms(values: Sequence[str]) -> tuple[str, ...]:
-    return tuple(value[:100] for value in values[:_EVIDENCE_LIMIT])
+    return tuple(
+        "redacted" if _SECRET_BEARING.search(value) else value[:100]
+        for value in values[:_EVIDENCE_LIMIT]
+    )
 
 
 def _missing(field: str) -> FilterDecision:
@@ -294,20 +402,14 @@ class HardFilter:
             ),
         )
         for bool_keys, list_keys, reason, field, list_field in categories:
-            explicit = False
-            hit = False
-            for key in bool_keys:
-                flag = _bool_fact(history, key, field=field)
-                if flag is not None:
-                    explicit = True
-                    hit = hit or flag
-                    break
+            flag = _bool_fact_from_keys(history, bool_keys, field=field)
             ids = _id_set_from_keys(history, list_keys, field=list_field)
-            if ids is not None:
-                explicit = True
-                hit = hit or vacancy_id in ids
-            if not explicit:
+            listed = None if ids is None else vacancy_id in ids
+            if flag is None and listed is None:
                 raise _MissingFact(field)
+            if flag is not None and listed is not None and flag != listed:
+                raise _MalformedFact(field)
+            hit = flag if flag is not None else bool(listed)
             if hit:
                 return _reject(reason, vacancy_id=vacancy_id[:100])
         return None
@@ -340,9 +442,16 @@ class HardFilter:
         )
         if vacancy_flag is None and vacancy_ids is None:
             raise _MissingFact("blacklist.vacancy")
-        if vacancy_flag is True or (
-            vacancy_ids is not None and vacancy_id in vacancy_ids
+        vacancy_listed = (
+            None if vacancy_ids is None else vacancy_id in vacancy_ids
+        )
+        if (
+            vacancy_flag is not None
+            and vacancy_listed is not None
+            and vacancy_flag != vacancy_listed
         ):
+            raise _MalformedFact("blacklist.vacancy")
+        if vacancy_flag is True or vacancy_listed is True:
             return _reject(
                 "hard_filter:vacancy_blacklist",
                 vacancy_id=vacancy_id[:100],
@@ -367,9 +476,16 @@ class HardFilter:
         )
         if employer_flag is None and employer_ids is None:
             raise _MissingFact("blacklist.employer")
-        if employer_flag is True or (
-            employer_ids is not None and employer_id in employer_ids
+        employer_listed = (
+            None if employer_ids is None else employer_id in employer_ids
+        )
+        if (
+            employer_flag is not None
+            and employer_listed is not None
+            and employer_flag != employer_listed
         ):
+            raise _MalformedFact("blacklist.employer")
+        if employer_flag is True or employer_listed is True:
             return _reject(
                 "hard_filter:employer_blacklist",
                 employer_id=employer_id[:100],
@@ -383,29 +499,36 @@ class HardFilter:
         candidate: Mapping[str, Any],
         _context: Mapping[str, Any],
     ) -> FilterDecision | None:
-        skills: tuple[str, ...] = ()
-        if "key_skills" in vacancy:
-            skills = _string_list(
-                vacancy["key_skills"],
-                field="vacancy.key_skills",
-                mapping_key="name",
-            )
-        employer_name = _first_text(
+        skills = _string_set_from_keys(
+            vacancy,
+            ("key_skills", "skills"),
+            field="vacancy.key_skills",
+            mapping_key="name",
+        )
+        if skills is None:
+            skills = ()
+        top_employer_name = _text_fact_from_keys(
             vacancy,
             ("employer_name",),
             field="vacancy.employer_name",
         )
-        if not employer_name and "employer" in vacancy:
+        nested_employer_name: str | object = _ABSENT
+        if "employer" in vacancy:
             employer = _optional_mapping(
                 vacancy,
                 "employer",
                 field="vacancy.employer",
             )
-            employer_name = _first_text(
+            nested_employer_name = _text_fact_from_keys(
                 employer,
                 ("name",),
                 field="vacancy.employer.name",
             )
+        employer_name = _merge_text_facts(
+            top_employer_name,
+            nested_employer_name,
+            field="vacancy.employer_name",
+        )
         searchable = " ".join(
             part
             for part in (
@@ -432,7 +555,7 @@ class HardFilter:
         matched = tuple(
             term
             for term in dict.fromkeys(excluded)
-            if term and term in searchable
+            if term and _contains_term(searchable, term)
         )
         if matched:
             return _reject(
@@ -440,7 +563,9 @@ class HardFilter:
                 matched=_safe_terms(matched),
             )
         required = _configured_list(self._filters, "required_keywords")
-        missing = tuple(term for term in required if term not in searchable)
+        missing = tuple(
+            term for term in required if not _contains_term(searchable, term)
+        )
         if missing:
             return _reject(
                 "hard_filter:required_keywords",
@@ -480,47 +605,76 @@ class HardFilter:
         areas = _configured_list(self._filters, "areas", maximum=500)
         if not areas:
             return None
-        area_id = _first_text(
+        top_area = _text_fact_from_keys(
             vacancy,
             ("area_id",),
             field="vacancy.area_id",
         )
-        if not area_id and "area" in vacancy:
+        nested_area: str | object = _ABSENT
+        if "area" in vacancy:
             area = _optional_mapping(vacancy, "area", field="vacancy.area")
-            area_id = _first_text(area, ("id",), field="vacancy.area.id")
+            nested_area = _text_fact_from_keys(
+                area,
+                ("id",),
+                field="vacancy.area.id",
+            )
+        area_id = _merge_text_facts(
+            top_area,
+            nested_area,
+            field="vacancy.area_id",
+        )
         if not area_id:
             raise _MissingFact("area_id")
         if area_id in areas:
             return None
-        relocation_ids: tuple[str, ...] | None = None
-        relocation_flag: bool | None = None
+        relocation_id_values: list[Any] = []
+        relocation_flag_values: list[Any] = []
         for source, prefix in (
             (context, "context"),
             (candidate, "candidate"),
             (resume, "resume"),
             (vacancy, "vacancy"),
         ):
-            if relocation_flag is None:
-                for key in ("relocation_allowed", "allow_relocation"):
-                    flag = _bool_fact(
-                        source,
-                        key,
-                        field=f"{prefix}.relocation_allowed",
-                    )
-                    if flag is not None:
-                        relocation_flag = flag
-                        break
-            if relocation_ids is None:
-                relocation_ids = _id_set_from_keys(
-                    source,
-                    ("relocation_area_ids", "relocation_areas"),
-                    field=f"{prefix}.relocation_area_ids",
-                )
-        if relocation_flag is None and relocation_ids is None:
+            flag = _bool_fact_from_keys(
+                source,
+                ("relocation_allowed", "allow_relocation"),
+                field=f"{prefix}.relocation_allowed",
+            )
+            relocation_flag_values.append(
+                _ABSENT if flag is None else flag
+            )
+            ids = _id_set_from_keys(
+                source,
+                ("relocation_area_ids", "relocation_areas"),
+                field=f"{prefix}.relocation_area_ids",
+            )
+            relocation_id_values.append(
+                _ABSENT if ids is None else ids
+            )
+        relocation_flag = _agree_aliases(
+            relocation_flag_values,
+            field="relocation",
+        )
+        relocation_ids = _agree_aliases(
+            relocation_id_values,
+            field="relocation",
+            set_like=True,
+        )
+        flag_value = None if relocation_flag is _ABSENT else bool(relocation_flag)
+        listed_value = (
+            None
+            if relocation_ids is _ABSENT
+            else area_id in relocation_ids
+        )
+        if flag_value is None and listed_value is None:
             raise _MissingFact("relocation")
-        if relocation_flag is True or (
-            relocation_ids is not None and area_id in relocation_ids
+        if (
+            flag_value is not None
+            and listed_value is not None
+            and flag_value != listed_value
         ):
+            raise _MalformedFact("relocation")
+        if flag_value is True or listed_value is True:
             return None
         return _reject(
             "hard_filter:area",
@@ -535,22 +689,28 @@ class HardFilter:
         _candidate: Mapping[str, Any],
         _context: Mapping[str, Any],
     ) -> FilterDecision | None:
-        schedule = _first_text(
+        top_schedule = _text_fact_from_keys(
             vacancy,
             ("schedule_id",),
             field="vacancy.schedule_id",
         )
-        if not schedule and "schedule" in vacancy:
+        nested_schedule: str | object = _ABSENT
+        if "schedule" in vacancy:
             schedule_data = _optional_mapping(
                 vacancy,
                 "schedule",
                 field="vacancy.schedule",
             )
-            schedule = _first_text(
+            nested_schedule = _text_fact_from_keys(
                 schedule_data,
                 ("id",),
                 field="vacancy.schedule.id",
             )
+        schedule = _merge_text_facts(
+            top_schedule,
+            nested_schedule,
+            field="vacancy.schedule_id",
+        )
         work_formats = _id_set_from_keys(
             vacancy,
             ("work_format_ids", "work_formats", "work_format"),
@@ -597,22 +757,28 @@ class HardFilter:
             maximum=100,
         )
         if employment_types:
-            employment = _first_text(
+            top_employment = _text_fact_from_keys(
                 vacancy,
                 ("employment_id",),
                 field="vacancy.employment_id",
             )
-            if not employment and "employment" in vacancy:
+            nested_employment: str | object = _ABSENT
+            if "employment" in vacancy:
                 data = _optional_mapping(
                     vacancy,
                     "employment",
                     field="vacancy.employment",
                 )
-                employment = _first_text(
+                nested_employment = _text_fact_from_keys(
                     data,
                     ("id",),
                     field="vacancy.employment.id",
                 )
+            employment = _merge_text_facts(
+                top_employment,
+                nested_employment,
+                field="vacancy.employment_id",
+            )
             if not employment:
                 raise _MissingFact("employment_id")
             if employment not in employment_types:
@@ -636,22 +802,28 @@ class HardFilter:
         )
         if not allowed:
             return None
-        experience = _first_text(
+        top_experience = _text_fact_from_keys(
             vacancy,
             ("experience_id",),
             field="vacancy.experience_id",
         )
-        if not experience and "experience" in vacancy:
+        nested_experience: str | object = _ABSENT
+        if "experience" in vacancy:
             data = _optional_mapping(
                 vacancy,
                 "experience",
                 field="vacancy.experience",
             )
-            experience = _first_text(
+            nested_experience = _text_fact_from_keys(
                 data,
                 ("id",),
                 field="vacancy.experience.id",
             )
+        experience = _merge_text_facts(
+            top_experience,
+            nested_experience,
+            field="vacancy.experience_id",
+        )
         if not experience:
             raise _MissingFact("experience_id")
         if experience not in allowed:
@@ -673,19 +845,51 @@ class HardFilter:
             raise _MalformedFact("filters.minimum_salary")
         if floor == 0:
             return None
-        salary_from = self._salary_amount(vacancy, "salary_from")
-        salary_to = self._salary_amount(vacancy, "salary_to")
+        top_salary_from = self._salary_amount_fact(
+            vacancy,
+            "salary_from",
+            field="vacancy.salary_from",
+        )
+        top_salary_to = self._salary_amount_fact(
+            vacancy,
+            "salary_to",
+            field="vacancy.salary_to",
+        )
         salary_mapping: Mapping[str, Any] = {}
+        nested_salary_from: int | None | object = _ABSENT
+        nested_salary_to: int | None | object = _ABSENT
         if "salary" in vacancy:
             salary_mapping = _optional_mapping(
                 vacancy,
                 "salary",
                 field="vacancy.salary",
             )
-            if salary_from is None:
-                salary_from = self._salary_amount(salary_mapping, "from")
-            if salary_to is None:
-                salary_to = self._salary_amount(salary_mapping, "to")
+            nested_salary_from = self._salary_amount_fact(
+                salary_mapping,
+                "from",
+                field="vacancy.salary.from",
+            )
+            nested_salary_to = self._salary_amount_fact(
+                salary_mapping,
+                "to",
+                field="vacancy.salary.to",
+            )
+        salary_from_value = _agree_aliases(
+            (top_salary_from, nested_salary_from),
+            field="vacancy.salary_from",
+        )
+        salary_to_value = _agree_aliases(
+            (top_salary_to, nested_salary_to),
+            field="vacancy.salary_to",
+        )
+        salary_from = (
+            None
+            if salary_from_value is _ABSENT
+            else salary_from_value
+        )
+        salary_to = (
+            None if salary_to_value is _ABSENT else salary_to_value
+        )
         if salary_from is None and salary_to is None:
             unknown = self._filters.get("unknown_salary", "allow")
             if unknown == "allow":
@@ -697,17 +901,23 @@ class HardFilter:
                     minimum=floor,
                 )
             raise _MalformedFact("filters.unknown_salary")
-        currency = _first_text(
+        top_currency = _text_fact_from_keys(
             vacancy,
-            ("salary_currency",),
+            ("salary_currency", "currency"),
             field="vacancy.salary_currency",
         )
-        if not currency and salary_mapping:
-            currency = _first_text(
+        nested_currency: str | object = _ABSENT
+        if salary_mapping:
+            nested_currency = _text_fact_from_keys(
                 salary_mapping,
                 ("currency",),
                 field="vacancy.salary.currency",
             )
+        currency = _merge_text_facts(
+            top_currency,
+            nested_currency,
+            field="vacancy.salary_currency",
+        )
         if not currency:
             raise _MissingFact("salary_currency")
         expected_currency = _normalized_text(
@@ -731,12 +941,19 @@ class HardFilter:
         return None
 
     @staticmethod
-    def _salary_amount(source: Mapping[str, Any], key: str) -> int | None:
-        if key not in source or source[key] is None:
+    def _salary_amount_fact(
+        source: Mapping[str, Any],
+        key: str,
+        *,
+        field: str,
+    ) -> int | None | object:
+        if key not in source:
+            return _ABSENT
+        if source[key] is None:
             return None
         value = source[key]
         if type(value) is not int or value < 0:
-            raise _MalformedFact(f"vacancy.{key}")
+            raise _MalformedFact(field)
         return value
 
     def _candidate_constraints(
@@ -797,6 +1014,76 @@ class HardFilter:
                 raise _MalformedFact("context.supported_application_capabilities")
         if configured and not configured <= _CAPABILITIES:
             raise _MalformedFact("filters.required_application_capabilities")
+        explicit_values: list[Any] = []
+        if "application_capabilities" in vacancy:
+            explicit_values.append(
+                tuple(
+                    sorted(
+                        _string_list(
+                            vacancy["application_capabilities"],
+                            field="vacancy.application_capabilities",
+                            maximum=len(_CAPABILITIES),
+                        )
+                    )
+                )
+            )
+        else:
+            explicit_values.append(_ABSENT)
+        if "application_capability" in vacancy:
+            explicit_values.append(
+                (
+                    _normalized_text(
+                        vacancy["application_capability"],
+                        field="vacancy.application_capability",
+                    ),
+                )
+            )
+        else:
+            explicit_values.append(_ABSENT)
+        explicit = _agree_aliases(
+            explicit_values,
+            field="vacancy.application_capabilities",
+            set_like=True,
+        )
+        if explicit is not _ABSENT and (
+            not explicit or not set(explicit) <= _CAPABILITIES
+        ):
+            raise _MalformedFact("vacancy.application_capabilities")
+
+        derived: set[str] = set()
+        has_test = _bool_fact(
+            vacancy,
+            "has_test",
+            field="vacancy.has_test",
+        )
+        if has_test is True:
+            derived.add("screening")
+        response_url = _first_text(
+            vacancy,
+            ("response_url",),
+            field="vacancy.response_url",
+        )
+        apply_url = _first_text(
+            vacancy,
+            ("apply_alternate_url",),
+            field="vacancy.apply_alternate_url",
+        )
+        if response_url:
+            derived.add("direct")
+        elif apply_url:
+            derived.add("form")
+        elif has_test is False:
+            derived.add("direct")
+
+        if explicit is not _ABSENT:
+            if not isinstance(explicit, tuple):
+                raise _MalformedFact("vacancy.application_capabilities")
+            required = set(explicit)
+        else:
+            required = derived
+        if not required:
+            raise _MissingFact("application_capabilities")
+
         if configured:
             available = (
                 configured
@@ -806,54 +1093,8 @@ class HardFilter:
         elif context_supported is not None:
             available = context_supported
         else:
-            return None
+            raise _MissingFact("context.supported_application_capabilities")
 
-        required: set[str] | None = None
-        if "application_capabilities" in vacancy:
-            required = set(
-                _string_list(
-                    vacancy["application_capabilities"],
-                    field="vacancy.application_capabilities",
-                    maximum=len(_CAPABILITIES),
-                )
-            )
-        elif "application_capability" in vacancy:
-            required = {
-                _normalized_text(
-                    vacancy["application_capability"],
-                    field="vacancy.application_capability",
-                )
-            }
-        if required is not None:
-            if not required or not required <= _CAPABILITIES:
-                raise _MalformedFact("vacancy.application_capabilities")
-        else:
-            required = set()
-            has_test = _bool_fact(
-                vacancy,
-                "has_test",
-                field="vacancy.has_test",
-            )
-            if has_test is True:
-                required.add("screening")
-            response_url = _first_text(
-                vacancy,
-                ("response_url",),
-                field="vacancy.response_url",
-            )
-            apply_url = _first_text(
-                vacancy,
-                ("apply_alternate_url",),
-                field="vacancy.apply_alternate_url",
-            )
-            if response_url:
-                required.add("direct")
-            elif apply_url:
-                required.add("form")
-            elif has_test is False:
-                required.add("direct")
-            if not required:
-                raise _MissingFact("application_capabilities")
         unavailable = tuple(sorted(required - available))
         if unavailable:
             return _reject(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -376,7 +377,24 @@ def _filter_decision(*, passed: bool = True) -> FilterDecision:
     return FilterDecision(
         passed=passed,
         reason="hard_filters_passed" if passed else "hard_filter:area",
-        evidence={"field": "area", "actual": "1"},
+        evidence=(
+            {
+                "checks": (
+                    "vacancy_open",
+                    "history",
+                    "blacklists",
+                    "keywords_and_roles",
+                    "area_and_relocation",
+                    "work_format",
+                    "experience",
+                    "salary",
+                    "candidate_constraints",
+                    "application_capabilities",
+                )
+            }
+            if passed
+            else {"area_id": "1", "relocation_allowed": False}
+        ),
     )
 
 
@@ -400,6 +418,28 @@ def _ranking_decision(score: float = 80.0) -> RankingDecision:
         reason="ai_suitable",
         rank_score=rank_score,
         ai_decision=ai,
+    )
+
+
+def _nonqualifying_ranking_decision(score: float = 95.0) -> RankingDecision:
+    rank_score = RankScore(
+        score=score,
+        components={name: score for name in RANK_COMPONENTS},
+        weights={name: 1 / len(RANK_COMPONENTS) for name in RANK_COMPONENTS},
+    )
+    return RankingDecision(
+        ready=False,
+        retry=False,
+        reason="ai_unsuitable",
+        rank_score=rank_score,
+        ai_decision=AIDecision(
+            available=True,
+            suitable=False,
+            confidence=0.95,
+            evidence=("python",),
+            reasons=("role mismatch",),
+            reason="available",
+        ),
     )
 
 
@@ -3281,19 +3321,18 @@ def test_record_filter_decision_persists_evidence_and_one_transition(repo) -> No
 
     assert changed.state is AutopilotState.ELIGIBLE
     assert changed.query_key == "preset:python"
-    assert changed.filter_data == {
-        "evidence": {"actual": "1", "field": "area"},
-        "passed": True,
-        "reason": "hard_filters_passed",
-    }
+    assert changed.filter_data == _filter_decision().to_dict()
     assert changed.published_at == "2026-07-16T09:00:00+00:00"
     assert changed.last_outcome_code == "hard_filters_passed"
     events = repo.list_events(item.id)
     assert len(events) == before_events + 1
     assert events[-1]["reason_code"] == "hard_filters_passed"
 
-    changed.filter_data["evidence"]["actual"] = "mutated"
-    assert repo.get_item(item.id).filter_data["evidence"]["actual"] == "1"
+    changed.filter_data["evidence"]["checks"][0] = "mutated"
+    assert (
+        repo.get_item(item.id).filter_data["evidence"]["checks"][0]
+        == "vacancy_open"
+    )
 
 
 def test_record_filter_rejection_goes_directly_to_skipped(repo) -> None:
@@ -3403,20 +3442,12 @@ def test_record_ranking_decision_persists_finite_score_and_structured_ai(repo) -
 
     assert ranked.state is AutopilotState.RANKED
     assert ranked.deterministic_score == 82.5
-    assert ranked.ai_data == {
-        "ai": {
-            "available": True,
-            "confidence": 0.9,
-            "evidence": ["python"],
-            "reason": "available",
-            "reasons": [],
-            "suitable": True,
-        },
-        "ready": True,
-        "reason": "ai_suitable",
-        "retry": False,
-    }
+    assert ranked.ai_data == _ranking_decision(82.5).to_dict()
     assert repo.list_events(item.id)[-1]["reason_code"] == "ai_suitable"
+    assert (
+        repo.list_events(item.id)[-1]["metadata_json"]
+        == _ranking_decision(82.5).to_dict()
+    )
 
 
 def test_ranking_event_failure_rolls_back_score_and_state(repo) -> None:
@@ -3675,3 +3706,256 @@ def test_item_reader_rejects_malformed_persisted_policy_facts(
 
     with pytest.raises((StaleWrite, ValueError)):
         repo.get_item(item.id)
+
+
+def test_finalize_rejects_a_caller_selected_ranked_subset_atomically(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+    low = ranked[1]
+    before = {
+        item.id: (repo.get_item(item.id), tuple(repo.list_events(item.id)))
+        for item in ranked
+    }
+
+    with pytest.raises((StaleWrite, ValueError), match="complete|candidate"):
+        repo.finalize_ranked_candidates(
+            {low.id: low.version},
+            selected_item_ids=[low.id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+
+    for item in ranked:
+        assert (repo.get_item(item.id), tuple(repo.list_events(item.id))) == before[
+            item.id
+        ]
+
+
+def test_finalize_uses_only_the_complete_canonical_qualifying_subset(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    ranked: list[ItemRecord] = []
+    for resume_id, decision in (
+        ("ready", _ranking_decision(80)),
+        ("ai-rejected", _nonqualifying_ranking_decision(99)),
+    ):
+        item = repo.create_item(
+            run.id,
+            "default",
+            "v-1",
+            resume_id,
+            "preset:python",
+        )
+        eligible = repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+        )
+        ranked.append(
+            repo.record_ranking_decision(
+                eligible.id,
+                expected_version=eligible.version,
+                decision=decision,
+                run_id=run.id,
+            )
+        )
+
+    changed = repo.finalize_ranked_candidates(
+        {ranked[0].id: ranked[0].version},
+        selected_item_ids=[ranked[0].id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )
+
+    assert [item.id for item in changed] == [ranked[0].id]
+    assert changed[0].state is AutopilotState.READY
+    assert repo.get_item(ranked[1].id).state is AutopilotState.RANKED
+
+
+def test_finalize_per_resume_cannot_omit_a_ranked_candidate(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+    first = ranked[0]
+
+    with pytest.raises((StaleWrite, ValueError), match="complete|candidate"):
+        repo.finalize_ranked_candidates(
+            {first.id: first.version},
+            selected_item_ids=[first.id],
+            resume_policy="per_resume",
+            run_id=run.id,
+        )
+
+    assert all(
+        repo.get_item(item.id).state is AutopilotState.RANKED for item in ranked
+    )
+
+
+def test_finalize_requires_a_persisted_passing_filter_decision(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+    rejected = FilterDecision(
+        False,
+        "hard_filter:area",
+        {"area_id": "2", "relocation_allowed": False},
+    )
+    repo.conn.execute(
+        "UPDATE hh_autopilot_items SET filter_json = ? WHERE id = ?",
+        (
+            json.dumps(
+                rejected.to_dict(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            ranked[0].id,
+        ),
+    )
+    repo.conn.commit()
+
+    with pytest.raises((StaleWrite, ValueError), match="filter|qualifying"):
+        repo.finalize_ranked_candidates(
+            {item.id: item.version for item in ranked},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+
+    assert all(
+        repo.get_item(item.id).state is AutopilotState.RANKED for item in ranked
+    )
+
+
+def test_persisted_ranking_scalar_and_semantics_are_strictly_reconstructed(
+    repo,
+) -> None:
+    run, ranked = _prepare_ranked_items(repo, resume_ids=("r-1",))
+    item = ranked[0]
+    repo.conn.execute(
+        "UPDATE hh_autopilot_items SET deterministic_score = ? WHERE id = ?",
+        (item.deterministic_score + 1, item.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises(StaleWrite, match="score|ranking"):
+        repo.get_item(item.id)
+
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_items
+        SET deterministic_score = ?,
+            ai_json = json_set(
+                ai_json,
+                '$.ready', json('true'),
+                '$.retry', json('false'),
+                '$.reason', 'ai_unsuitable',
+                '$.ai_decision.suitable', json('false')
+            )
+        WHERE id = ?
+        """,
+        (item.deterministic_score, item.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises(StaleWrite, match="decision|ranking|canonical"):
+        repo.get_item(item.id)
+
+
+def test_completed_run_rejects_every_task8_write_without_side_effects(repo) -> None:
+    filter_run = repo.create_run("filter", trigger="manual", policy_hash="hash")
+    discovered = repo.create_item(
+        filter_run.id,
+        "filter",
+        "v-1",
+        "r-1",
+        "preset:python",
+    )
+    repo.finish_run(filter_run.id, status="completed")
+    before_filter = (repo.get_item(discovered.id), repo.list_events(discovered.id))
+
+    with pytest.raises(StaleWrite, match="running"):
+        repo.record_filter_decision(
+            discovered.id,
+            expected_version=discovered.version,
+            decision=_filter_decision(),
+            run_id=filter_run.id,
+        )
+    assert (repo.get_item(discovered.id), repo.list_events(discovered.id)) == before_filter
+
+    ranking_run = repo.create_run("ranking", trigger="manual", policy_hash="hash")
+    ranking_item = repo.create_item(
+        ranking_run.id,
+        "ranking",
+        "v-1",
+        "r-1",
+        "preset:python",
+    )
+    eligible = repo.record_filter_decision(
+        ranking_item.id,
+        expected_version=ranking_item.version,
+        decision=_filter_decision(),
+        run_id=ranking_run.id,
+    )
+    repo.finish_run(ranking_run.id, status="completed")
+    before_ranking = (repo.get_item(eligible.id), repo.list_events(eligible.id))
+
+    with pytest.raises(StaleWrite, match="running"):
+        repo.record_ranking_decision(
+            eligible.id,
+            expected_version=eligible.version,
+            decision=_ranking_decision(),
+            run_id=ranking_run.id,
+        )
+    assert (repo.get_item(eligible.id), repo.list_events(eligible.id)) == before_ranking
+
+    final_run, ranked = _prepare_ranked_items(
+        repo,
+        account_id="final",
+    )
+    repo.finish_run(final_run.id, status="completed")
+    before_final = {
+        item.id: (repo.get_item(item.id), repo.list_events(item.id))
+        for item in ranked
+    }
+
+    with pytest.raises(StaleWrite, match="running"):
+        repo.finalize_ranked_candidates(
+            {item.id: item.version for item in ranked},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=final_run.id,
+        )
+    for item in ranked:
+        assert (repo.get_item(item.id), repo.list_events(item.id)) == before_final[
+            item.id
+        ]
+
+
+def test_run_fence_cannot_be_replaced_by_a_newer_lease_token(repo) -> None:
+    old_lease = repo.acquire_lease(
+        "default",
+        "old-owner",
+        ttl_seconds=1,
+        now=LEASE_START,
+    )
+    run = repo.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="hash",
+        fencing_token=old_lease.fencing_token,
+    )
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    new_lease = repo.acquire_lease(
+        "default",
+        "new-owner",
+        ttl_seconds=3600,
+        now=LEASE_START + timedelta(seconds=2),
+    )
+    before = (repo.get_item(item.id), repo.list_events(item.id))
+
+    with pytest.raises(LostLease, match="run|lease|fence"):
+        repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+            fencing_token=new_lease.fencing_token,
+        )
+
+    assert (repo.get_item(item.id), repo.list_events(item.id)) == before

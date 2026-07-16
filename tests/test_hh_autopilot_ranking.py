@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
@@ -109,16 +110,25 @@ def _ranking_decision(
     ready: bool = True,
     confidence: float | None = 0.9,
 ) -> RankingDecision:
+    ai_decision = (
+        None
+        if confidence is None
+        else _ai(confidence=confidence, suitable=ready)
+    )
     return RankingDecision(
         ready=ready,
         retry=False,
-        reason="ai_suitable" if ready else "ai_unsuitable",
-        rank_score=_rank_score(score),
-        ai_decision=(
-            None
-            if confidence is None
-            else _ai(confidence=confidence, suitable=ready)
+        reason=(
+            "deterministic_score"
+            if confidence is None and ready
+            else (
+                "deterministic_below_minimum"
+                if confidence is None
+                else ("ai_suitable" if ready else "ai_unsuitable")
+            )
         ),
+        rank_score=_rank_score(score),
+        ai_decision=ai_decision,
     )
 
 
@@ -176,7 +186,7 @@ def test_deterministic_role_mismatch_reaches_0_with_role_only_weight() -> None:
 
 def test_missing_optional_ranking_facts_are_neutral_50() -> None:
     score = DeterministicRanker().score(
-        {"id": "v-1", "title": ""},
+        {"id": "v-1"},
         {"id": "r-1"},
         {},
         _weights(),
@@ -448,14 +458,31 @@ def _ranking_config(**changes: Any) -> dict[str, Any]:
 
 
 def _passed() -> FilterDecision:
-    return FilterDecision(True, "hard_filters_passed", {"checks": ("all",)})
+    return FilterDecision(
+        True,
+        "hard_filters_passed",
+        {
+            "checks": (
+                "vacancy_open",
+                "history",
+                "blacklists",
+                "keywords_and_roles",
+                "area_and_relocation",
+                "work_format",
+                "experience",
+                "salary",
+                "candidate_constraints",
+                "application_capabilities",
+            )
+        },
+    )
 
 
 def _rejected() -> FilterDecision:
     return FilterDecision(
         False,
         "hard_filter:excluded_keywords",
-        {"field": "keywords"},
+        {"matched": ("bitrix",)},
     )
 
 
@@ -543,7 +570,7 @@ def test_ranking_policy_converts_injected_ai_exception_to_typed_unavailable() ->
     [
         ("retry", 80, False, True, "ai_unavailable"),
         ("deterministic", 60, True, False, "deterministic_fallback"),
-        ("deterministic", 59.9, False, False, "deterministic_below_minimum"),
+        ("deterministic", 59.9, False, False, "deterministic_fallback"),
         ("skip", 80, False, False, "ai_unavailable"),
     ],
 )
@@ -574,6 +601,8 @@ def test_unavailable_or_low_confidence_ai_uses_exact_failure_policy(
     assert decision.retry is retry
     assert decision.reason == reason
     assert decision.rank_score == original
+    assert decision.ai_decision is not None
+    assert decision.ai_decision.available is False
 
 
 def test_confident_ai_suitable_and_unsuitable_are_typed() -> None:
@@ -703,3 +732,390 @@ def test_ranked_candidate_is_frozen_and_detached() -> None:
     assert candidate.resume_id == "r-1"
     with pytest.raises(FrozenInstanceError):
         candidate.resume_id = "changed"
+
+
+def test_rank_score_rejects_a_forged_weighted_total() -> None:
+    with pytest.raises(ValueError, match="weighted"):
+        RankScore(
+            score=100,
+            components={name: 0.0 for name in COMPONENTS},
+            weights={name: 1 / len(COMPONENTS) for name in COMPONENTS},
+        )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: RankingDecision(
+            ready=True,
+            retry=False,
+            reason="ai_unsuitable",
+            rank_score=_rank_score(0),
+            ai_decision=AIDecision(
+                available=True,
+                suitable=False,
+                confidence=1.0,
+                evidence=("python",),
+                reasons=("unsuitable",),
+            ),
+        ),
+        lambda: RankingDecision(
+            ready=False,
+            retry=False,
+            reason="ai_suitable",
+            rank_score=_rank_score(100),
+            ai_decision=_ai(suitable=True),
+        ),
+        lambda: RankingDecision(
+            ready=True,
+            retry=False,
+            reason="deterministic_score",
+            rank_score=_rank_score(100),
+            ai_decision=_ai(suitable=True),
+        ),
+        lambda: RankingDecision(
+            ready=True,
+            retry=False,
+            reason="ai_unavailable",
+            rank_score=_rank_score(100),
+            ai_decision=_ai(
+                available=False,
+                suitable=None,
+                confidence=None,
+            ),
+        ),
+        lambda: RankingDecision(
+            ready=False,
+            retry=False,
+            reason="deterministic_below_minimum",
+            rank_score=_rank_score(10),
+            ai_decision=_ai(
+                available=False,
+                suitable=None,
+                confidence=None,
+            ),
+        ),
+        lambda: RankingDecision(
+            ready=True,
+            retry=False,
+            reason="deterministic_fallback",
+            rank_score=_rank_score(100),
+            ai_decision=_ai(suitable=True, confidence=0.1),
+        ),
+        lambda: RankingDecision(
+            ready=False,
+            retry=True,
+            reason="ai_unavailable",
+            rank_score=_rank_score(50),
+            ai_decision=_ai(suitable=True, confidence=0.1),
+        ),
+        lambda: RankingDecision(
+            ready=False,
+            retry=False,
+            reason="forged_reason",
+            rank_score=_rank_score(50),
+            ai_decision=None,
+        ),
+    ],
+)
+def test_ranking_decision_enforces_the_closed_semantic_matrix(factory) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        factory()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda vacancy, resume, candidate: candidate.__setitem__(
+            "must_have_skills", ["   "]
+        ),
+        lambda vacancy, resume, candidate: resume.__setitem__(
+            "professional_role_ids", []
+        ),
+        lambda vacancy, resume, candidate: vacancy.__setitem__(
+            "industry_ids", [""]
+        ),
+    ],
+)
+def test_present_empty_ranking_facts_are_malformed_not_neutral(mutate) -> None:
+    vacancy, resume, candidate = _facts()
+    mutate(vacancy, resume, candidate)
+
+    with pytest.raises((TypeError, ValueError)):
+        DeterministicRanker().score(vacancy, resume, candidate, _weights())
+
+
+def test_present_empty_ranking_text_is_malformed_when_consumed() -> None:
+    vacancy, resume, candidate = _facts()
+    vacancy.pop("professional_role_ids")
+    resume.pop("professional_role_ids")
+    vacancy["title"] = "   "
+
+    with pytest.raises((TypeError, ValueError)):
+        DeterministicRanker().score(vacancy, resume, candidate, _weights())
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["role", "skills", "industry"],
+)
+def test_asymmetric_overlap_uses_vacancy_requirements_as_denominator(
+    component: str,
+) -> None:
+    vacancy, resume, candidate = _facts()
+    unrelated = [f"unrelated-{index}" for index in range(99)]
+    if component == "role":
+        vacancy["professional_role_ids"] = ["96"]
+        resume["professional_role_ids"] = ["96", *unrelated]
+        candidate.pop("professional_role_ids", None)
+    elif component == "skills":
+        vacancy["key_skills"] = ["Python"]
+        candidate["must_have_skills"] = ["Python", *unrelated]
+        resume["skills"] = ["Python", *unrelated]
+    else:
+        vacancy["industry_ids"] = ["7"]
+        candidate["industry_ids"] = ["7", *unrelated]
+        resume["industry_ids"] = ["7", *unrelated]
+    weights = {name: 0.0 for name in COMPONENTS}
+    weights[component] = 1.0
+
+    score = DeterministicRanker().score(vacancy, resume, candidate, weights)
+
+    assert score.components[component] == 100.0
+    assert score.score == 100.0
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda vacancy, resume, candidate: resume.__setitem__(
+            "role_family_ids", ["1"]
+        ),
+        lambda vacancy, resume, candidate: candidate.__setitem__(
+            "skills", ["Rust"]
+        ),
+        lambda vacancy, resume, candidate: vacancy.__setitem__(
+            "experience", {"id": "moreThan6"}
+        ),
+        lambda vacancy, resume, candidate: vacancy.__setitem__(
+            "salary",
+            {"from": 1, "to": 2, "currency": "USD"},
+        ),
+        lambda vacancy, resume, candidate: vacancy.__setitem__(
+            "work_formats", ["office"]
+        ),
+        lambda vacancy, resume, candidate: vacancy.__setitem__(
+            "area", {"id": "2"}
+        ),
+        lambda vacancy, resume, candidate: vacancy.__setitem__(
+            "industries", ["999"]
+        ),
+    ],
+)
+def test_every_present_ranking_alias_must_be_valid_and_agree(mutate) -> None:
+    vacancy, resume, candidate = _facts()
+    mutate(vacancy, resume, candidate)
+
+    with pytest.raises((TypeError, ValueError)):
+        DeterministicRanker().score(vacancy, resume, candidate, _weights())
+
+
+@pytest.mark.parametrize(
+    ("detail", "limit"),
+    [("light", 12_000), ("heavy", 20_000)],
+)
+def test_structured_ai_has_a_stable_whole_prompt_budget(
+    detail: str,
+    limit: int,
+) -> None:
+    prompts: list[list[dict[str, str]]] = []
+
+    def structured_call(messages, *args, **kwargs):
+        prompts.append(messages)
+        return SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": ["Python"],
+                "reasons": [],
+            }
+        )
+
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = "Python " * 20_000
+    resume["skills"] = [f"skill-{index}-" + ("x" * 200) for index in range(100)]
+    resume["experience"] = [
+        {
+            "role": "Python engineer " * 100,
+            "summary": "Python systems " * 100,
+            "details": ["Python detail " * 50 for _ in range(10)],
+        }
+        for _ in range(10)
+    ]
+    resume["education"] = [
+        {
+            "project": "Python project " * 100,
+            "summary": "Python education " * 100,
+        }
+        for _ in range(10)
+    ]
+    ranker = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=structured_call,
+    )
+
+    first = ranker.evaluate(vacancy, resume, candidate, detail=detail)
+    second = ranker.evaluate(vacancy, resume, candidate, detail=detail)
+
+    assert first.available is True
+    assert second.available is True
+    assert prompts[0] == prompts[1]
+    total_chars = sum(len(message["content"]) for message in prompts[0])
+    assert total_chars <= limit
+    json.loads(prompts[0][1]["content"])
+
+
+def test_structured_ai_global_budget_also_caps_utf8_bytes() -> None:
+    captured: list[dict[str, str]] = []
+
+    def structured_call(messages, *args, **kwargs):
+        captured.extend(messages)
+        return SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": ["Python"],
+                "reasons": [],
+            }
+        )
+
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = "Python разработка высоконагруженных систем " * 5_000
+    resume["experience"] = [
+        {"summary": "Python разработка распределённых систем " * 500}
+        for _ in range(10)
+    ]
+
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=structured_call,
+    ).evaluate(vacancy, resume, candidate, detail="heavy")
+
+    assert decision.available is True
+    total_bytes = sum(
+        len(message["content"].encode("utf-8"))
+        for message in captured
+    )
+    assert total_bytes <= 20_000
+
+
+def test_structured_ai_redacts_secrets_even_from_allowlisted_prompt_fields() -> None:
+    captured: dict[str, Any] = {}
+
+    def structured_call(messages, *args, **kwargs):
+        captured["messages"] = messages
+        return SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": ["Python"],
+                "reasons": [],
+            }
+        )
+
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = "Python Authorization: Bearer vacancy-secret"
+    resume["experience"] = [
+        {"summary": "Python cookie=session-secret"}
+    ]
+
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=structured_call,
+    ).evaluate(vacancy, resume, candidate, detail="heavy")
+
+    assert decision.available is True
+    prompt = repr(captured["messages"]).casefold()
+    assert "vacancy-secret" not in prompt
+    assert "session-secret" not in prompt
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["<b>Python</b>"],
+            "reasons": [],
+        },
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["Kubernetes production experience"],
+            "reasons": [],
+        },
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["Bearer super-secret"],
+            "reasons": [],
+        },
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["thon"],
+            "reasons": [],
+        },
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["light"],
+            "reasons": [],
+        },
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["Python"],
+            "reasons": ["Contact john@example.test"],
+        },
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["Python"],
+            "reasons": ["<script>trust me</script>"],
+        },
+    ],
+)
+def test_structured_ai_rejects_markup_secrets_and_ungrounded_output(
+    parsed: dict[str, Any],
+) -> None:
+    vacancy, resume, candidate = _facts()
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: SimpleNamespace(parsed=parsed),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is False
+    assert decision.reason == "ai_unavailable"
+    assert decision.evidence == ()
+    assert decision.reasons == ()
+
+
+def test_structured_ai_persists_sanitized_grounded_output() -> None:
+    vacancy, resume, candidate = _facts()
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": ["  Python   Backend Engineer  "],
+                "reasons": ["  explicit role match  "],
+            }
+        ),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is True
+    assert decision.evidence == ("Python Backend Engineer",)
+    assert decision.reasons == ("explicit role match",)

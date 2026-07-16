@@ -168,6 +168,70 @@ def _mapping(value: Any, *, field_name: str) -> dict[str, Any]:
 
 _MARKUP = re.compile(r"<[^>]*>")
 _SPACES = re.compile(r"\s+")
+_SECRET_BEARING = re.compile(
+    r"(?i)(?:"
+    r"bearer\s+\S+|"
+    r"authorization|"
+    r"access[_ -]?token|"
+    r"refresh[_ -]?token|"
+    r"set-cookie|cookie|"
+    r"password|passwd|"
+    r"proxy(?:[_ -]?(?:url|password|credential))?|"
+    r"api[_ -]?key|"
+    r"credential|"
+    r"otp|"
+    r"secret"
+    r")"
+)
+_FILTER_CHECKS = (
+    "vacancy_open",
+    "history",
+    "blacklists",
+    "keywords_and_roles",
+    "area_and_relocation",
+    "work_format",
+    "experience",
+    "salary",
+    "candidate_constraints",
+    "application_capabilities",
+)
+_HARD_FILTER_REASONS = frozenset(
+    {
+        "hard_filter:vacancy_closed",
+        "hard_filter:already_applied",
+        "hard_filter:active_history",
+        "hard_filter:permanently_skipped",
+        "hard_filter:vacancy_blacklist",
+        "hard_filter:employer_blacklist",
+        "hard_filter:excluded_keywords",
+        "hard_filter:required_keywords",
+        "hard_filter:allowed_role_families",
+        "hard_filter:area",
+        "hard_filter:remote",
+        "hard_filter:schedule",
+        "hard_filter:employment_type",
+        "hard_filter:experience",
+        "hard_filter:minimum_salary",
+        "hard_filter:languages",
+        "hard_filter:citizenships",
+        "hard_filter:required_application_capabilities",
+    }
+)
+_FILTER_REASONS = frozenset(
+    {"hard_filters_passed", "missing_required_data", *_HARD_FILTER_REASONS}
+)
+_RANKING_REASONS = frozenset(
+    {
+        "deterministic_score",
+        "deterministic_below_minimum",
+        "deterministic_fallback",
+        "ai_suitable",
+        "ai_unsuitable",
+        "ai_unavailable",
+        "missing_required_data",
+        *_HARD_FILTER_REASONS,
+    }
+)
 
 
 def _clean_text(value: Any, *, field_name: str, maximum: int = 8_000) -> str:
@@ -177,6 +241,153 @@ def _clean_text(value: Any, *, field_name: str, maximum: int = 8_000) -> str:
         raise ValueError(f"{field_name} must not contain NUL")
     cleaned = _SPACES.sub(" ", _MARKUP.sub(" ", html.unescape(value))).strip()
     return cleaned[:maximum]
+
+
+def _safe_output_text(
+    value: Any,
+    *,
+    field_name: str,
+    maximum: int,
+    allow_empty: bool = False,
+) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be a string")
+    unescaped = html.unescape(value)
+    if _MARKUP.search(unescaped) or "<" in unescaped or ">" in unescaped:
+        raise ValueError(f"{field_name} must not contain markup")
+    parsed = _SPACES.sub(" ", unescaped).strip()
+    if not parsed and not allow_empty:
+        raise ValueError(f"{field_name} must not be empty")
+    if "\0" in parsed:
+        raise ValueError(f"{field_name} must not contain NUL")
+    if len(parsed) > maximum:
+        raise ValueError(f"{field_name} must be at most {maximum} characters")
+    if _SECRET_BEARING.search(parsed):
+        raise ValueError(f"{field_name} must not contain secret-bearing text")
+    return parsed
+
+
+def _filter_sequence(
+    value: Any,
+    *,
+    field_name: str,
+    maximum_items: int = 20,
+) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError(f"{field_name} must be a sequence")
+    if len(value) > maximum_items:
+        raise ValueError(f"{field_name} has too many values")
+    return tuple(
+        _safe_output_text(
+            item,
+            field_name=f"{field_name}[{index}]",
+            maximum=100,
+        )
+        for index, item in enumerate(value)
+    )
+
+
+def _filter_evidence(
+    reason: str,
+    value: Any,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError("evidence must be a mapping")
+    if any(type(key) is not str for key in value):
+        raise TypeError("evidence keys must be strings")
+    evidence = dict(value)
+    shape: tuple[frozenset[str], ...]
+    if reason == "hard_filters_passed":
+        shape = (frozenset({"checks"}),)
+    elif reason == "missing_required_data":
+        shape = (frozenset({"field"}),)
+    elif reason == "hard_filter:vacancy_closed":
+        shape = (frozenset({"archived", "status"}),)
+    elif reason in {
+        "hard_filter:already_applied",
+        "hard_filter:active_history",
+        "hard_filter:permanently_skipped",
+        "hard_filter:vacancy_blacklist",
+    }:
+        shape = (frozenset({"vacancy_id"}),)
+    elif reason == "hard_filter:employer_blacklist":
+        shape = (frozenset({"employer_id"}),)
+    elif reason == "hard_filter:excluded_keywords":
+        shape = (frozenset({"matched"}),)
+    elif reason in {
+        "hard_filter:required_keywords",
+        "hard_filter:languages",
+        "hard_filter:citizenships",
+    }:
+        shape = (frozenset({"missing"}),)
+    elif reason == "hard_filter:allowed_role_families":
+        shape = (frozenset({"actual", "allowed"}),)
+    elif reason == "hard_filter:area":
+        shape = (frozenset({"area_id", "relocation_allowed"}),)
+    elif reason == "hard_filter:remote":
+        shape = (frozenset({"remote"}),)
+    elif reason == "hard_filter:schedule":
+        shape = (frozenset({"schedule"}),)
+    elif reason == "hard_filter:employment_type":
+        shape = (frozenset({"employment"}),)
+    elif reason == "hard_filter:experience":
+        shape = (frozenset({"experience"}),)
+    elif reason == "hard_filter:minimum_salary":
+        shape = (
+            frozenset({"salary_known", "minimum"}),
+            frozenset({"currency", "expected_currency"}),
+            frozenset({"maximum", "minimum"}),
+        )
+    elif reason == "hard_filter:required_application_capabilities":
+        shape = (frozenset({"required", "unavailable"}),)
+    else:
+        raise ValueError("unsupported filter reason")
+    if frozenset(evidence) not in shape:
+        raise ValueError("evidence shape does not match filter reason")
+
+    frozen: dict[str, Any] = {}
+    for key, item in evidence.items():
+        if key in {
+            "checks",
+            "matched",
+            "missing",
+            "actual",
+            "allowed",
+            "required",
+            "unavailable",
+        }:
+            frozen[key] = _filter_sequence(item, field_name=f"evidence.{key}")
+        elif key in {"archived", "relocation_allowed", "remote", "salary_known"}:
+            if type(item) is not bool:
+                raise TypeError(f"evidence.{key} must be a boolean")
+            frozen[key] = item
+        elif key in {"minimum", "maximum"}:
+            if type(item) not in {int, float}:
+                raise TypeError(f"evidence.{key} must be a number")
+            parsed_number = float(item)
+            if (
+                not math.isfinite(parsed_number)
+                or not 0 <= parsed_number <= 1_000_000_000
+            ):
+                raise ValueError(f"evidence.{key} is out of range")
+            frozen[key] = item
+        else:
+            maximum = 128 if key == "field" else 100
+            parsed_text = _safe_output_text(
+                item,
+                field_name=f"evidence.{key}",
+                maximum=maximum,
+                allow_empty=key == "status",
+            )
+            if key == "field" and not re.fullmatch(
+                r"[A-Za-z0-9_.\[\]-]+",
+                parsed_text,
+            ):
+                raise ValueError("evidence.field is not a stable field name")
+            frozen[key] = parsed_text
+    if reason == "hard_filters_passed" and frozen["checks"] != _FILTER_CHECKS:
+        raise ValueError("passing evidence must contain the complete filter checks")
+    return MappingProxyType(frozen)
 
 
 def _json_value(value: Any, *, field_name: str, depth: int = 0) -> Any:
@@ -361,41 +572,9 @@ class FilterDecision:
         if type(self.passed) is not bool:
             raise TypeError("passed must be a boolean")
         reason = _bounded_text(self.reason, field_name="reason", maximum=128)
-        if not isinstance(self.evidence, Mapping):
-            raise TypeError("evidence must be a mapping")
-        allowed_evidence = {
-            "checks",
-            "field",
-            "archived",
-            "status",
-            "vacancy_id",
-            "employer_id",
-            "matched",
-            "missing",
-            "actual",
-            "allowed",
-            "area_id",
-            "relocation_allowed",
-            "remote",
-            "schedule",
-            "employment",
-            "experience",
-            "salary_known",
-            "minimum",
-            "currency",
-            "expected_currency",
-            "maximum",
-            "required",
-            "unavailable",
-            "value",
-            "ids",
-        }
-        unknown_evidence = set(self.evidence) - allowed_evidence
-        if unknown_evidence:
-            raise ValueError("evidence contains a non-allowlisted field")
-        evidence = _freeze_json(self.evidence, field_name="evidence")
-        if not isinstance(evidence, Mapping):
-            raise TypeError("evidence must be a mapping")
+        if reason not in _FILTER_REASONS:
+            raise ValueError("reason is not an approved filter reason")
+        evidence = _filter_evidence(reason, self.evidence)
         if self.passed and reason != "hard_filters_passed":
             raise ValueError("a passing filter decision must use hard_filters_passed")
         if not self.passed and reason == "hard_filters_passed":
@@ -407,7 +586,10 @@ class FilterDecision:
         return {
             "passed": self.passed,
             "reason": self.reason,
-            "evidence": _thaw_json(self.evidence),
+            "evidence": {
+                key: list(item) if isinstance(item, tuple) else item
+                for key, item in self.evidence.items()
+            },
         }
 
 
@@ -439,6 +621,17 @@ class RankScore:
         total = sum(weights.values())
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError("weights must sum to 1")
+        expected_score = round(
+            sum(components[name] * weights[name] for name in components),
+            4,
+        )
+        if not math.isclose(
+            score,
+            expected_score,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("score must equal the canonical weighted total")
         object.__setattr__(self, "score", score)
         object.__setattr__(self, "components", components)
         object.__setattr__(self, "weights", weights)
@@ -503,7 +696,7 @@ class AIDecision:
         if len(value) > 20:
             raise ValueError(f"{field_name} must contain at most 20 values")
         return tuple(
-            _bounded_text(
+            _safe_output_text(
                 item,
                 field_name=f"{field_name}[{index}]",
                 maximum=300,
@@ -542,11 +735,52 @@ class RankingDecision:
             self.ai_decision, AIDecision
         ):
             raise TypeError("ai_decision must be an AIDecision or None")
-        object.__setattr__(
-            self,
-            "reason",
-            _bounded_text(self.reason, field_name="reason", maximum=128),
-        )
+        reason = _bounded_text(self.reason, field_name="reason", maximum=128)
+        if reason not in _RANKING_REASONS:
+            raise ValueError("reason is not an approved ranking reason")
+        ai = self.ai_decision
+        if reason in _HARD_FILTER_REASONS or reason == "missing_required_data":
+            if self.ready or self.retry or ai is not None:
+                raise ValueError("hard-filter ranking outcomes cannot be ready or use AI")
+        elif reason == "deterministic_score":
+            if not self.ready or self.retry or ai is not None:
+                raise ValueError("deterministic_score must be a ready non-AI outcome")
+        elif reason == "deterministic_below_minimum":
+            if self.ready or self.retry or ai is not None:
+                raise ValueError(
+                    "deterministic_below_minimum must be a pure skipped outcome"
+                )
+        elif reason == "deterministic_fallback":
+            if self.retry or ai is None or ai.available:
+                raise ValueError(
+                    "deterministic_fallback requires an unavailable AI result"
+                )
+        elif reason == "ai_suitable":
+            if (
+                not self.ready
+                or self.retry
+                or ai is None
+                or not ai.available
+                or ai.suitable is not True
+            ):
+                raise ValueError("ai_suitable requires an available suitable AI result")
+        elif reason == "ai_unsuitable":
+            if (
+                self.ready
+                or self.retry
+                or ai is None
+                or not ai.available
+                or ai.suitable is not False
+            ):
+                raise ValueError(
+                    "ai_unsuitable requires an available unsuitable AI result"
+                )
+        elif reason == "ai_unavailable":
+            if self.ready or ai is None or ai.available:
+                raise ValueError(
+                    "ai_unavailable requires an unavailable non-ready AI outcome"
+                )
+        object.__setattr__(self, "reason", reason)
 
     @property
     def score(self) -> float:

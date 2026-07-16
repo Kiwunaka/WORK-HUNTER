@@ -19,6 +19,7 @@ from .types import (
     FilterDecision,
     NormalizedVacancy,
     QuotaReservationState,
+    RankScore,
     RankingDecision,
     RetryStage,
     SearchPage,
@@ -566,30 +567,32 @@ def _persisted_filter_data(value: Any) -> dict[str, Any]:
     return decision.to_dict()
 
 
-def _persisted_ai_data(value: Any) -> dict[str, Any]:
-    data = _persisted_json_object(value, field="item ai_json")
-    if not data:
-        return {}
-    if set(data) != {"ready", "retry", "reason", "ai"}:
-        raise StaleWrite("item ai_json has an invalid shape")
-    if type(data["ready"]) is not bool or type(data["retry"]) is not bool:
-        raise StaleWrite("item ai_json readiness flags are malformed")
-    if data["ready"] and data["retry"]:
-        raise StaleWrite("item ai_json cannot be ready and retry")
-    try:
-        reason = _required_text(data["reason"], field="item ai_json reason")
-    except (TypeError, ValueError) as exc:
-        raise StaleWrite("item ai_json reason is malformed") from exc
-    if reason != data["reason"] or len(reason) > 128:
-        raise StaleWrite("item ai_json reason is not canonical")
-    ai_value = data["ai"]
+def _ranking_decision_from_data(
+    data: Mapping[str, Any],
+    *,
+    field: str,
+) -> RankingDecision:
+    if set(data) != {
+        "ready",
+        "retry",
+        "reason",
+        "rank_score",
+        "ai_decision",
+    }:
+        raise StaleWrite(f"{field} has an invalid shape")
+    rank_value = data["rank_score"]
+    if not isinstance(rank_value, Mapping) or set(rank_value) != {
+        "score",
+        "components",
+        "weights",
+    }:
+        raise StaleWrite(f"{field} rank score has an invalid shape")
+    ai_value = data["ai_decision"]
     ai: AIDecision | None
     if ai_value is None:
         ai = None
     else:
-        if not isinstance(ai_value, Mapping):
-            raise StaleWrite("item ai_json AI evidence is malformed")
-        if set(ai_value) != {
+        if not isinstance(ai_value, Mapping) or set(ai_value) != {
             "available",
             "suitable",
             "confidence",
@@ -597,7 +600,7 @@ def _persisted_ai_data(value: Any) -> dict[str, Any]:
             "reasons",
             "reason",
         }:
-            raise StaleWrite("item ai_json AI evidence has an invalid shape")
+            raise StaleWrite(f"{field} AI evidence has an invalid shape")
         try:
             ai = AIDecision(
                 available=ai_value["available"],
@@ -608,13 +611,38 @@ def _persisted_ai_data(value: Any) -> dict[str, Any]:
                 reason=ai_value["reason"],
             )
         except (TypeError, ValueError) as exc:
-            raise StaleWrite("item ai_json AI evidence is malformed") from exc
-    canonical_data = {
-        "ready": data["ready"],
-        "retry": data["retry"],
-        "reason": reason,
-        "ai": None if ai is None else ai.to_dict(),
-    }
+            raise StaleWrite(f"{field} AI evidence is malformed") from exc
+    try:
+        rank_score = RankScore(
+            score=rank_value["score"],
+            components=rank_value["components"],
+            weights=rank_value["weights"],
+        )
+        return RankingDecision(
+            ready=data["ready"],
+            retry=data["retry"],
+            reason=data["reason"],
+            rank_score=rank_score,
+            ai_decision=ai,
+        )
+    except (TypeError, ValueError) as exc:
+        raise StaleWrite(f"{field} has an invalid ranking decision") from exc
+
+
+def _persisted_ai_data(
+    value: Any,
+    *,
+    deterministic_score: float | None,
+) -> dict[str, Any]:
+    data = _persisted_json_object(value, field="item ai_json")
+    if not data:
+        if deterministic_score is not None:
+            raise StaleWrite("item score exists without a ranking decision")
+        return {}
+    decision = _ranking_decision_from_data(data, field="item ai_json")
+    if deterministic_score is None or deterministic_score != decision.score:
+        raise StaleWrite("item deterministic score disagrees with ranking decision")
+    canonical_data = decision.to_dict()
     if _json_dumps(canonical_data, field="item ai_json") != value:
         raise StaleWrite("item ai_json is not a canonical decision")
     return canonical_data
@@ -644,7 +672,7 @@ def _ranking_publication_timestamp(value: str) -> float:
 
 
 def _ranking_ai_confidence(data: Mapping[str, Any]) -> float | None:
-    ai = data.get("ai")
+    ai = data.get("ai_decision")
     if not isinstance(ai, Mapping) or ai.get("available") is not True:
         return None
     value = ai.get("confidence")
@@ -1161,17 +1189,13 @@ class AutopilotRepository:
                 raise StaleWrite(f"item {item_id} version changed")
             if current.state is not AutopilotState.DISCOVERED:
                 raise StaleWrite("filter decision requires a discovered item")
-            run = self._run_for_update(run_id)
-            if run.account_id != current.account_id:
-                raise ValueError("filter decision run and item accounts must match")
-            if current.last_run_id != run_id:
-                raise ValueError("filter decision requires the same run as the item")
-            if fencing_token is not None:
-                self._assert_fence(
-                    current.account_id,
-                    fencing_token,
-                    instant,
-                )
+            self._assert_active_owned_run_for_update(
+                current,
+                run_id=run_id,
+                fencing_token=fencing_token,
+                instant=instant,
+                operation="filter decision",
+            )
             assert_transition(current.state, target)
             cursor = self.conn.execute(
                 """
@@ -1228,16 +1252,7 @@ class AutopilotRepository:
         )
         if fencing_token == 0:
             raise ValueError("fencing_token must be at least 1")
-        ai_payload = {
-            "ready": decision.ready,
-            "retry": decision.retry,
-            "reason": decision.reason,
-            "ai": (
-                None
-                if decision.ai_decision is None
-                else decision.ai_decision.to_dict()
-            ),
-        }
+        ai_payload = decision.to_dict()
         ai_json = _json_dumps(ai_payload, field="ranking AI decision")
         sanitized_payload = _json_loads(
             ai_json,
@@ -1253,17 +1268,13 @@ class AutopilotRepository:
                 raise StaleWrite(f"item {item_id} version changed")
             if current.state is not AutopilotState.ELIGIBLE:
                 raise StaleWrite("ranking decision requires an eligible item")
-            run = self._run_for_update(run_id)
-            if run.account_id != current.account_id:
-                raise ValueError("ranking decision run and item accounts must match")
-            if current.last_run_id != run_id:
-                raise ValueError("ranking decision requires the same run as the item")
-            if fencing_token is not None:
-                self._assert_fence(
-                    current.account_id,
-                    fencing_token,
-                    instant,
-                )
+            self._assert_active_owned_run_for_update(
+                current,
+                run_id=run_id,
+                fencing_token=fencing_token,
+                instant=instant,
+                operation="ranking decision",
+            )
             assert_transition(current.state, AutopilotState.RANKED)
             cursor = self.conn.execute(
                 """
@@ -1351,47 +1362,89 @@ class AutopilotRepository:
         instant = _instant(None, field="now")
         ordered_ids = tuple(sorted(parsed_versions))
         with self.immediate():
-            candidates = tuple(
+            supplied = tuple(
                 self._item_for_update(item_id) for item_id in ordered_ids
             )
-            for candidate in candidates:
+            for candidate in supplied:
                 if candidate.version != parsed_versions[candidate.id]:
                     raise StaleWrite(f"item {candidate.id} version changed")
                 if candidate.state is not AutopilotState.RANKED:
                     raise StaleWrite("candidate finalization requires ranked items")
-            accounts = {candidate.account_id for candidate in candidates}
+            accounts = {candidate.account_id for candidate in supplied}
             if len(accounts) != 1:
                 raise ValueError("candidate items must share one account")
-            vacancies = {candidate.vacancy_id for candidate in candidates}
+            vacancies = {candidate.vacancy_id for candidate in supplied}
             if len(vacancies) != 1:
                 raise ValueError("candidate items must share one vacancy")
-            if any(candidate.last_run_id != run_id for candidate in candidates):
+            if any(candidate.last_run_id != run_id for candidate in supplied):
                 raise ValueError("candidate items must belong to the same run")
             account_id = next(iter(accounts))
-            run = self._run_for_update(run_id)
-            if run.account_id != account_id:
-                raise ValueError("candidate run and item accounts must match")
-            if fencing_token is not None:
-                self._assert_fence(account_id, fencing_token, instant)
-            for candidate in candidates:
-                if (
-                    candidate.deterministic_score is None
-                    or candidate.ai_data.get("ready") is not True
-                    or candidate.ai_data.get("retry") is not False
-                ):
-                    raise ValueError(
-                        "candidate set contains a non-qualifying ranked item"
-                    )
-            if resume_policy == "best_resume_only":
-                ordered_candidates = sorted(
-                    candidates,
-                    key=_ranked_item_sort_key,
+            vacancy_id = next(iter(vacancies))
+            for candidate in supplied:
+                self._assert_active_owned_run_for_update(
+                    candidate,
+                    run_id=run_id,
+                    fencing_token=fencing_token,
+                    instant=instant,
+                    operation="candidate finalization",
                 )
-                if selected != {ordered_candidates[0].id}:
+
+            rows = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_items
+                WHERE account_profile_id = ?
+                  AND vacancy_id = ?
+                  AND last_run_id = ?
+                  AND state = 'ranked'
+                ORDER BY id ASC
+                """,
+                (account_id, vacancy_id, run_id),
+            ).fetchall()
+            candidates = tuple(self._item_from_row(row) for row in rows)
+            qualifying: list[ItemRecord] = []
+            for candidate in candidates:
+                self._assert_active_owned_run_for_update(
+                    candidate,
+                    run_id=run_id,
+                    fencing_token=fencing_token,
+                    instant=instant,
+                    operation="candidate finalization",
+                )
+                try:
+                    filter_decision = FilterDecision(
+                        passed=candidate.filter_data["passed"],
+                        reason=candidate.filter_data["reason"],
+                        evidence=candidate.filter_data["evidence"],
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise StaleWrite(
+                        "candidate filter decision is malformed"
+                    ) from exc
+                if not filter_decision.passed:
+                    raise ValueError(
+                        "candidate set contains a rejected filter decision"
+                    )
+                ranking_decision = _ranking_decision_from_data(
+                    candidate.ai_data,
+                    field="candidate ranking decision",
+                )
+                if ranking_decision.ready and not ranking_decision.retry:
+                    qualifying.append(candidate)
+            complete_ids = {candidate.id for candidate in qualifying}
+            if set(parsed_versions) != complete_ids:
+                raise StaleWrite(
+                    "expected_versions must match the complete qualifying candidate set"
+                )
+            for candidate in qualifying:
+                if candidate.version != parsed_versions[candidate.id]:
+                    raise StaleWrite(f"item {candidate.id} version changed")
+            stable_candidates = sorted(qualifying, key=_ranked_item_sort_key)
+            if resume_policy == "best_resume_only":
+                if selected != {stable_candidates[0].id}:
                     raise ValueError(
                         "selected item is not the stable best candidate"
                     )
-            for candidate in candidates:
+            for candidate in stable_candidates:
                 is_selected = candidate.id in selected
                 target = (
                     AutopilotState.READY
@@ -1413,7 +1466,8 @@ class AutopilotRepository:
                     fence_instant=instant,
                 )
             return tuple(
-                self._item_for_update(item_id) for item_id in ordered_ids
+                self._item_for_update(candidate.id)
+                for candidate in stable_candidates
             )
 
     def create_search_cycle(
@@ -4584,6 +4638,30 @@ class AutopilotRepository:
         if expires_at <= instant:
             raise LostLease(f"account {account_id} lease expired")
 
+    def _assert_active_owned_run_for_update(
+        self,
+        item: ItemRecord,
+        *,
+        run_id: int,
+        fencing_token: int | None,
+        instant: datetime,
+        operation: str,
+    ) -> RunRecord:
+        run = self._run_for_update(run_id)
+        if run.account_id != item.account_id:
+            raise ValueError(f"{operation} run and item accounts must match")
+        if run.status != "running":
+            raise StaleWrite(f"{operation} requires a running run")
+        if item.last_run_id != run_id:
+            raise ValueError(f"{operation} requires the same run as the item")
+        if fencing_token is not None:
+            if run.fencing_token != fencing_token:
+                raise LostLease(
+                    f"{operation} run fence does not match the current lease"
+                )
+            self._assert_fence(item.account_id, fencing_token, instant)
+        return run
+
     def _lease_for_update(self, account_id: str) -> LeaseRecord:
         row = self.conn.execute(
             "SELECT * FROM hh_autopilot_leases WHERE account_profile_id = ?",
@@ -4862,6 +4940,29 @@ class AutopilotRepository:
             retry_stage = RetryStage(retry_value)
         except ValueError as exc:
             raise StaleWrite("item state or retry stage is invalid") from exc
+        deterministic_score = _persisted_score(
+            row["deterministic_score"],
+            field="item deterministic_score",
+        )
+        ai_data = _persisted_ai_data(
+            row["ai_json"],
+            deterministic_score=deterministic_score,
+        )
+        last_outcome_code = _persisted_optional_text(
+            row["last_outcome_code"],
+            field="item last_outcome_code",
+            maximum=128,
+        )
+        if state in {AutopilotState.DISCOVERED, AutopilotState.ELIGIBLE} and (
+            deterministic_score is not None or ai_data
+        ):
+            raise StaleWrite("pre-ranking item contains ranking evidence")
+        if state in {AutopilotState.RANKED, AutopilotState.READY} and (
+            deterministic_score is None or not ai_data
+        ):
+            raise StaleWrite("ranked item is missing a complete ranking decision")
+        if state is AutopilotState.RANKED and last_outcome_code != ai_data["reason"]:
+            raise StaleWrite("ranked item outcome disagrees with ranking decision")
         return ItemRecord(
             id=_persisted_integer(row["id"], field="item id", minimum=1),
             origin_run_id=_persisted_integer(
@@ -4899,21 +5000,14 @@ class AutopilotRepository:
                 field="item version",
             ),
             filter_data=_persisted_filter_data(row["filter_json"]),
-            deterministic_score=_persisted_score(
-                row["deterministic_score"],
-                field="item deterministic_score",
-            ),
-            ai_data=_persisted_ai_data(row["ai_json"]),
+            deterministic_score=deterministic_score,
+            ai_data=ai_data,
             published_at=_persisted_optional_text(
                 row["published_at"],
                 field="item published_at",
                 maximum=128,
             ),
-            last_outcome_code=_persisted_optional_text(
-                row["last_outcome_code"],
-                field="item last_outcome_code",
-                maximum=128,
-            ),
+            last_outcome_code=last_outcome_code,
             active_attempt_id=(
                 None
                 if row["active_attempt_id"] is None

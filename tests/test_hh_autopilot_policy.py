@@ -161,6 +161,16 @@ def test_each_hard_filter_has_a_stable_reason(
         case["context"]["relocation_allowed"] = False
     if path == "vacancy.schedule_id":
         case["vacancy"]["work_format_ids"] = ["office"]
+    if path == "context.history.already_applied":
+        case["context"]["history"]["applied_vacancy_ids"] = ["v-1"]
+    if path == "context.history.active":
+        case["context"]["history"]["active_vacancy_ids"] = ["v-1"]
+    if path == "context.history.permanently_skipped":
+        case["context"]["history"]["permanently_skipped_vacancy_ids"] = ["v-1"]
+    if path == "context.blacklist.vacancy":
+        case["context"]["blacklist"]["vacancy_ids"] = ["v-1"]
+    if path == "context.blacklist.employer":
+        case["context"]["blacklist"]["employer_ids"] = ["e-1"]
 
     decision = _evaluate(case)
 
@@ -226,6 +236,7 @@ def test_unknown_or_malformed_required_facts_fail_closed(
 
 def test_history_id_sets_are_exact_bounded_facts() -> None:
     case = _base_case()
+    case["context"]["history"]["already_applied"] = True
     case["context"]["history"]["applied_vacancy_ids"] = ["v-1"]
 
     decision = _evaluate(case)
@@ -432,6 +443,19 @@ def test_evidence_is_bounded_allowlisted_and_detached() -> None:
         decision.evidence["field"] = "changed"
 
 
+def test_policy_redacts_secret_bearing_matched_terms_before_evidence() -> None:
+    case = _base_case()
+    case["filters"]["excluded_keywords"] = ["Bearer super-secret"]
+    case["candidate"]["stop_words"] = []
+    case["vacancy"]["description"] = "Bearer super-secret"
+
+    decision = _evaluate(case)
+
+    assert decision.reason == "hard_filter:excluded_keywords"
+    assert decision.evidence["matched"] == ("redacted",)
+    assert "secret" not in repr(decision.evidence).casefold()
+
+
 @pytest.mark.parametrize(
     "evidence",
     [
@@ -465,3 +489,148 @@ def test_evaluating_one_vacancy_cannot_mutate_any_input_or_next_evaluation() -> 
     assert first_decision == second_decision
     assert first == first_before
     assert second == second_before
+
+
+@pytest.mark.parametrize(
+    "history_changes",
+    [
+        {"already_applied": False, "existing": True},
+        {"already_applied": False, "existing": "not-a-bool"},
+    ],
+)
+def test_every_present_history_alias_must_be_valid_and_agree(
+    history_changes: dict[str, Any],
+) -> None:
+    case = _base_case()
+    case["context"]["history"].update(history_changes)
+
+    decision = _evaluate(case)
+
+    assert decision.passed is False
+    assert decision.reason == "missing_required_data"
+    assert decision.evidence == {"field": "history.already_applied"}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda case: case["vacancy"].__setitem__("role_family_ids", ["1"]),
+        lambda case: case["vacancy"].__setitem__("area", {"id": "2"}),
+        lambda case: case["vacancy"].__setitem__("schedule", {"id": "office"}),
+        lambda case: case["vacancy"].__setitem__("work_formats", ["office"]),
+        lambda case: case["vacancy"].__setitem__("employment", {"id": "part"}),
+        lambda case: case["vacancy"].__setitem__(
+            "experience", {"id": "moreThan6"}
+        ),
+        lambda case: case["vacancy"].__setitem__(
+            "salary",
+            {"from": 170_000, "to": 240_000, "currency": "RUR"},
+        ),
+        lambda case: case["vacancy"].__setitem__("currency", "USD"),
+        lambda case: case["context"]["blacklist"].__setitem__(
+            "vacancy_ids", ["v-1"]
+        ),
+        lambda case: (
+            case["vacancy"].__setitem__("area_id", "2"),
+            case["candidate"].__setitem__("relocation_allowed", True),
+        ),
+        lambda case: case["vacancy"].update(
+            {
+                "application_capabilities": ["direct"],
+                "application_capability": "form",
+            }
+        ),
+    ],
+)
+def test_present_filter_aliases_must_agree_across_nested_and_top_level_facts(
+    mutate,
+) -> None:
+    case = _base_case()
+    mutate(case)
+
+    decision = _evaluate(case)
+
+    assert decision.passed is False
+    assert decision.reason == "missing_required_data"
+
+
+def test_explicit_vacancy_capability_requires_explicit_supported_facts() -> None:
+    case = _base_case()
+    case["filters"]["required_application_capabilities"] = []
+    case["vacancy"]["application_capabilities"] = ["form"]
+    case["context"].pop("supported_application_capabilities")
+
+    decision = _evaluate(case)
+
+    assert decision.passed is False
+    assert decision.reason == "missing_required_data"
+    assert decision.evidence == {
+        "field": "context.supported_application_capabilities"
+    }
+
+    case["context"]["supported_application_capabilities"] = ["form"]
+    assert _evaluate(case).passed is True
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        lambda: FilterDecision(
+            False,
+            "forged_reason",
+            {
+                "field": {
+                    "secret": "Bearer abc",
+                    "raw_html": "<script>x</script>",
+                }
+            },
+        ),
+        lambda: FilterDecision(
+            True,
+            "hard_filters_passed",
+            {"field": "area"},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:area",
+            {"matched": ("python",)},
+        ),
+        lambda: FilterDecision(
+            False,
+            "missing_required_data",
+            {"field": "access_token"},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:excluded_keywords",
+            {"matched": ("<b>python</b>",)},
+        ),
+    ],
+)
+def test_filter_decision_is_a_closed_reason_specific_safe_value_object(
+    decision,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        decision()
+
+
+def test_keyword_matching_uses_alphanumeric_phrase_boundaries() -> None:
+    case = _base_case()
+    case["filters"]["required_keywords"] = []
+    case["filters"]["excluded_keywords"] = ["go"]
+    case["candidate"]["stop_words"] = []
+    case["vacancy"]["title"] = "Django Backend Engineer"
+    case["vacancy"]["description"] = "Python services"
+
+    assert _evaluate(case).passed is True
+
+    case["filters"]["excluded_keywords"] = []
+    case["filters"]["required_keywords"] = ["go"]
+    assert _evaluate(case).reason == "hard_filter:required_keywords"
+
+    case["vacancy"]["description"] = "Python, Go."
+    assert _evaluate(case).passed is True
+
+    case["filters"]["required_keywords"] = ["go engineer"]
+    case["vacancy"]["description"] = "Python and Go Engineer services"
+    assert _evaluate(case).passed is True
