@@ -3990,6 +3990,22 @@ class AutopilotRepository:
                     )
                 if target["active_attempt_id"] is not None:
                     raise StaleWrite("literal target already owns an attempt")
+                active_targets = self.conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM hh_autopilot_one_shot_targets
+                    WHERE authorization_ref = ? AND status = 'active'
+                    """,
+                    (literal.reference_id,),
+                ).fetchone()
+                active_count = _persisted_integer(
+                    active_targets["total"],
+                    field="one-shot active target count",
+                )
+                if consumed + active_count >= maximum:
+                    raise RepositoryAuthorizationDenied(
+                        "literal_authorization_inactive"
+                    )
                 authorization_kind = AuthorizationKind.LITERAL_CONFIRMATION
                 authorization_ref = literal.reference_id
                 policy_hash = run.policy_hash

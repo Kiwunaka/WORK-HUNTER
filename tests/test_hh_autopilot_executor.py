@@ -29,6 +29,7 @@ from work_hunter.hh_autopilot.types import (
     AIDecision,
     AutopilotState,
     DeliveryCertainty,
+    DispatchConfigSnapshot,
     DispatchOutcome,
     FilterDecision,
     LiteralConfirmation,
@@ -961,6 +962,93 @@ def test_literal_confirmation_rejects_target_not_in_immutable_set(
 
         assert raised.value.code == "literal_target_mismatch"
         assert case.transport.calls == []
+    finally:
+        case.storage.close()
+
+
+def test_literal_prepare_reserves_success_capacity_before_finalization(
+    tmp_path,
+) -> None:
+    case = _make_case(
+        tmp_path,
+        live=False,
+        one_shot_targets=(("r-1", "v-1"), ("r-1", "v-2")),
+        max_success=1,
+    )
+    try:
+        case.storage.upsert_job(
+            Job(
+                source="hh",
+                source_id="v-2",
+                url="https://hh.ru/vacancy/v-2",
+                title="Python developer",
+            )
+        )
+        second_item = _ready_item(
+            case.repo,
+            case.run,
+            case.lease,
+            vacancy_id="v-2",
+            resume_id="r-1",
+        )
+        account = case.settings.accounts[0]
+        snapshot = DispatchConfigSnapshot(
+            account_id="default",
+            enabled=account.enabled,
+            paused=account.paused,
+            authorization_generation=account.authorization_generation,
+            policy_hash="manual-policy",
+            within_scheduler_window=True,
+            timezone_name=case.settings.timezone,
+            daily_limit=case.settings.limits.daily_success,
+            run_limit=case.settings.limits.per_run_success,
+            resume_policy=str(case.settings.application["resume_policy"]),
+            cover_letter_mode=str(
+                case.settings.application["cover_letter_mode"]
+            ),
+            lease_ttl_seconds=case.settings.lease.ttl_seconds,
+            request_timeout_seconds=case.settings.lease.request_timeout_seconds,
+        )
+        case.repo.prepare_dispatch(
+            item_id=case.item.id,
+            expected_version=case.item.version,
+            authorization=case.authorization,
+            fencing_token=case.lease.fencing_token,
+            snapshot=snapshot,
+            now=case.now,
+        )
+        before_events = case.repo.list_events(second_item.id)
+        before_attempts = case.repo.count_application_attempts()
+        before_reservations = case.repo.count_reservations()
+        before_guards = case.repo.count_guards()
+
+        with pytest.raises(RepositoryAuthorizationDenied) as raised:
+            case.repo.prepare_dispatch(
+                item_id=second_item.id,
+                expected_version=second_item.version,
+                authorization=case.authorization,
+                fencing_token=case.lease.fencing_token,
+                snapshot=snapshot,
+                now=case.now,
+            )
+
+        assert raised.value.code == "literal_authorization_inactive"
+        assert case.repo.get_item(second_item.id) == second_item
+        assert case.repo.list_events(second_item.id) == before_events
+        assert case.repo.count_application_attempts() == before_attempts
+        assert case.repo.count_reservations() == before_reservations
+        assert case.repo.count_guards() == before_guards
+        assert case.repo.get_guard("default", "hh", "v-2") is None
+        second_target = case.repo.conn.execute(
+            """
+            SELECT status, active_attempt_id
+            FROM hh_autopilot_one_shot_targets
+            WHERE authorization_ref = 'manual-1'
+              AND resume_id = 'r-1' AND vacancy_id = 'v-2'
+            """
+        ).fetchone()
+        assert second_target["status"] == "pending"
+        assert second_target["active_attempt_id"] is None
     finally:
         case.storage.close()
 
