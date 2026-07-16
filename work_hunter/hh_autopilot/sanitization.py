@@ -51,7 +51,7 @@ _AUTH_SCHEME = re.compile(
 )
 _BEARER_TECHNICAL_DESCRIPTORS = frozenset({"token-based", "jwt-based"})
 _AUTHENTICATION_CONTINUATION = re.compile(
-    r"^\s+authentication\b",
+    r"^\s+(?:authentication|auth|scheme)\b",
     re.IGNORECASE,
 )
 _EMAIL_CANDIDATE = re.compile(

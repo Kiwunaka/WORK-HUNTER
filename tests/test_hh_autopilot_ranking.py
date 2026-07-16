@@ -16,6 +16,7 @@ from work_hunter.hh_autopilot.ranking import (
     StructuredAIRanker,
     select_resume,
 )
+from work_hunter.hh_autopilot.sanitization import contains_sensitive_text
 from work_hunter.hh_autopilot.search import normalize_vacancy
 from work_hunter.hh_autopilot.types import (
     AIDecision,
@@ -60,6 +61,12 @@ COMPOSITE_UNSAFE_TEXT = (
     "%42earer%26%2332%3Babc123",
     "%2526lt%253Bscript%2526gt%253Bsecret",
 )
+SHORT_AUTH_TECHNICAL_PROSE = (
+    "Bearer token-based auth",
+    "Bearer JWT-based auth",
+    "Bearer token-based scheme",
+    "Bearer JWT-based scheme",
+)
 AUTH_TECHNICAL_PROSE = (
     "Basic Python knowledge",
     "Basic SQL",
@@ -67,11 +74,13 @@ AUTH_TECHNICAL_PROSE = (
     "Bearer platform engineer",
     "Experience with Bearer token-based authentication",
     "Bearer JWT-based authentication",
+    *SHORT_AUTH_TECHNICAL_PROSE,
 )
 REAL_AUTH_CREDENTIALS = (
     "Bearer abc123",
     "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
     "Bearer opaque-token",
+    "Bearer opaque-token scheme",
     "Bearer AbCdEfGhIjKlMnOpQrStUvWx",
     "Basic dXNlcjpwYXNz",
     "Authorization: Basic dXNlcjpwYXNz",
@@ -1656,6 +1665,11 @@ def test_structured_ai_preserves_spaces_when_stripping_safe_html() -> None:
     assert captured["payload"]["vacancy"]["description"] == "Python developer"
 
 
+@pytest.mark.parametrize("prose", SHORT_AUTH_TECHNICAL_PROSE)
+def test_short_auth_technical_prose_is_not_sensitive(prose: str) -> None:
+    assert contains_sensitive_text(prose) is False
+
+
 @pytest.mark.parametrize("prose", AUTH_TECHNICAL_PROSE)
 def test_structured_ai_allows_authentication_technical_prose(
     prose: str,
@@ -1692,6 +1706,11 @@ def test_ai_decision_allows_authentication_technical_prose() -> None:
     )
 
     assert decision.evidence == AUTH_TECHNICAL_PROSE
+
+
+@pytest.mark.parametrize("credential", REAL_AUTH_CREDENTIALS)
+def test_real_auth_credentials_remain_sensitive(credential: str) -> None:
+    assert contains_sensitive_text(credential) is True
 
 
 @pytest.mark.parametrize("credential", REAL_AUTH_CREDENTIALS)
