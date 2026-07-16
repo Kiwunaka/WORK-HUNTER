@@ -170,6 +170,7 @@ class SearchCycleRecord:
     owner_run_id: int
     claim_version: int
     fencing_token: int
+    mode: str
     distinct_vacancy_cap: int | None
     status: str
     created_at: str
@@ -975,8 +976,8 @@ class AutopilotRepository:
                 """
                 INSERT INTO hh_autopilot_search_cycles (
                     account_profile_id, policy_hash, origin_run_id, owner_run_id,
-                    claim_version, fencing_token, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 0, ?, 'running', ?, ?)
+                    claim_version, fencing_token, mode, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 0, ?, ?, 'running', ?, ?)
                 """,
                 (
                     account_id,
@@ -984,6 +985,7 @@ class AutopilotRepository:
                     run_id,
                     run_id,
                     fencing_token,
+                    mode,
                     now,
                     now,
                 ),
@@ -3701,6 +3703,8 @@ class AutopilotRepository:
         if mode == "shadow":
             if run.trigger != "shadow":
                 raise RepositoryAuthorizationDenied("shadow_run_required")
+            if run.grant_id is not None:
+                raise RepositoryAuthorizationDenied("shadow_run_must_be_grantless")
             return
         if run.trigger == "shadow":
             raise RepositoryAuthorizationDenied("live_search_forbids_shadow_run")
@@ -3740,7 +3744,10 @@ class AutopilotRepository:
         origin_mode = self._search_cycle_origin_mode_for_update(cycle)
         if origin_mode != mode:
             raise RepositoryAuthorizationDenied("search_cycle_mode_mismatch")
-        run = self._run_for_update(run_id)
+        run = self._assert_search_owner_provenance_for_update(
+            cycle,
+            origin_mode=origin_mode,
+        )
         self._assert_search_run_for_update(
             run,
             account_id=account_id,
@@ -3753,6 +3760,7 @@ class AutopilotRepository:
     def _search_cycle_origin_mode_for_update(
         self, cycle: SearchCycleRecord
     ) -> str:
+        mode = cycle.mode
         origin = self._run_for_update(cycle.origin_run_id)
         if origin.id != cycle.origin_run_id:
             raise StaleWrite("search cycle origin run id changed")
@@ -3766,17 +3774,25 @@ class AutopilotRepository:
             and origin.fencing_token != cycle.fencing_token
         ):
             raise LostLease("search cycle origin fencing token changed")
+        if mode == "shadow":
+            if origin.trigger != "shadow" or origin.grant_id is not None:
+                raise StaleWrite("shadow search origin provenance changed")
+            return mode
         if origin.trigger == "shadow":
-            if origin.grant_id is not None:
-                raise StaleWrite("shadow search origin unexpectedly has a grant")
-            return "shadow"
+            raise StaleWrite("live search origin became shadow")
         self._assert_historical_search_grant_for_update(origin, cycle=cycle)
-        return "live"
+        return mode
 
     def _assert_search_owner_provenance_for_update(
-        self, cycle: SearchCycleRecord
+        self,
+        cycle: SearchCycleRecord,
+        *,
+        origin_mode: str | None = None,
     ) -> RunRecord:
-        origin_mode = self._search_cycle_origin_mode_for_update(cycle)
+        if origin_mode is None:
+            origin_mode = self._search_cycle_origin_mode_for_update(cycle)
+        elif origin_mode != cycle.mode:
+            raise StaleWrite("search cycle validated mode changed")
         owner = self._run_for_update(cycle.owner_run_id)
         if owner.id != cycle.owner_run_id:
             raise StaleWrite("search cycle owner run id changed")
@@ -4115,6 +4131,9 @@ class AutopilotRepository:
         status = _persisted_text(row["status"], field="search cycle status")
         if status not in {"running", "complete", "failed", "interrupted", "superseded"}:
             raise StaleWrite("invalid search cycle status in storage")
+        mode = _persisted_text(row["mode"], field="search cycle mode")
+        if mode not in {"live", "shadow"}:
+            raise StaleWrite("invalid search cycle mode in storage")
         distinct_vacancy_cap = row["distinct_vacancy_cap"]
         if distinct_vacancy_cap is not None:
             distinct_vacancy_cap = _persisted_integer(
@@ -4146,6 +4165,7 @@ class AutopilotRepository:
                 minimum=1,
                 error_type=LostLease,
             ),
+            mode=mode,
             distinct_vacancy_cap=distinct_vacancy_cap,
             status=status,
             created_at=_persisted_text(

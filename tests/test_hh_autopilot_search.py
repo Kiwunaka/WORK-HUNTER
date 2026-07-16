@@ -877,6 +877,137 @@ def test_shadow_cycle_cannot_be_claimed_or_promoted_to_live(
     assert repo.count_items() == 1
 
 
+def _tamper_shadow_origin_into_live(
+    repo: AutopilotRepository,
+    shadow: RunLease,
+) -> None:
+    repo.create_grants([("default", "hash", "operator", "tamper")])
+    grant = repo.active_grant("default")
+    assert grant is not None
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_runs
+        SET trigger = 'manual', grant_id = ?
+        WHERE id = ?
+        """,
+        (grant.id, shadow.run.id),
+    )
+    repo.conn.commit()
+
+
+def test_persisted_shadow_mode_blocks_origin_tamper_before_provider_mutation(
+    repo: AutopilotRepository,
+) -> None:
+    shadow = _context(repo, trigger="shadow")
+    cycle = repo.create_search_cycle(
+        "default",
+        shadow.run.id,
+        "hash",
+        shadow.lease.fencing_token,
+        mode="shadow",
+    )
+    _tamper_shadow_origin_into_live(repo, shadow)
+    transport = FakePages(
+        [SearchPage([_vacancy("promoted")], 0, 1, 1, 1)]
+    )
+    before = (
+        repo.get_search_cycle(cycle.id),
+        len(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    )
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        HHSearchProvider(transport, repo).collect(
+            _request(shadow, mode="live", per_page=1, remaining_budget=1)
+        )
+
+    assert transport.requested == []
+    assert (
+        repo.get_search_cycle(cycle.id),
+        len(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    ) == before
+
+
+def test_persisted_shadow_mode_blocks_origin_tamper_before_status_mutation(
+    repo: AutopilotRepository,
+) -> None:
+    shadow = _context(repo, trigger="shadow")
+    cycle = repo.create_search_cycle(
+        "default",
+        shadow.run.id,
+        "hash",
+        shadow.lease.fencing_token,
+        mode="shadow",
+    )
+    _tamper_shadow_origin_into_live(repo, shadow)
+    before = repo.get_search_cycle(cycle.id)
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        repo.interrupt_search_cycle(cycle.id, shadow.lease.fencing_token)
+
+    assert repo.get_search_cycle(cycle.id) == before
+
+
+def test_persisted_shadow_mode_blocks_origin_tamper_before_claim_mutation(
+    repo: AutopilotRepository,
+) -> None:
+    shadow = _context(repo, trigger="shadow")
+    cycle = repo.create_search_cycle(
+        "default",
+        shadow.run.id,
+        "hash",
+        shadow.lease.fencing_token,
+        mode="shadow",
+    )
+    repo.interrupt_search_cycle(cycle.id, shadow.lease.fencing_token)
+    _tamper_shadow_origin_into_live(repo, shadow)
+    recovery = _recovery_context(repo, shadow)
+    before = (repo.get_search_cycle(cycle.id), repo.get_run(shadow.run.id))
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        repo.claim_search_cycle(
+            cycle.id,
+            expected_claim_version=0,
+            new_run_id=recovery.run.id,
+            policy_hash="hash",
+            fencing_token=recovery.lease.fencing_token,
+        )
+
+    assert (repo.get_search_cycle(cycle.id), repo.get_run(shadow.run.id)) == before
+
+
+def test_persisted_live_mode_blocks_origin_tamper_before_checkpoint_mutation(
+    repo: AutopilotRepository,
+) -> None:
+    live = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default",
+        live.run.id,
+        "hash",
+        live.lease.fencing_token,
+        mode="live",
+    )
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_runs
+        SET trigger = 'shadow', grant_id = NULL
+        WHERE id = ?
+        """,
+        (live.run.id,),
+    )
+    repo.conn.commit()
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        repo.ensure_search_checkpoint(cycle.id, "r-1", "tampered")
+
+    assert repo.list_search_checkpoints(cycle.id) == []
+
+
 def test_claim_adopts_stale_running_cycle_after_hard_crash_and_resumes(
     repo: AutopilotRepository,
 ) -> None:
@@ -1757,6 +1888,83 @@ def test_malformed_stored_distinct_cap_fails_closed(
         repo.get_search_cycle(cycle.id)
 
 
+@pytest.mark.parametrize(
+    ("trigger", "mode"),
+    [("manual", "live"), ("shadow", "shadow")],
+)
+def test_new_search_cycle_persists_requested_immutable_mode(
+    repo: AutopilotRepository,
+    trigger: str,
+    mode: str,
+) -> None:
+    ctx = _context(repo, trigger=trigger)
+
+    cycle = repo.create_search_cycle(
+        "default",
+        ctx.run.id,
+        "hash",
+        ctx.lease.fencing_token,
+        mode=mode,
+    )
+
+    assert cycle.mode == mode
+    stored = repo.get_search_cycle(cycle.id)
+    assert stored is not None
+    assert stored.mode == mode
+
+
+def test_new_shadow_cycle_rejects_granted_origin_before_insert(
+    repo: AutopilotRepository,
+) -> None:
+    shadow = _context(repo, trigger="shadow")
+    repo.create_grants([("default", "hash", "operator", "tamper")])
+    grant = repo.active_grant("default")
+    assert grant is not None
+    repo.conn.execute(
+        "UPDATE hh_autopilot_runs SET grant_id = ? WHERE id = ?",
+        (grant.id, shadow.run.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        repo.create_search_cycle(
+            "default",
+            shadow.run.id,
+            "hash",
+            shadow.lease.fencing_token,
+            mode="shadow",
+        )
+
+    assert repo.count_search_cycles() == 0
+
+
+@pytest.mark.parametrize(
+    "stored",
+    ["LIVE", sqlite3.Binary(b"live"), 1.5],
+)
+def test_search_cycle_reader_rejects_malformed_persisted_mode(
+    repo: AutopilotRepository,
+    stored: Any,
+) -> None:
+    ctx = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default",
+        ctx.run.id,
+        "hash",
+        ctx.lease.fencing_token,
+        mode="live",
+    )
+    repo.conn.execute("PRAGMA ignore_check_constraints = ON")
+    repo.conn.execute(
+        "UPDATE hh_autopilot_search_cycles SET mode = ? WHERE id = ?",
+        (stored, cycle.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises(StaleWrite):
+        repo.get_search_cycle(cycle.id)
+
+
 def test_direct_page_commit_requires_initialized_or_exact_durable_cap(
     repo: AutopilotRepository,
 ) -> None:
@@ -2278,6 +2486,94 @@ def test_valid_live_cycle_supports_multiple_recovery_claims(
     assert claimed_twice is not None
     assert claimed_twice.owner_run_id == recovery_two.run.id
     assert claimed_twice.claim_version == 2
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["checkpoint", "cap", "commit", "provider"],
+)
+def test_recovered_owner_trigger_tamper_blocks_every_runtime_mutation(
+    repo: AutopilotRepository,
+    operation: str,
+) -> None:
+    first = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", first.run.id, "hash", first.lease.fencing_token
+    )
+    checkpoint = repo.ensure_search_checkpoint(
+        cycle.id, "r-1", "preset:existing"
+    )
+    repo.interrupt_search_cycle(cycle.id, first.lease.fencing_token)
+    recovery = _recovery_context(repo, first)
+    claimed = repo.claim_search_cycle(
+        cycle.id,
+        expected_claim_version=0,
+        new_run_id=recovery.run.id,
+        policy_hash="hash",
+        fencing_token=recovery.lease.fencing_token,
+    )
+    assert claimed is not None
+    repo.conn.execute(
+        "UPDATE hh_autopilot_runs SET trigger = 'manual' WHERE id = ?",
+        (recovery.run.id,),
+    )
+    repo.conn.commit()
+    transport = FakePages(
+        [SearchPage([_vacancy("tampered")], 0, 1, 1, 1)]
+    )
+    before = (
+        repo.get_search_cycle(cycle.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    )
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        if operation == "checkpoint":
+            repo.ensure_search_checkpoint(cycle.id, "r-1", "preset:new")
+        elif operation == "cap":
+            repo.initialize_search_cycle_distinct_cap(
+                cycle.id,
+                1,
+                fencing_token=recovery.lease.fencing_token,
+                mode="live",
+                owner_run_id=recovery.run.id,
+                expected_claim_version=1,
+                policy_hash="hash",
+            )
+        elif operation == "commit":
+            repo.commit_search_page(
+                checkpoint.id,
+                expected_next_page=0,
+                page=SearchPage([_vacancy("tampered")], 0, 1, 1, 1),
+                normalized=[normalize_vacancy(_vacancy("tampered"))],
+                fencing_token=recovery.lease.fencing_token,
+                mode="live",
+                owner_run_id=recovery.run.id,
+                expected_claim_version=1,
+                policy_hash="hash",
+                terminal=True,
+                absolute_distinct_cap=1,
+            )
+        else:
+            HHSearchProvider(transport, repo).collect(
+                _request(
+                    recovery,
+                    query_key="preset:provider",
+                    per_page=1,
+                    remaining_budget=1,
+                )
+            )
+
+    assert transport.requested == []
+    assert (
+        repo.get_search_cycle(cycle.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    ) == before
 
 
 @pytest.mark.parametrize(

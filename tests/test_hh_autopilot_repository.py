@@ -129,6 +129,7 @@ RUNTIME_TABLE_COLUMNS = {
         "created_at",
         "updated_at",
         "distinct_vacancy_cap",
+        "mode",
     ),
     "hh_autopilot_search_checkpoints": (
         "id",
@@ -318,6 +319,8 @@ RUNTIME_CHECKS = {
     ),
     "hh_autopilot_search_cycles": (
         "status IN ('running','complete','failed','interrupted','superseded')",
+        "typeof(mode) = 'text'",
+        "mode IN ('live', 'shadow')",
     ),
     "hh_autopilot_search_checkpoints": (
         "status IN ('pending','running','complete','failed')",

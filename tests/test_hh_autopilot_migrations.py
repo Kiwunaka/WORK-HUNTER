@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from work_hunter.config import config_path, database_path, default_config, save_config
+from work_hunter.hh_autopilot.repository import AutopilotRepository
 from work_hunter.models import Application, Job
 from work_hunter.services import WorkHunter
 from work_hunter.storage import Storage
@@ -722,6 +723,175 @@ def test_search_budget_migration_upgrades_0003_database_without_losing_cycle(
     assert cycle["status"] == "running"
     assert cycle["distinct_vacancy_cap"] is None
     assert "0004_hh_autopilot_search_budget.sql" in applied
+
+
+def test_search_mode_migration_upgrades_0004_with_immutable_live_and_shadow_modes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "at-0004.sqlite3"
+    packaged = Path(__file__).parents[1] / "work_hunter" / "migrations"
+    old_migrations = tmp_path / "old-migrations-0004"
+    old_migrations.mkdir()
+    for name in (
+        "0001_backbone.sql",
+        "0002_account_aware_applications.sql",
+        "0003_hh_autopilot_runtime.sql",
+        "0004_hh_autopilot_search_budget.sql",
+    ):
+        shutil.copyfile(packaged / name, old_migrations / name)
+    old = Storage(path, migrations_dir=old_migrations)
+    try:
+        old.conn.execute(
+            """
+            INSERT INTO hh_autopilot_grants (
+                account_profile_id, scope, policy_hash, generation, active,
+                actor, source, created_at, revoked_at
+            ) VALUES (
+                'live-account', 'applications', 'hash', 1, 1,
+                'operator', 'migration-test',
+                '2026-07-16T00:00:00+00:00', ''
+            )
+            """
+        )
+        grant_id = old.conn.execute(
+            "SELECT id FROM hh_autopilot_grants"
+        ).fetchone()["id"]
+        old.conn.execute(
+            """
+            INSERT INTO hh_autopilot_runs (
+                account_profile_id, trigger, status, grant_id, policy_hash,
+                fencing_token, counters_json, error, started_at, finished_at,
+                created_at
+            ) VALUES
+                (
+                    'live-account', 'manual', 'running', ?, 'hash', 1, '{}', '',
+                    '2026-07-16T00:00:00+00:00', '',
+                    '2026-07-16T00:00:00+00:00'
+                ),
+                (
+                    'shadow-account', 'shadow', 'running', NULL, 'hash', 2, '{}', '',
+                    '2026-07-16T00:00:00+00:00', '',
+                    '2026-07-16T00:00:00+00:00'
+                )
+            """,
+            (grant_id,),
+        )
+        old.conn.execute(
+            """
+            INSERT INTO hh_autopilot_leases (
+                account_profile_id, owner_token, fencing_token, expires_at,
+                updated_at
+            ) VALUES
+                (
+                    'live-account', 'live-owner', 1,
+                    '2099-01-01T00:00:00+00:00',
+                    '2026-07-16T00:00:00+00:00'
+                ),
+                (
+                    'shadow-account', 'shadow-owner', 2,
+                    '2099-01-01T00:00:00+00:00',
+                    '2026-07-16T00:00:00+00:00'
+                )
+            """
+        )
+        run_rows = old.conn.execute(
+            """
+            SELECT id, account_profile_id, trigger, fencing_token
+            FROM hh_autopilot_runs ORDER BY id
+            """
+        ).fetchall()
+        for run in run_rows:
+            old.conn.execute(
+                """
+                INSERT INTO hh_autopilot_search_cycles (
+                    account_profile_id, policy_hash, origin_run_id, owner_run_id,
+                    claim_version, fencing_token, distinct_vacancy_cap, status,
+                    created_at, updated_at
+                ) VALUES (
+                    ?, 'hash', ?, ?, 0, ?, NULL, 'running',
+                    '2026-07-16T00:00:00+00:00',
+                    '2026-07-16T00:00:00+00:00'
+                )
+                """,
+                (
+                    run["account_profile_id"],
+                    run["id"],
+                    run["id"],
+                    run["fencing_token"],
+                ),
+            )
+        old.conn.commit()
+    finally:
+        old.close()
+
+    upgraded = Storage(path)
+    try:
+        columns = {
+            row["name"]: row
+            for row in upgraded.conn.execute(
+                "PRAGMA table_info(hh_autopilot_search_cycles)"
+            ).fetchall()
+        }
+        cycles = upgraded.conn.execute(
+            """
+            SELECT cycle.id, cycle.mode, typeof(cycle.mode) AS mode_type,
+                   run.trigger
+            FROM hh_autopilot_search_cycles AS cycle
+            JOIN hh_autopilot_runs AS run ON run.id = cycle.origin_run_id
+            ORDER BY cycle.id
+            """
+        ).fetchall()
+        applied_count = upgraded.conn.execute(
+            """
+            SELECT COUNT(*) FROM schema_migrations
+            WHERE version = '0005_hh_autopilot_search_mode.sql'
+            """
+        ).fetchone()[0]
+
+        assert "mode" in columns
+        assert columns["mode"]["notnull"] == 1
+        assert [
+            (row["trigger"], row["mode"], row["mode_type"]) for row in cycles
+        ] == [
+            ("manual", "live", "text"),
+            ("shadow", "shadow", "text"),
+        ]
+        assert applied_count == 1
+
+        repository = AutopilotRepository(upgraded)
+        for cycle in cycles:
+            repository.ensure_search_checkpoint(
+                cycle["id"],
+                "r-1",
+                f"migrated:{cycle['mode']}",
+            )
+
+        for invalid in (None, "LIVE", sqlite3.Binary(b"live")):
+            with pytest.raises(sqlite3.IntegrityError):
+                upgraded.conn.execute(
+                    "UPDATE hh_autopilot_search_cycles SET mode = ? WHERE id = ?",
+                    (invalid, cycles[0]["id"]),
+                )
+            upgraded.conn.rollback()
+    finally:
+        upgraded.close()
+
+    reopened = Storage(path)
+    try:
+        assert reopened.conn.execute(
+            """
+            SELECT COUNT(*) FROM schema_migrations
+            WHERE version = '0005_hh_autopilot_search_mode.sql'
+            """
+        ).fetchone()[0] == 1
+        assert [
+            row["mode"]
+            for row in reopened.conn.execute(
+                "SELECT mode FROM hh_autopilot_search_cycles ORDER BY id"
+            ).fetchall()
+        ] == ["live", "shadow"]
+    finally:
+        reopened.close()
 
 
 def test_legacy_identity_listing_is_deterministic_and_excludes_payloads(
