@@ -2792,6 +2792,95 @@ class AutopilotRepository:
         ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
+    def ready_items(self, account_id: str, *, limit: int) -> list[ItemRecord]:
+        """Return dispatchable work in the same stable order used by ranking."""
+        account_id = _canonical_identifier(account_id, field="account_id")
+        limit = _integer(limit, field="limit", minimum=1)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_items
+            WHERE account_profile_id = ? AND state = 'ready'
+            ORDER BY id ASC
+            """,
+            (account_id,),
+        ).fetchall()
+        items = [self._item_from_row(row) for row in rows]
+        items.sort(key=_ranked_item_sort_key)
+        return items[:limit]
+
+    def activate_due_retry(
+        self,
+        item_id: int,
+        expected_version: int,
+        *,
+        run_id: int,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        """Adopt one due retry into the current fenced run."""
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        expected_version = _integer(expected_version, field="expected_version")
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        fencing_token = _integer(
+            fencing_token,
+            field="fencing_token",
+            minimum=1,
+        )
+        instant = _instant(now, field="now")
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            if current.version != expected_version:
+                raise StaleWrite(f"item {item_id} version changed")
+            if current.state is not AutopilotState.RETRY_WAIT:
+                raise StaleWrite("retry activation requires retry_wait")
+            if current.next_attempt_at and _instant(
+                current.next_attempt_at,
+                field="next_attempt_at",
+            ) > instant:
+                raise StaleWrite("retry is not due")
+            run = self._run_for_update(run_id)
+            if (
+                run.account_id != current.account_id
+                or run.status != "running"
+                or run.fencing_token != fencing_token
+            ):
+                raise LostLease("retry activation run is not current")
+            self._assert_fence(current.account_id, fencing_token, instant)
+            target = {
+                RetryStage.ELIGIBILITY: AutopilotState.ELIGIBLE,
+                RetryStage.APPLICATION: AutopilotState.READY,
+                RetryStage.RECONCILIATION: AutopilotState.RECONCILING,
+            }[current.retry_stage]
+            assert_transition(current.state, target)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = ?, last_run_id = ?, next_attempt_at = '',
+                    version = version + 1, last_outcome_code = 'retry_due',
+                    updated_at = ?
+                WHERE id = ? AND version = ? AND state = 'retry_wait'
+                """,
+                (
+                    target.value,
+                    run_id,
+                    instant.isoformat(),
+                    current.id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("retry activation compare-and-swap failed")
+            self._insert_event(
+                item_id=current.id,
+                run_id=run_id,
+                previous=current.state,
+                target=target,
+                reason="retry_due",
+                metadata={"retry_stage": current.retry_stage.value},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
+
     def recover_stale_applying(
         self,
         account_id: str,

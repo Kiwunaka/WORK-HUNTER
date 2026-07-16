@@ -268,6 +268,7 @@ class HHApplicationExecutor:
                 reservation_id=None,
                 state=failed.state,
                 outcome_code=outcome.code,
+                remote_post_dispatched=False,
             )
 
         # Re-read the authoritative projection and policy after bounded letter
@@ -361,6 +362,7 @@ class HHApplicationExecutor:
             reservation_id=prepared.reservation_id,
             state=item.state,
             outcome_code=outcome.code,
+            remote_post_dispatched=True,
         )
 
     def _current_snapshot(

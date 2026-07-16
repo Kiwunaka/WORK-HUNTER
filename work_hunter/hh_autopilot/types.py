@@ -107,6 +107,87 @@ class LiveAuthorization:
 
 
 @dataclass(frozen=True)
+class RunRequest:
+    account_id: str
+    trigger: str
+    authorization: LiteralConfirmation | None = None
+    resume_id: str | None = None
+    vacancy_id: str | None = None
+    preset_name: str | None = None
+
+    def __post_init__(self) -> None:
+        account_id = _text(
+            self.account_id,
+            field_name="run request account_id",
+            canonical=True,
+        )
+        if self.trigger not in {
+            "schedule",
+            "manual",
+            "shadow",
+            "retry",
+            "recovery",
+            "canary",
+        }:
+            raise ValueError("unsupported HH autopilot run trigger")
+        if self.authorization is not None and type(self.authorization) is not LiteralConfirmation:
+            raise TypeError("run request authorization must be a LiteralConfirmation")
+        for field_name in ("resume_id", "vacancy_id", "preset_name"):
+            value = getattr(self, field_name)
+            if value is not None:
+                value = _text(
+                    value,
+                    field_name=f"run request {field_name}",
+                    canonical=field_name == "resume_id",
+                )
+                object.__setattr__(self, field_name, value)
+        object.__setattr__(self, "account_id", account_id)
+
+
+@dataclass(frozen=True)
+class RunReport:
+    account_id: str
+    trigger: str
+    status: str
+    run_id: int | None = None
+    applied: int = 0
+    manual: int = 0
+    retry_wait: int = 0
+    skipped: int = 0
+    internal_errors: int = 0
+    shadow_results: int = 0
+
+    @classmethod
+    def busy(cls, account_id: str, trigger: str) -> RunReport:
+        return cls(account_id=account_id, trigger=trigger, status="busy")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "trigger": self.trigger,
+            "status": self.status,
+            "run_id": self.run_id,
+            "applied": self.applied,
+            "manual": self.manual,
+            "retry_wait": self.retry_wait,
+            "skipped": self.skipped,
+            "internal_errors": self.internal_errors,
+            "shadow_results": self.shadow_results,
+        }
+
+
+def canary_reference(account_id: str, resume_id: str, vacancy_id: str) -> str:
+    return (
+        "canary:"
+        + _text(account_id, field_name="canary account_id", canonical=True)
+        + ":"
+        + _text(resume_id, field_name="canary resume_id", canonical=True)
+        + ":"
+        + _text(vacancy_id, field_name="canary vacancy_id")
+    )
+
+
+@dataclass(frozen=True)
 class RecoveryProvenance:
     attempt_id: int
     account_id: str
@@ -343,6 +424,7 @@ class ExecutionResult:
     reservation_id: int | None
     state: AutopilotState
     outcome_code: str
+    remote_post_dispatched: bool = False
 
     def __post_init__(self) -> None:
         _int(self.item_id, field_name="execution.item_id", minimum=1)
@@ -354,6 +436,8 @@ class ExecutionResult:
             raise TypeError("execution.state must be AutopilotState")
         if self.outcome_code not in STABLE_OUTCOME_CODES:
             raise ValueError("execution.outcome_code must be stable")
+        if type(self.remote_post_dispatched) is not bool:
+            raise TypeError("execution.remote_post_dispatched must be a boolean")
 
 
 def _text(value: Any, *, field_name: str, canonical: bool = False) -> str:

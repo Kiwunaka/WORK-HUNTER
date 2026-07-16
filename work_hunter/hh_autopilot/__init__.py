@@ -12,7 +12,10 @@ from .types import (
     RecoveryProvenance,
     RetryDecision,
     RetryStage,
+    RunReport,
+    RunRequest,
     STABLE_OUTCOME_CODES,
+    canary_reference,
 )
 
 __all__ = [
@@ -29,5 +32,8 @@ __all__ = [
     "RecoveryProvenance",
     "RetryDecision",
     "RetryStage",
+    "RunReport",
+    "RunRequest",
     "STABLE_OUTCOME_CODES",
+    "canary_reference",
 ]
