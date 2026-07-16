@@ -891,3 +891,60 @@ def test_filter_decision_preserves_dates_and_ordinary_unicode() -> None:
         "Разработчик Python — 東京",
         "100% remote",
     )
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "%26lt%3Bscript%26gt%3Bsecret%26lt%3B/script%26gt%3B",
+        "%42earer%26%2332%3Babc123",
+        "%2526lt%253Bscript%2526gt%253Bsecret",
+    ],
+)
+def test_filter_decision_rejects_composite_encoded_sensitive_text(
+    unsafe: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        FilterDecision(
+            False,
+            "hard_filter:excluded_keywords",
+            {"matched": (unsafe,)},
+        )
+
+
+def test_filter_decision_allows_authentication_technical_prose() -> None:
+    prose = (
+        "Basic Python knowledge",
+        "Basic SQL",
+        "Experience with Bearer token authentication",
+        "Bearer platform engineer",
+    )
+
+    decision = FilterDecision(
+        False,
+        "hard_filter:excluded_keywords",
+        {"matched": prose},
+    )
+
+    assert decision.evidence["matched"] == prose
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "Bearer abc123",
+        "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        "Basic dXNlcjpwYXNz",
+        "Authorization: Basic dXNlcjpwYXNz",
+        "Authorization: Bearer opaque-token",
+    ],
+)
+def test_filter_decision_still_rejects_real_auth_credentials(
+    credential: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        FilterDecision(
+            False,
+            "hard_filter:excluded_keywords",
+            {"matched": (credential,)},
+        )

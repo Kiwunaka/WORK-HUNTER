@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+import base64
+import binascii
 import re
 import unicodedata
 from datetime import date
@@ -9,7 +11,7 @@ from urllib.parse import unquote, urlsplit
 
 
 _HTML_DECODE_LIMIT = 6
-_PERCENT_DECODE_LIMIT = 6
+_COMPOSITE_DECODE_LIMIT = 8
 _SECURITY_VIEW_LIMIT = 1_000_000
 _SPACES = re.compile(r"\s+")
 _MARKUP = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>")
@@ -19,9 +21,6 @@ _DANGEROUS_MARKUP = re.compile(
 )
 _CREDENTIAL = re.compile(
     r"""
-    (?<![A-Za-z0-9_])
-    (?:bearer|basic)\s+[^\s,;]+
-    |
     (?<![A-Za-z0-9_])
     ["']?
     (?:
@@ -45,6 +44,10 @@ _CREDENTIAL = re.compile(
     ["']?[^\s,;"'}]+
     """,
     re.IGNORECASE | re.VERBOSE,
+)
+_AUTH_SCHEME = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<scheme>bearer|basic)\s+(?P<payload>[^\s,;]+)",
+    re.IGNORECASE,
 )
 _EMAIL_CANDIDATE = re.compile(
     r"""
@@ -122,40 +125,35 @@ def _reject_hidden_controls(value: str, *, field: str) -> None:
             raise ValueError(f"{field} contains hidden or control formatting")
 
 
-def _percent_decode_fixed_point(value: str, *, field: str) -> str:
+def _composite_security_view(value: str, *, field: str) -> str:
     current = value
-    for _ in range(_PERCENT_DECODE_LIMIT):
+    for _ in range(_COMPOSITE_DECODE_LIMIT):
         try:
-            decoded = unquote(current, errors="strict")
+            decoded = html.unescape(current)
+            decoded = unicodedata.normalize("NFKC", decoded)
+            decoded = unquote(decoded, errors="strict")
         except UnicodeDecodeError as exc:
             raise ValueError(f"{field} contains invalid percent encoding") from exc
-        decoded = unicodedata.normalize("NFKC", decoded)
         if len(decoded) > _SECURITY_VIEW_LIMIT:
             raise ValueError(f"{field} exceeds the sanitizer security bound")
         _reject_hidden_controls(decoded, field=field)
         if decoded == current:
-            return decoded
+            return _SPACES.sub(" ", decoded).strip()
         current = decoded
     try:
-        stable = unicodedata.normalize(
-            "NFKC",
-            unquote(current, errors="strict"),
-        )
+        stable = html.unescape(current)
+        stable = unicodedata.normalize("NFKC", stable)
+        stable = unquote(stable, errors="strict")
     except UnicodeDecodeError as exc:
         raise ValueError(f"{field} contains invalid percent encoding") from exc
     if stable == current:
-        return current
-    raise ValueError(f"{field} contains unstable nested percent encoding")
+        return _SPACES.sub(" ", current).strip()
+    raise ValueError(f"{field} contains unstable composite encoding")
 
 
 def _security_view(value: str, *, field: str) -> str:
     _reject_hidden_controls(value, field=field)
-    normalized = unicodedata.normalize("NFKC", value)
-    if len(normalized) > _SECURITY_VIEW_LIMIT:
-        raise ValueError(f"{field} exceeds the sanitizer security bound")
-    _reject_hidden_controls(normalized, field=field)
-    decoded = _percent_decode_fixed_point(normalized, field=field)
-    return _SPACES.sub(" ", decoded).strip()
+    return _composite_security_view(value, field=field)
 
 
 def _is_email_domain(domain: str) -> bool:
@@ -197,10 +195,6 @@ def _contains_email(value: str) -> bool:
 def _contains_url_userinfo(value: str) -> bool:
     for match in _URL_CANDIDATE.finditer(value):
         candidate = match.group().rstrip(".,;!?)]}")
-        candidate = _percent_decode_fixed_point(
-            candidate,
-            field="URL security view",
-        )
         try:
             parsed = urlsplit(candidate)
         except ValueError:
@@ -213,6 +207,41 @@ def _contains_url_userinfo(value: str) -> bool:
             or parsed.username is not None
             or parsed.password is not None
         ):
+            return True
+    return False
+
+
+def _basic_payload_is_credential(payload: str) -> bool:
+    try:
+        decoded = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return b":" in decoded and all(
+        character >= 0x20 or character in b"\t\r\n"
+        for character in decoded
+    )
+
+
+def _bearer_payload_is_credential(payload: str) -> bool:
+    unquoted = payload.strip("\"'")
+    if any(character.isdigit() for character in unquoted):
+        return True
+    if any(not character.isalnum() for character in unquoted):
+        return True
+    return (
+        len(unquoted) >= 20
+        and any(character.islower() for character in unquoted)
+        and any(character.isupper() for character in unquoted)
+    )
+
+
+def _contains_auth_scheme_credential(value: str) -> bool:
+    for match in _AUTH_SCHEME.finditer(value):
+        payload = match.group("payload")
+        if match.group("scheme").casefold() == "basic":
+            if _basic_payload_is_credential(payload):
+                return True
+        elif _bearer_payload_is_credential(payload):
             return True
     return False
 
@@ -241,7 +270,10 @@ def _contains_phone(value: str) -> bool:
 
 
 def _contains_sensitive_security_view(value: str) -> bool:
-    if _CREDENTIAL.search(value) is not None:
+    if (
+        _CREDENTIAL.search(value) is not None
+        or _contains_auth_scheme_credential(value)
+    ):
         return True
     if _contains_email(value) or _contains_url_userinfo(value):
         return True
@@ -305,7 +337,18 @@ def sanitize_text(
         raise ValueError(f"{field} must not be empty")
     if "\0" in normalized:
         raise ValueError(f"{field} must not contain NUL")
-    if _contains_sensitive_security_view(security_view):
+    returned_security_view = _security_view(normalized, field=field)
+    returned_has_markup = (
+        _MARKUP.search(returned_security_view) is not None
+        or "<" in returned_security_view
+        or ">" in returned_security_view
+    )
+    if returned_has_markup:
+        raise ValueError(f"{field} contains markup after normalization")
+    if (
+        _contains_sensitive_security_view(security_view)
+        or _contains_sensitive_security_view(returned_security_view)
+    ):
         if sensitive == "redact":
             return "redacted"
         raise ValueError(f"{field} must not contain credentials or personal data")

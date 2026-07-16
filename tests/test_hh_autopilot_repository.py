@@ -454,6 +454,28 @@ def _nonqualifying_ranking_decision(score: float = 95.0) -> RankingDecision:
     )
 
 
+def _retryable_ranking_decision(score: float = 99.0) -> RankingDecision:
+    rank_score = RankScore(
+        score=score,
+        components={name: score for name in RANK_COMPONENTS},
+        weights={name: 1 / len(RANK_COMPONENTS) for name in RANK_COMPONENTS},
+    )
+    return RankingDecision(
+        ready=False,
+        retry=True,
+        reason="ai_unavailable",
+        rank_score=rank_score,
+        ai_decision=AIDecision(
+            available=False,
+            suitable=None,
+            confidence=None,
+            evidence=(),
+            reasons=(),
+            reason="ai_unavailable",
+        ),
+    )
+
+
 def test_transition_updates_item_and_event_in_one_commit(repo) -> None:
     run = repo.create_run("default", trigger="manual", policy_hash="hash")
     item = repo.create_item(
@@ -4572,3 +4594,418 @@ def test_generic_transition_rejects_unfenced_live_runs(
         )
 
     assert (repo.get_item(item.id), repo.list_events(item.id)) == before
+
+
+def test_sealed_set_rejects_late_ranking_and_preserves_the_winner(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    low_item = repo.create_item(
+        run.id,
+        "default",
+        "v-1",
+        "r-low",
+        "preset:python",
+    )
+    low_eligible = repo.record_filter_decision(
+        low_item.id,
+        expected_version=low_item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+    low_ranked = repo.record_ranking_decision(
+        low_eligible.id,
+        expected_version=low_eligible.version,
+        decision=_ranking_decision(1),
+        run_id=run.id,
+    )
+    ready = repo.finalize_ranked_candidates(
+        {low_ranked.id: low_ranked.version},
+        selected_item_ids=[low_ranked.id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )[0]
+
+    late = repo.create_item(
+        run.id,
+        "default",
+        "v-1",
+        "r-high",
+        "preset:python",
+    )
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_items
+        SET state = 'eligible', version = 1, filter_json = ?,
+            last_outcome_code = 'hard_filters_passed'
+        WHERE id = ?
+        """,
+        (_canonical_filter_json(), late.id),
+    )
+    repo.conn.commit()
+    late_eligible = repo.get_item(late.id)
+    before_events = repo.list_events(late.id)
+
+    with pytest.raises(StaleWrite, match="sealed"):
+        repo.record_ranking_decision(
+            late_eligible.id,
+            expected_version=late_eligible.version,
+            decision=_ranking_decision(99),
+            run_id=run.id,
+        )
+
+    assert repo.get_item(ready.id).state is AutopilotState.READY
+    assert repo.get_item(ready.id).deterministic_score == 1
+    assert repo.get_item(late.id).state is AutopilotState.ELIGIBLE
+    assert repo.list_events(late.id) == before_events
+
+
+def test_sealed_set_blocks_late_filter_after_ready_has_moved_on(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo, resume_ids=("r-1",))
+    ready = repo.finalize_ranked_candidates(
+        {ranked[0].id: ranked[0].version},
+        selected_item_ids=[ranked[0].id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )[0]
+    applying = repo.transition_item(
+        ready.id,
+        ready.version,
+        AutopilotState.APPLYING,
+        "internal_error",
+        run_id=run.id,
+    )
+    later_run = repo.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="later",
+    )
+    repo.conn.execute(
+        "UPDATE hh_autopilot_items SET last_run_id = ? WHERE id = ?",
+        (later_run.id, applying.id),
+    )
+    repo.conn.commit()
+    late = repo.create_item(
+        run.id,
+        "default",
+        "v-1",
+        "r-late",
+        "preset:python",
+    )
+    before = (repo.get_item(late.id), repo.list_events(late.id))
+
+    with pytest.raises(StaleWrite, match="sealed"):
+        repo.record_filter_decision(
+            late.id,
+            expected_version=late.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+        )
+
+    assert repo.get_item(applying.id).state is AutopilotState.APPLYING
+    assert repo.get_item(applying.id).last_run_id == later_run.id
+    assert (repo.get_item(late.id), repo.list_events(late.id)) == before
+
+
+@pytest.mark.parametrize(
+    "pending_state",
+    ["discovered", "eligible", "retry_wait"],
+)
+def test_incomplete_candidate_set_blocks_first_finalization(
+    repo,
+    pending_state: str,
+) -> None:
+    run, ranked = _prepare_ranked_items(repo, resume_ids=("r-ready",))
+    pending = repo.create_item(
+        run.id,
+        "default",
+        "v-1",
+        "r-pending",
+        "preset:python",
+    )
+    if pending_state in {"eligible", "retry_wait"}:
+        pending = repo.record_filter_decision(
+            pending.id,
+            expected_version=pending.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+        )
+    if pending_state == "retry_wait":
+        pending = repo.transition_item(
+            pending.id,
+            pending.version,
+            AutopilotState.RETRY_WAIT,
+            "internal_error",
+            run_id=run.id,
+        )
+    before = {
+        item.id: (repo.get_item(item.id), repo.list_events(item.id))
+        for item in (ranked[0], pending)
+    }
+
+    with pytest.raises(StaleWrite, match="incomplete"):
+        repo.finalize_ranked_candidates(
+            {ranked[0].id: ranked[0].version},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+
+    for item in (ranked[0], pending):
+        assert (repo.get_item(item.id), repo.list_events(item.id)) == before[item.id]
+
+
+def test_retryable_ranked_candidate_blocks_finalization(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo, resume_ids=("r-ready",))
+    retry_item = repo.create_item(
+        run.id,
+        "default",
+        "v-1",
+        "r-retry",
+        "preset:python",
+    )
+    retry_eligible = repo.record_filter_decision(
+        retry_item.id,
+        expected_version=retry_item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+    retry_ranked = repo.record_ranking_decision(
+        retry_eligible.id,
+        expected_version=retry_eligible.version,
+        decision=_retryable_ranking_decision(),
+        run_id=run.id,
+    )
+
+    with pytest.raises(StaleWrite, match="incomplete|retry"):
+        repo.finalize_ranked_candidates(
+            {ranked[0].id: ranked[0].version},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+
+    assert repo.get_item(ranked[0].id).state is AutopilotState.RANKED
+    assert repo.get_item(retry_ranked.id).state is AutopilotState.RANKED
+
+
+def test_hard_filter_terminal_skip_does_not_block_finalization(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo, resume_ids=("r-ready",))
+    rejected = repo.create_item(
+        run.id,
+        "default",
+        "v-1",
+        "r-rejected",
+        "preset:python",
+    )
+    rejected = repo.record_filter_decision(
+        rejected.id,
+        expected_version=rejected.version,
+        decision=_filter_decision(passed=False),
+        run_id=run.id,
+    )
+
+    changed = repo.finalize_ranked_candidates(
+        {ranked[0].id: ranked[0].version},
+        selected_item_ids=[ranked[0].id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )
+
+    assert changed[0].state is AutopilotState.READY
+    assert repo.get_item(rejected.id).state is AutopilotState.SKIPPED
+
+
+def test_repeated_finalization_rejects_the_append_only_seal(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+    changed = repo.finalize_ranked_candidates(
+        {item.id: item.version for item in ranked},
+        selected_item_ids=[ranked[0].id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )
+    ready = next(item for item in changed if item.state is AutopilotState.READY)
+    before = {
+        item.id: (repo.get_item(item.id), repo.list_events(item.id))
+        for item in changed
+    }
+
+    with pytest.raises(StaleWrite, match="sealed"):
+        repo.finalize_ranked_candidates(
+            {item.id: item.version for item in changed},
+            selected_item_ids=[ready.id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+
+    for item in changed:
+        assert (repo.get_item(item.id), repo.list_events(item.id)) == before[item.id]
+
+
+def test_per_resume_seal_rejects_late_candidates(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+    repo.finalize_ranked_candidates(
+        {item.id: item.version for item in ranked},
+        selected_item_ids=[item.id for item in ranked],
+        resume_policy="per_resume",
+        run_id=run.id,
+    )
+    late = repo.create_item(
+        run.id,
+        "default",
+        "v-1",
+        "r-late",
+        "preset:python",
+    )
+
+    with pytest.raises(StaleWrite, match="sealed"):
+        repo.record_filter_decision(
+            late.id,
+            expected_version=late.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+        )
+
+    assert repo.get_item(late.id).state is AutopilotState.DISCOVERED
+    assert repo.count_guards() == 0
+    assert repo.count_application_attempts() == 0
+    assert repo.count_reservations() == 0
+    assert repo.count_challenges() == 0
+
+
+def _paused_finalization_worker(
+    database_path: Any,
+    entered: Event,
+    release: Event,
+    *,
+    run_id: int,
+    item_id: int,
+    version: int,
+) -> str:
+    storage = Storage(database_path)
+    worker = AutopilotRepository(storage)
+
+    def pause_candidate_seal() -> int:
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("race release was not signaled")
+        return 0
+
+    worker.conn.create_function(
+        "pause_candidate_seal",
+        0,
+        pause_candidate_seal,
+    )
+    try:
+        worker.finalize_ranked_candidates(
+            {item_id: version},
+            selected_item_ids=[item_id],
+            resume_policy="best_resume_only",
+            run_id=run_id,
+        )
+        return "sealed"
+    finally:
+        storage.close()
+
+
+def _late_ranking_worker(
+    database_path: Any,
+    *,
+    run_id: int,
+    item_id: int,
+    target_vacancy_id: str,
+) -> str:
+    storage = Storage(database_path)
+    worker = AutopilotRepository(storage)
+    try:
+        worker.conn.create_function("pause_candidate_seal", 0, lambda: 0)
+        worker.conn.execute(
+            "UPDATE hh_autopilot_items SET vacancy_id = ? WHERE id = ?",
+            (target_vacancy_id, item_id),
+        )
+        worker.conn.commit()
+        current = worker.get_item(item_id)
+        try:
+            worker.record_ranking_decision(
+                current.id,
+                expected_version=current.version,
+                decision=_ranking_decision(99),
+                run_id=run_id,
+            )
+        except StaleWrite as exc:
+            return str(exc)
+        return "ranked"
+    finally:
+        storage.close()
+
+
+def test_finalization_and_late_ranking_race_produces_one_durable_seal(
+    repo,
+) -> None:
+    run, ranked = _prepare_ranked_items(repo, resume_ids=("r-low",))
+    late = repo.create_item(
+        run.id,
+        "default",
+        "v-hidden",
+        "r-high",
+        "preset:python",
+    )
+    late = repo.record_filter_decision(
+        late.id,
+        expected_version=late.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+    late_event_count = len(repo.list_events(late.id))
+    repo.conn.execute(
+        """
+        CREATE TRIGGER pause_ready_seal_event
+        BEFORE INSERT ON hh_autopilot_events
+        WHEN NEW.reason_code = 'ready'
+        BEGIN
+            SELECT pause_candidate_seal();
+        END
+        """
+    )
+    repo.conn.commit()
+    entered = Event()
+    release = Event()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        finalizing = pool.submit(
+            _paused_finalization_worker,
+            repo.storage.path,
+            entered,
+            release,
+            run_id=run.id,
+            item_id=ranked[0].id,
+            version=ranked[0].version,
+        )
+        assert entered.wait(timeout=3)
+        late_ranking = pool.submit(
+            _late_ranking_worker,
+            repo.storage.path,
+            run_id=run.id,
+            item_id=late.id,
+            target_vacancy_id="v-1",
+        )
+        time.sleep(0.1)
+        release.set()
+        final_outcome = finalizing.result(timeout=5)
+        ranking_outcome = late_ranking.result(timeout=5)
+
+    assert final_outcome == "sealed"
+    assert "sealed" in ranking_outcome
+    assert repo.get_item(ranked[0].id).state is AutopilotState.READY
+    assert repo.get_item(late.id).state is AutopilotState.ELIGIBLE
+    assert len(repo.list_events(late.id)) == late_event_count
+    seal_events = [
+        event
+        for event in repo.list_events(ranked[0].id)
+        if event["previous_state"] == "ranked"
+        and event["next_state"] == "ready"
+        and event["reason_code"] == "ready"
+    ]
+    assert len(seal_events) == 1
+    assert repo.count_guards() == 0
+    assert repo.count_application_attempts() == 0
+    assert repo.count_reservations() == 0
+    assert repo.count_challenges() == 0

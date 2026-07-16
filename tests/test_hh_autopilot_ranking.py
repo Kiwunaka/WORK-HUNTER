@@ -55,6 +55,24 @@ UNICODE_UNSAFE_TEXT = (
     "Python\u202eEngineer",
     "Python\u0007Engineer",
 )
+COMPOSITE_UNSAFE_TEXT = (
+    "%26lt%3Bscript%26gt%3Bsecret%26lt%3B/script%26gt%3B",
+    "%42earer%26%2332%3Babc123",
+    "%2526lt%253Bscript%2526gt%253Bsecret",
+)
+AUTH_TECHNICAL_PROSE = (
+    "Basic Python knowledge",
+    "Basic SQL",
+    "Experience with Bearer token authentication",
+    "Bearer platform engineer",
+)
+REAL_AUTH_CREDENTIALS = (
+    "Bearer abc123",
+    "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+    "Basic dXNlcjpwYXNz",
+    "Authorization: Basic dXNlcjpwYXNz",
+    "Authorization: Bearer opaque-token",
+)
 
 
 def _weights(**changes: float) -> dict[str, float]:
@@ -1554,3 +1572,98 @@ def test_ai_decision_preserves_dates_and_ordinary_unicode() -> None:
         "Разработчик Python — 東京",
         "100% remote",
     )
+
+
+@pytest.mark.parametrize("unsafe", COMPOSITE_UNSAFE_TEXT)
+def test_ai_decision_rejects_composite_encoded_sensitive_text(
+    unsafe: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        AIDecision(
+            available=True,
+            suitable=True,
+            confidence=0.9,
+            evidence=(unsafe,),
+            reasons=(),
+        )
+
+
+@pytest.mark.parametrize("unsafe", COMPOSITE_UNSAFE_TEXT)
+def test_structured_ai_never_sends_composite_encoded_sensitive_text(
+    unsafe: str,
+) -> None:
+    calls: list[Any] = []
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = unsafe
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: calls.append((args, kwargs)),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is False
+    assert calls == []
+
+
+def test_structured_ai_rescans_after_stripping_ordinary_html() -> None:
+    calls: list[Any] = []
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = "Bearer<b></b> abc123"
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: calls.append((args, kwargs)),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is False
+    assert calls == []
+
+
+@pytest.mark.parametrize("prose", AUTH_TECHNICAL_PROSE)
+def test_structured_ai_allows_authentication_technical_prose(
+    prose: str,
+) -> None:
+    calls: list[Any] = []
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = prose
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: (
+            calls.append((args, kwargs))
+            or SimpleNamespace(
+                parsed={
+                    "suitable": True,
+                    "confidence": 0.9,
+                    "evidence": [],
+                    "reasons": [],
+                }
+            )
+        ),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is True
+    assert len(calls) == 1
+
+
+def test_ai_decision_allows_authentication_technical_prose() -> None:
+    decision = AIDecision(
+        available=True,
+        suitable=True,
+        confidence=0.9,
+        evidence=AUTH_TECHNICAL_PROSE,
+        reasons=(),
+    )
+
+    assert decision.evidence == AUTH_TECHNICAL_PROSE
+
+
+@pytest.mark.parametrize("credential", REAL_AUTH_CREDENTIALS)
+def test_ai_decision_still_rejects_real_auth_credentials(
+    credential: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        AIDecision(
+            available=True,
+            suitable=True,
+            confidence=0.9,
+            evidence=(credential,),
+            reasons=(),
+        )

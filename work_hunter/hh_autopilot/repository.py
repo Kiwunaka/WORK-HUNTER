@@ -1196,6 +1196,12 @@ class AutopilotRepository:
                 instant=instant,
                 operation="filter decision",
             )
+            self._assert_candidate_set_unsealed_for_update(
+                account_id=current.account_id,
+                vacancy_id=current.vacancy_id,
+                run_id=run_id,
+                operation="filter decision",
+            )
             assert_transition(current.state, target)
             cursor = self.conn.execute(
                 """
@@ -1273,6 +1279,12 @@ class AutopilotRepository:
                 run_id=run_id,
                 fencing_token=fencing_token,
                 instant=instant,
+                operation="ranking decision",
+            )
+            self._assert_candidate_set_unsealed_for_update(
+                account_id=current.account_id,
+                vacancy_id=current.vacancy_id,
+                run_id=run_id,
                 operation="ranking decision",
             )
             assert_transition(current.state, AutopilotState.RANKED)
@@ -1368,8 +1380,6 @@ class AutopilotRepository:
             for candidate in supplied:
                 if candidate.version != parsed_versions[candidate.id]:
                     raise StaleWrite(f"item {candidate.id} version changed")
-                if candidate.state is not AutopilotState.RANKED:
-                    raise StaleWrite("candidate finalization requires ranked items")
             accounts = {candidate.account_id for candidate in supplied}
             if len(accounts) != 1:
                 raise ValueError("candidate items must share one account")
@@ -1388,6 +1398,12 @@ class AutopilotRepository:
                     instant=instant,
                     operation="candidate finalization",
                 )
+            self._assert_candidate_set_unsealed_for_update(
+                account_id=account_id,
+                vacancy_id=vacancy_id,
+                run_id=run_id,
+                operation="candidate finalization",
+            )
 
             rows = self.conn.execute(
                 """
@@ -1395,7 +1411,6 @@ class AutopilotRepository:
                 WHERE account_profile_id = ?
                   AND vacancy_id = ?
                   AND last_run_id = ?
-                  AND state = 'ranked'
                 ORDER BY id ASC
                 """,
                 (account_id, vacancy_id, run_id),
@@ -1410,24 +1425,42 @@ class AutopilotRepository:
                     instant=instant,
                     operation="candidate finalization",
                 )
-                try:
-                    filter_decision = FilterDecision(
-                        passed=candidate.filter_data["passed"],
-                        reason=candidate.filter_data["reason"],
-                        evidence=candidate.filter_data["evidence"],
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
+                if candidate.state in {
+                    AutopilotState.DISCOVERED,
+                    AutopilotState.ELIGIBLE,
+                    AutopilotState.RETRY_WAIT,
+                }:
                     raise StaleWrite(
-                        "candidate filter decision is malformed"
-                    ) from exc
-                if not filter_decision.passed:
-                    raise ValueError(
-                        "candidate set contains a rejected filter decision"
+                        "candidate set is incomplete and can still change"
+                    )
+                if candidate.state is AutopilotState.SKIPPED:
+                    try:
+                        filter_decision = FilterDecision(
+                            passed=candidate.filter_data["passed"],
+                            reason=candidate.filter_data["reason"],
+                            evidence=candidate.filter_data["evidence"],
+                        )
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise StaleWrite(
+                            "skipped candidate filter decision is malformed"
+                        ) from exc
+                    if filter_decision.passed:
+                        raise StaleWrite(
+                            "candidate set contains a nonterminal skipped item"
+                        )
+                    continue
+                if candidate.state is not AutopilotState.RANKED:
+                    raise StaleWrite(
+                        "candidate set contains an incomplete state"
                     )
                 ranking_decision = _ranking_decision_from_data(
                     candidate.ai_data,
                     field="candidate ranking decision",
                 )
+                if ranking_decision.retry:
+                    raise StaleWrite(
+                        "candidate set contains a retryable ranking decision"
+                    )
                 if ranking_decision.ready and not ranking_decision.retry:
                     qualifying.append(candidate)
             complete_ids = {candidate.id for candidate in qualifying}
@@ -4682,6 +4715,41 @@ class AutopilotRepository:
             )
         self._assert_fence(item.account_id, run.fencing_token, instant)
         return run
+
+    def _assert_candidate_set_unsealed_for_update(
+        self,
+        *,
+        account_id: str,
+        vacancy_id: str,
+        run_id: int,
+        operation: str,
+    ) -> None:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM hh_autopilot_events AS event
+            JOIN hh_autopilot_items AS item ON item.id = event.item_id
+            WHERE item.account_profile_id = ?
+              AND item.vacancy_id = ?
+              AND event.run_id = ?
+              AND event.previous_state = 'ranked'
+              AND (
+                    (
+                        event.next_state = 'ready'
+                        AND event.reason_code = 'ready'
+                    )
+                    OR
+                    (
+                        event.next_state = 'skipped'
+                        AND event.reason_code = 'not_best_resume'
+                    )
+              )
+            LIMIT 1
+            """,
+            (account_id, vacancy_id, run_id),
+        ).fetchone()
+        if row is not None:
+            raise StaleWrite(f"{operation} candidate set is sealed")
 
     def _lease_for_update(self, account_id: str) -> LeaseRecord:
         row = self.conn.execute(
