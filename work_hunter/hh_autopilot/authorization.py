@@ -155,7 +155,20 @@ class HHAutopilotAuthorizer:
         except KillSwitchActive as exc:
             raise AuthorizationDenied("kill_switch_active") from exc
         try:
-            self._write_projection(config, generations, enabled=True)
+            try:
+                self._write_projection(config, generations, enabled=True)
+            except AuthorizationDenied:
+                raise
+            except (
+                OSError,
+                UnicodeError,
+                ValueError,
+                TypeError,
+                AttributeError,
+            ) as exc:
+                raise AuthorizationDenied(
+                    "config_projection_unavailable"
+                ) from exc
             config_path = self._require_config_path()
             try:
                 with locked_current_config_snapshot(config_path) as current:

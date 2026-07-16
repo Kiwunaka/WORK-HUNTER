@@ -181,6 +181,60 @@ def test_missing_or_raising_policy_material_resolver_cannot_create_grant(
     assert repository.active_grant("default", "applications") is None
 
 
+@pytest.mark.parametrize("scenario", ["corrupt", "semantic", "unreadable"])
+def test_enable_normalizes_persisted_projection_boundary_failures(
+    authorizer, valid_config, config_file, monkeypatch, scenario
+) -> None:
+    if scenario == "corrupt":
+        config_file.write_text('{"broken":', encoding="utf-8")
+    elif scenario == "semantic":
+        malformed = copy.deepcopy(valid_config)
+        malformed["sources"]["hh"]["autopilot"]["accounts"] = "broken"
+        config_file.write_text(json.dumps(malformed), encoding="utf-8")
+    else:
+        real_open = Path.open
+
+        def deny_config_read(path, *args, **kwargs):
+            if path == config_file:
+                raise PermissionError("persisted config is unreadable")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", deny_config_read)
+
+    with pytest.raises(AuthorizationDenied) as denied:
+        authorizer.enable(
+            ["default"],
+            valid_config,
+            confirm=True,
+            actor="cli",
+            source="test",
+        )
+
+    assert denied.value.code == "config_projection_unavailable"
+    assert authorizer.repository.active_grant("default", "applications") is None
+
+
+def test_enable_without_config_path_preserves_path_required_error(
+    repository, valid_config
+) -> None:
+    without_path = HHAutopilotAuthorizer(
+        repository,
+        policy_material_resolver=_material,
+    )
+
+    with pytest.raises(AuthorizationDenied) as denied:
+        without_path.enable(
+            ["default"],
+            valid_config,
+            confirm=True,
+            actor="cli",
+            source="test",
+        )
+
+    assert denied.value.code == "config_projection_path_required"
+    assert repository.active_grant("default", "applications") is None
+
+
 def test_confirmed_enable_creates_policy_bound_generation(
     authorizer, valid_config
 ) -> None:
