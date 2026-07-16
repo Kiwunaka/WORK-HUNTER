@@ -29,6 +29,7 @@ from .types import (
     QuotaReservationState,
     RankScore,
     RankingDecision,
+    RecoveryProvenance,
     RetryDecision,
     RetryStage,
     SearchPage,
@@ -442,6 +443,15 @@ class ApplicationGuardRecord:
     application_count: int
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class ReconciliationContext:
+    prepared: PreparedDispatch
+    dispatched_at: datetime
+    initial_outcome_code: str
+    challenge_id: int | None = None
+    challenge_type: str = ""
 
 
 def _utc_now() -> str:
@@ -2852,6 +2862,654 @@ class AutopilotRepository:
                 recovered_ids.append(current.id)
             return [self._item_for_update(item_id) for item_id in recovered_ids]
 
+    def recovery_provenance(self, attempt_id: int) -> RecoveryProvenance:
+        attempt = self.get_application_attempt(attempt_id)
+        if attempt is None:
+            raise KeyError(f"attempt {attempt_id} does not exist")
+        return RecoveryProvenance(
+            attempt_id=attempt.id,
+            account_id=attempt.account_id,
+            authorization_kind=attempt.authorization_kind,
+            authorization_ref=attempt.authorization_ref,
+            policy_hash=attempt.policy_hash,
+        )
+
+    def accounts_needing_recovery(
+        self,
+        account_id: str | None = None,
+        *,
+        now: datetime | str | None = None,
+    ) -> tuple[str, ...]:
+        instant = _instant(now, field="now").isoformat()
+        parameters: list[Any] = [instant]
+        account_clause = ""
+        if account_id is not None:
+            account_clause = " AND account_profile_id = ?"
+            parameters.append(_canonical_identifier(account_id, field="account_id"))
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT account_profile_id
+            FROM hh_autopilot_items
+            WHERE (
+                state = 'applying'
+                OR (
+                    state = 'reconciling'
+                    AND (next_attempt_at = '' OR next_attempt_at <= ?)
+                )
+            )
+            """
+            + account_clause
+            + " ORDER BY account_profile_id",
+            tuple(parameters),
+        ).fetchall()
+        return tuple(
+            _persisted_text(
+                row["account_profile_id"],
+                field="recovery account_id",
+                canonical=True,
+            )
+            for row in rows
+        )
+
+    def due_reconciliation_items(
+        self,
+        account_id: str,
+        *,
+        now: datetime | str | None = None,
+        limit: int = 1000,
+    ) -> list[ItemRecord]:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        instant = _instant(now, field="now").isoformat()
+        limit = _integer(limit, field="limit", minimum=1)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_items
+            WHERE account_profile_id = ? AND state = 'reconciling'
+              AND (next_attempt_at = '' OR next_attempt_at <= ?)
+            ORDER BY next_attempt_at ASC, id ASC
+            LIMIT ?
+            """,
+            (account_id, instant, limit),
+        ).fetchall()
+        return [self._item_from_row(row) for row in rows]
+
+    def load_reconciliation_context(
+        self,
+        item_id: int,
+        provenance: RecoveryProvenance,
+        fencing_token: int,
+        *,
+        now: datetime | str | None = None,
+    ) -> ReconciliationContext:
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        if type(provenance) is not RecoveryProvenance:
+            raise TypeError("provenance must be an exact RecoveryProvenance")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        with self.immediate():
+            self._assert_fence(provenance.account_id, fencing_token, instant)
+            item = self._item_for_update(item_id)
+            if item.account_id != provenance.account_id:
+                raise StaleWrite("recovery item account changed")
+            if item.state not in {
+                AutopilotState.RECONCILING,
+                AutopilotState.MANUAL_CHALLENGE,
+            }:
+                raise StaleWrite("item is not awaiting reconciliation")
+            if item.active_attempt_id != provenance.attempt_id:
+                raise StaleWrite("recovery item attempt changed")
+            attempt = self.get_application_attempt(provenance.attempt_id)
+            if attempt is None or (
+                attempt.item_id != item.id
+                or attempt.account_id != provenance.account_id
+                or attempt.authorization_kind is not provenance.authorization_kind
+                or attempt.authorization_ref != provenance.authorization_ref
+                or attempt.policy_hash != provenance.policy_hash
+                or attempt.status not in {"applying", "reconciling"}
+            ):
+                raise StaleWrite("immutable attempt provenance changed")
+            reservation = self.active_reservation_for_attempt(attempt.id)
+            if reservation is None or reservation.source != "dispatch":
+                raise StaleWrite("reconciliation reservation is unavailable")
+            if reservation.fencing_token != fencing_token:
+                recovery_run_row = self.conn.execute(
+                    """
+                    SELECT id FROM hh_autopilot_runs
+                    WHERE account_profile_id = ? AND trigger = 'recovery'
+                      AND status = 'running' AND fencing_token = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (item.account_id, fencing_token),
+                ).fetchone()
+                if recovery_run_row is None:
+                    raise LostLease("current fence has no recovery run")
+                reservation = self._adopt_reservation_for_recovery_for_update(
+                    reservation.id,
+                    _persisted_integer(
+                        recovery_run_row["id"],
+                        field="recovery run id",
+                        minimum=1,
+                    ),
+                    fencing_token,
+                    expected_fencing_token=reservation.fencing_token,
+                    instant=instant,
+                )
+
+            challenge_id: int | None = None
+            challenge_type = ""
+            if item.challenge_id is not None:
+                challenge = self.get_challenge(item.challenge_id)
+                if challenge is None or challenge.account_id != item.account_id:
+                    raise StaleWrite("reconciliation challenge changed")
+                if challenge.status in {"open", "in_progress"}:
+                    challenge_id = challenge.id
+                    challenge_type = challenge.challenge_type
+            return self._reconciliation_context_for_update(
+                item,
+                attempt,
+                reservation,
+                fencing_token=fencing_token,
+                challenge_id=challenge_id,
+                challenge_type=challenge_type,
+            )
+
+    def finalize_reconciled_applied(
+        self,
+        context: ReconciliationContext,
+        *,
+        remote_negotiation_id: str,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        if type(context) is not ReconciliationContext:
+            raise TypeError("context must be an exact ReconciliationContext")
+        remote_negotiation_id = _required_text(
+            remote_negotiation_id,
+            field="remote_negotiation_id",
+        )
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        if context.prepared.fencing_token != fencing_token:
+            raise LostLease("reconciliation context fence changed")
+        return self.finalize_applied(
+            context.prepared,
+            DispatchOutcome(
+                code="applied",
+                certainty=DeliveryCertainty.DEFINITE_RESPONSE,
+                payload={"id": remote_negotiation_id},
+            ),
+            now=now,
+        )
+
+    def finalize_external_application(
+        self,
+        context: ReconciliationContext,
+        *,
+        remote_negotiation_id: str,
+        occurred_at: datetime | str,
+        timezone_name: str,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        if type(context) is not ReconciliationContext:
+            raise TypeError("context must be an exact ReconciliationContext")
+        remote_negotiation_id = _required_text(
+            remote_negotiation_id,
+            field="remote_negotiation_id",
+        )
+        occurred = _instant(occurred_at, field="occurred_at")
+        timezone_name, local_timezone = _timezone(timezone_name)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        prepared = context.prepared
+        if prepared.fencing_token != fencing_token:
+            raise LostLease("reconciliation context fence changed")
+        payload = {
+            "code": "duplicate_external",
+            "remote_negotiation_id": remote_negotiation_id,
+        }
+        with self.immediate():
+            current = self._validate_prepared_for_update(prepared, instant=instant)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_application_attempts
+                SET status = 'skipped', reason = 'duplicate_external',
+                    raw_result_json = ?, finished_at = ?
+                WHERE id = ? AND status IN ('applying','reconciling')
+                """,
+                (
+                    _json_dumps(payload, field="external result"),
+                    instant.isoformat(),
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("external attempt finalization failed")
+            self._change_reservation_state_for_update(
+                prepared.reservation_id,
+                fencing_token,
+                target=QuotaReservationState.RELEASED,
+                remote_negotiation_id=None,
+                instant=instant,
+            )
+            if occurred.astimezone(local_timezone).date() == instant.astimezone(
+                local_timezone
+            ).date():
+                existing_row = self.conn.execute(
+                    """
+                    SELECT * FROM hh_autopilot_quota_reservations
+                    WHERE remote_negotiation_id = ?
+                    """,
+                    (remote_negotiation_id,),
+                ).fetchone()
+                if existing_row is None:
+                    self.conn.execute(
+                        """
+                        INSERT INTO hh_autopilot_quota_reservations (
+                            attempt_id, run_id, source, remote_negotiation_id,
+                            account_profile_id, timezone, local_date, state,
+                            fencing_token, created_at, resolved_at
+                        ) VALUES (NULL, NULL, 'external_sync', ?, ?, ?, ?,
+                                  'consumed', ?, ?, ?)
+                        """,
+                        (
+                            remote_negotiation_id,
+                            prepared.account_id,
+                            timezone_name,
+                            occurred.astimezone(local_timezone).date().isoformat(),
+                            fencing_token,
+                            occurred.isoformat(),
+                            occurred.isoformat(),
+                        ),
+                    )
+                else:
+                    existing = self._reservation_from_row(existing_row)
+                    if (
+                        existing.source != "external_sync"
+                        or existing.account_id != prepared.account_id
+                        or existing.state is not QuotaReservationState.CONSUMED
+                    ):
+                        raise StaleWrite("external negotiation quota conflicts")
+            assert_transition(current.state, AutopilotState.SKIPPED)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'skipped', retry_stage = 'application',
+                    version = version + 1, next_attempt_at = '',
+                    challenge_id = NULL,
+                    last_outcome_code = 'duplicate_external', updated_at = ?
+                WHERE id = ? AND version = ? AND active_attempt_id = ?
+                  AND state = 'reconciling'
+                """,
+                (
+                    instant.isoformat(),
+                    current.id,
+                    current.version,
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("external item finalization failed")
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_application_account_guards
+                SET status = 'external_applied', owner_attempt_id = NULL,
+                    updated_at = ?
+                WHERE account_profile_id = ? AND source = 'hh'
+                  AND source_id = ? AND status = 'active'
+                  AND owner_attempt_id = ?
+                """,
+                (
+                    instant.isoformat(),
+                    prepared.account_id,
+                    prepared.vacancy_id,
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("external guard finalization failed")
+            self._finish_literal_target_for_update(
+                prepared,
+                succeeded=False,
+                terminal=True,
+                instant=instant,
+            )
+            self._insert_event(
+                item_id=current.id,
+                run_id=prepared.run_id,
+                previous=current.state,
+                target=AutopilotState.SKIPPED,
+                reason="duplicate_external",
+                metadata={"remote_negotiation_id": remote_negotiation_id},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
+
+    def record_reconciliation_check(
+        self,
+        context: ReconciliationContext,
+        *,
+        fencing_token: int,
+        max_checks: int,
+        delay_seconds: int,
+        max_attempts: int,
+        challenge_expiry_hours: int,
+        unclassifiable_remote_ids: Sequence[str],
+        now: datetime | str | None = None,
+    ) -> tuple[ItemRecord, ChallengeRecord | None]:
+        if type(context) is not ReconciliationContext:
+            raise TypeError("context must be an exact ReconciliationContext")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        max_checks = _integer(max_checks, field="max_checks", minimum=1)
+        delay_seconds = _integer(delay_seconds, field="delay_seconds", minimum=1)
+        max_attempts = _integer(max_attempts, field="max_attempts", minimum=1)
+        challenge_expiry_hours = _integer(
+            challenge_expiry_hours,
+            field="challenge_expiry_hours",
+            minimum=1,
+        )
+        remote_ids = tuple(
+            _required_text(value, field="unclassifiable_remote_id")
+            for value in unclassifiable_remote_ids
+        )
+        instant = _instant(now, field="now")
+        prepared = context.prepared
+        if prepared.fencing_token != fencing_token:
+            raise LostLease("reconciliation context fence changed")
+        with self.immediate():
+            current = self._validate_prepared_for_update(prepared, instant=instant)
+            reservation = self._reservation_for_update(prepared.reservation_id)
+            if reservation.state is QuotaReservationState.RESERVED:
+                self._change_reservation_state_for_update(
+                    reservation.id,
+                    fencing_token,
+                    target=QuotaReservationState.HELD,
+                    remote_negotiation_id=None,
+                    instant=instant,
+                )
+            count = current.reconciliation_count + 1
+            must_ask = bool(remote_ids) or context.initial_outcome_code == "duplicate"
+            if count < max_checks:
+                next_check = instant + timedelta(seconds=delay_seconds)
+                cursor = self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_items
+                    SET reconciliation_count = ?, version = version + 1,
+                        next_attempt_at = ?,
+                        last_outcome_code = 'reconciliation_pending',
+                        updated_at = ?
+                    WHERE id = ? AND version = ? AND state = 'reconciling'
+                    """,
+                    (
+                        count,
+                        next_check.isoformat(),
+                        instant.isoformat(),
+                        current.id,
+                        current.version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleWrite("reconciliation check compare-and-swap failed")
+                self._insert_event(
+                    item_id=current.id,
+                    run_id=prepared.run_id,
+                    previous=current.state,
+                    target=current.state,
+                    reason="reconciliation_pending",
+                    metadata={"check": count},
+                    created_at=instant,
+                )
+                return self._item_for_update(current.id), None
+
+            if must_ask:
+                cursor = self.conn.execute(
+                    """
+                    INSERT INTO hh_autopilot_challenges (
+                        scope, challenge_type, account_profile_id, item_id,
+                        reservation_id, sanitized_url, screenshot_path,
+                        status, expires_at, metadata_json, created_at
+                    ) VALUES ('item', 'ambiguous_application', ?, ?, ?, '', '',
+                              'open', ?, ?, ?)
+                    """,
+                    (
+                        current.account_id,
+                        current.id,
+                        prepared.reservation_id,
+                        (instant + timedelta(hours=challenge_expiry_hours)).isoformat(),
+                        _json_dumps(
+                            {"remote_negotiation_ids": remote_ids},
+                            field="ambiguity metadata",
+                        ),
+                        instant.isoformat(),
+                    ),
+                )
+                challenge_id = _required_lastrowid(cursor)
+                assert_transition(current.state, AutopilotState.MANUAL_CHALLENGE)
+                changed = self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_items
+                    SET state = 'manual_challenge', version = version + 1,
+                        reconciliation_count = ?, next_attempt_at = '',
+                        challenge_id = ?,
+                        last_outcome_code = 'ambiguous_application',
+                        updated_at = ?
+                    WHERE id = ? AND version = ? AND state = 'reconciling'
+                    """,
+                    (
+                        count,
+                        challenge_id,
+                        instant.isoformat(),
+                        current.id,
+                        current.version,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise StaleWrite("ambiguity item compare-and-swap failed")
+                self._insert_event(
+                    item_id=current.id,
+                    run_id=prepared.run_id,
+                    previous=current.state,
+                    target=AutopilotState.MANUAL_CHALLENGE,
+                    reason="ambiguous_application",
+                    metadata={"remote_negotiation_ids": remote_ids},
+                    created_at=instant,
+                )
+                return (
+                    self._item_for_update(current.id),
+                    self._challenge_for_update(challenge_id),
+                )
+
+            target = (
+                AutopilotState.READY
+                if current.application_attempt_count < max_attempts
+                else AutopilotState.DEAD
+            )
+            reason = "confirmed_absent" if target is AutopilotState.READY else "retry_exhausted"
+            self._change_reservation_state_for_update(
+                prepared.reservation_id,
+                fencing_token,
+                target=QuotaReservationState.RELEASED,
+                remote_negotiation_id=None,
+                instant=instant,
+            )
+            cursor = self.conn.execute(
+                """
+                DELETE FROM hh_application_account_guards
+                WHERE account_profile_id = ? AND source = 'hh'
+                  AND source_id = ? AND status = 'active'
+                  AND owner_attempt_id = ?
+                """,
+                (prepared.account_id, prepared.vacancy_id, prepared.attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("absence guard release failed")
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_application_attempts
+                SET status = ?, reason = ?, finished_at = ?
+                WHERE id = ? AND status IN ('applying','reconciling')
+                """,
+                (target.value, reason, instant.isoformat(), prepared.attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("absence attempt finalization failed")
+            assert_transition(current.state, target)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = ?, retry_stage = 'application',
+                    version = version + 1, reconciliation_count = ?,
+                    next_attempt_at = '', challenge_id = NULL,
+                    last_outcome_code = ?, updated_at = ?
+                WHERE id = ? AND version = ? AND state = 'reconciling'
+                """,
+                (
+                    target.value,
+                    count,
+                    reason,
+                    instant.isoformat(),
+                    current.id,
+                    current.version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("absence item compare-and-swap failed")
+            self._finish_literal_target_for_update(
+                prepared,
+                succeeded=False,
+                terminal=target is AutopilotState.DEAD,
+                instant=instant,
+            )
+            self._insert_event(
+                item_id=current.id,
+                run_id=prepared.run_id,
+                previous=current.state,
+                target=target,
+                reason=reason,
+                metadata={"checks": count},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id), None
+
+    def open_reconciliation_auth_challenge(
+        self,
+        context: ReconciliationContext,
+        fencing_token: int,
+        *,
+        now: datetime | str | None = None,
+    ) -> ChallengeRecord:
+        if type(context) is not ReconciliationContext:
+            raise TypeError("context must be an exact ReconciliationContext")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        prepared = context.prepared
+        if prepared.fencing_token != fencing_token:
+            raise LostLease("reconciliation context fence changed")
+        with self.immediate():
+            current = self._validate_prepared_for_update(prepared, instant=instant)
+            existing_row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_challenges
+                WHERE account_profile_id = ? AND scope = 'account'
+                  AND challenge_type = 'manual_auth'
+                  AND status IN ('open','in_progress')
+                ORDER BY id ASC LIMIT 1
+                """,
+                (prepared.account_id,),
+            ).fetchone()
+            if existing_row is None:
+                cursor = self.conn.execute(
+                    """
+                    INSERT INTO hh_autopilot_challenges (
+                        scope, challenge_type, account_profile_id, item_id,
+                        reservation_id, sanitized_url, screenshot_path,
+                        status, expires_at, metadata_json, created_at
+                    ) VALUES ('account', 'manual_auth', ?, ?, ?, '', '',
+                              'open', '', '{}', ?)
+                    """,
+                    (
+                        prepared.account_id,
+                        current.id,
+                        prepared.reservation_id,
+                        instant.isoformat(),
+                    ),
+                )
+                challenge_id = _required_lastrowid(cursor)
+            else:
+                challenge_id = _persisted_integer(
+                    existing_row["id"],
+                    field="manual auth challenge id",
+                    minimum=1,
+                )
+            reservation = self._reservation_for_update(prepared.reservation_id)
+            if reservation.state is QuotaReservationState.RESERVED:
+                self._change_reservation_state_for_update(
+                    reservation.id,
+                    fencing_token,
+                    target=QuotaReservationState.HELD,
+                    remote_negotiation_id=None,
+                    instant=instant,
+                )
+            assert_transition(current.state, AutopilotState.MANUAL_CHALLENGE)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'manual_challenge', version = version + 1,
+                    next_attempt_at = '', challenge_id = ?,
+                    last_outcome_code = 'manual_auth', updated_at = ?
+                WHERE id = ? AND version = ? AND state = 'reconciling'
+                """,
+                (challenge_id, instant.isoformat(), current.id, current.version),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("manual auth item compare-and-swap failed")
+            self._insert_event(
+                item_id=current.id,
+                run_id=prepared.run_id,
+                previous=current.state,
+                target=AutopilotState.MANUAL_CHALLENGE,
+                reason="manual_auth",
+                metadata={},
+                created_at=instant,
+            )
+            return self._challenge_for_update(challenge_id)
+
+    def _reconciliation_context_for_update(
+        self,
+        item: ItemRecord,
+        attempt: ApplicationAttemptRecord,
+        reservation: QuotaReservationRecord,
+        *,
+        fencing_token: int,
+        challenge_id: int | None = None,
+        challenge_type: str = "",
+    ) -> ReconciliationContext:
+        if reservation.run_id != attempt.run_id or reservation.attempt_id != attempt.id:
+            raise StaleWrite("reservation attempt provenance changed")
+        dispatched_at = _instant(attempt.dispatched_at, field="attempt dispatched_at")
+        return ReconciliationContext(
+            prepared=PreparedDispatch(
+                item_id=item.id,
+                item_version=item.version,
+                attempt_id=attempt.id,
+                reservation_id=reservation.id,
+                run_id=attempt.run_id,
+                account_id=item.account_id,
+                vacancy_id=item.vacancy_id,
+                resume_id=item.resume_id,
+                authorization_kind=attempt.authorization_kind,
+                authorization_ref=attempt.authorization_ref,
+                policy_hash=attempt.policy_hash,
+                fencing_token=fencing_token,
+                cover_letter_mode="none",
+                timezone_name=reservation.timezone,
+                attempt_count=item.application_attempt_count,
+            ),
+            dispatched_at=dispatched_at,
+            initial_outcome_code=attempt.reason or item.last_outcome_code,
+            challenge_id=challenge_id,
+            challenge_type=challenge_type,
+        )
+
     def create_grants(
         self,
         requests: list[tuple[str, str, str, str]],
@@ -4236,112 +4894,139 @@ class AutopilotRepository:
         outcome_json = _json_dumps(stored_outcome, field="dispatch outcome")
 
         with self.immediate():
-            current = self._validate_prepared_for_update(
-                prepared,
-                instant=instant,
-            )
-            job_id = self._ensure_hh_job_for_update(current, instant=instant)
-            cursor = self.conn.execute(
-                """
-                INSERT INTO applications (
-                    account_profile_id, job_id, status, notes, applied_at,
-                    updated_at, source, source_id, resume_id, resume_hash,
-                    plan_id, transport, sent_at, result_json, error,
-                    autopilot_run_id, autopilot_item_id, autopilot_attempt_id
-                ) VALUES (
-                    ?, ?, 'applied', '', ?, ?, 'hh', ?, ?, '', NULL,
-                    'hh_autopilot', ?, ?, '', ?, ?, ?
-                )
-                """,
-                (
-                    prepared.account_id,
-                    job_id,
-                    instant.isoformat(),
-                    instant.isoformat(),
-                    prepared.vacancy_id,
-                    prepared.resume_id,
-                    instant.isoformat(),
-                    outcome_json,
-                    prepared.run_id,
-                    prepared.item_id,
-                    prepared.attempt_id,
-                ),
-            )
-            application_id = _required_lastrowid(cursor)
-            self._finish_attempt_for_update(
+            return self._finalize_applied_for_update(
                 prepared,
                 outcome,
                 stored_outcome=stored_outcome,
-                status="applied",
+                outcome_json=outcome_json,
                 instant=instant,
             )
-            remote_id = _remote_negotiation_id(stored_outcome)
-            self._change_reservation_state_for_update(
-                prepared.reservation_id,
-                prepared.fencing_token,
-                target=QuotaReservationState.CONSUMED,
-                remote_negotiation_id=remote_id,
-                instant=instant,
+
+    def _finalize_applied_for_update(
+        self,
+        prepared: PreparedDispatch,
+        outcome: DispatchOutcome,
+        *,
+        stored_outcome: dict[str, Any],
+        outcome_json: str,
+        instant: datetime,
+        allowed_states: frozenset[AutopilotState] | None = None,
+        reason: str = "applied",
+    ) -> ItemRecord:
+        allowed = allowed_states or frozenset(
+            {AutopilotState.APPLYING, AutopilotState.RECONCILING}
+        )
+        current = self._validate_prepared_for_update(
+            prepared,
+            instant=instant,
+            allowed_states=allowed,
+        )
+        job_id = self._ensure_hh_job_for_update(current, instant=instant)
+        cursor = self.conn.execute(
+            """
+            INSERT INTO applications (
+                account_profile_id, job_id, status, notes, applied_at,
+                updated_at, source, source_id, resume_id, resume_hash,
+                plan_id, transport, sent_at, result_json, error,
+                autopilot_run_id, autopilot_item_id, autopilot_attempt_id
+            ) VALUES (
+                ?, ?, 'applied', '', ?, ?, 'hh', ?, ?, '', NULL,
+                'hh_autopilot', ?, ?, '', ?, ?, ?
             )
-            assert_transition(current.state, AutopilotState.APPLIED)
-            cursor = self.conn.execute(
-                """
-                UPDATE hh_autopilot_items
-                SET state = 'applied', version = version + 1,
-                    next_attempt_at = '', challenge_id = NULL,
-                    last_outcome_code = 'applied', updated_at = ?
-                WHERE id = ? AND version = ?
-                  AND active_attempt_id = ?
-                  AND state IN ('applying','reconciling')
-                """,
-                (
-                    instant.isoformat(),
-                    prepared.item_id,
-                    prepared.item_version,
-                    prepared.attempt_id,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise StaleWrite("applied item compare-and-swap failed")
-            cursor = self.conn.execute(
-                """
-                UPDATE hh_application_account_guards
-                SET status = 'applied', application_id = ?,
-                    application_count = application_count + 1,
-                    updated_at = ?
-                WHERE account_profile_id = ? AND source = 'hh'
-                  AND source_id = ? AND status = 'active'
-                  AND owner_attempt_id = ?
-                """,
-                (
-                    application_id,
-                    instant.isoformat(),
-                    prepared.account_id,
-                    prepared.vacancy_id,
-                    prepared.attempt_id,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise StaleWrite("application guard finalization failed")
-            self._increment_success_counter_for_update(
+            """,
+            (
+                prepared.account_id,
+                job_id,
+                instant.isoformat(),
+                instant.isoformat(),
+                prepared.vacancy_id,
+                prepared.resume_id,
+                instant.isoformat(),
+                outcome_json,
                 prepared.run_id,
-                instant=instant,
-            )
-            self._finish_literal_target_for_update(
-                prepared,
-                succeeded=True,
-                instant=instant,
-            )
-            self._insert_event(
-                item_id=prepared.item_id,
-                run_id=prepared.run_id,
-                previous=current.state,
-                target=AutopilotState.APPLIED,
-                reason="applied",
-                metadata=_dispatch_event_metadata(outcome),
-                created_at=instant,
-            )
-            return self._item_for_update(prepared.item_id)
+                prepared.item_id,
+                prepared.attempt_id,
+            ),
+        )
+        application_id = _required_lastrowid(cursor)
+        self._finish_attempt_for_update(
+            prepared,
+            outcome,
+            stored_outcome=stored_outcome,
+            status="applied",
+            instant=instant,
+        )
+        remote_id = _remote_negotiation_id(stored_outcome)
+        self._change_reservation_state_for_update(
+            prepared.reservation_id,
+            prepared.fencing_token,
+            target=QuotaReservationState.CONSUMED,
+            remote_negotiation_id=remote_id,
+            instant=instant,
+        )
+        if current.state not in {
+            AutopilotState.MANUAL_CHALLENGE,
+            AutopilotState.DEAD,
+        }:
+            assert_transition(current.state, AutopilotState.APPLIED)
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_items
+            SET state = 'applied', version = version + 1,
+                next_attempt_at = '', challenge_id = NULL,
+                last_outcome_code = 'applied', updated_at = ?
+            WHERE id = ? AND version = ? AND active_attempt_id = ?
+              AND state = ?
+            """,
+            (
+                instant.isoformat(),
+                prepared.item_id,
+                prepared.item_version,
+                prepared.attempt_id,
+                current.state.value,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite("applied item compare-and-swap failed")
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_application_account_guards
+            SET status = 'applied', application_id = ?,
+                application_count = application_count + 1,
+                updated_at = ?
+            WHERE account_profile_id = ? AND source = 'hh'
+              AND source_id = ? AND status = 'active'
+              AND owner_attempt_id = ?
+            """,
+            (
+                application_id,
+                instant.isoformat(),
+                prepared.account_id,
+                prepared.vacancy_id,
+                prepared.attempt_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite("application guard finalization failed")
+        self._increment_success_counter_for_update(
+            prepared.run_id,
+            instant=instant,
+        )
+        self._finish_literal_target_for_update(
+            prepared,
+            succeeded=True,
+            instant=instant,
+        )
+        self._insert_event(
+            item_id=prepared.item_id,
+            run_id=prepared.run_id,
+            previous=current.state,
+            target=AutopilotState.APPLIED,
+            reason=reason,
+            metadata=_dispatch_event_metadata(outcome),
+            created_at=instant,
+        )
+        return self._item_for_update(prepared.item_id)
 
     def record_possibly_sent(
         self,
@@ -4734,6 +5419,7 @@ class AutopilotRepository:
         prepared: PreparedDispatch,
         *,
         instant: datetime,
+        allowed_states: frozenset[AutopilotState] | None = None,
     ) -> ItemRecord:
         self._assert_fence(
             prepared.account_id,
@@ -4741,14 +5427,16 @@ class AutopilotRepository:
             instant,
         )
         current = self._item_for_update(prepared.item_id)
+        allowed = allowed_states or frozenset(
+            {AutopilotState.APPLYING, AutopilotState.RECONCILING}
+        )
         if (
             current.account_id != prepared.account_id
             or current.vacancy_id != prepared.vacancy_id
             or current.resume_id != prepared.resume_id
             or current.version != prepared.item_version
             or current.active_attempt_id != prepared.attempt_id
-            or current.state
-            not in {AutopilotState.APPLYING, AutopilotState.RECONCILING}
+            or current.state not in allowed
         ):
             raise StaleWrite("prepared item provenance changed")
         attempt = self.get_application_attempt(prepared.attempt_id)
@@ -4805,7 +5493,7 @@ class AutopilotRepository:
                 delivery_certainty = ?, finished_at = ?
             WHERE id = ? AND autopilot_attempt_id = ?
               AND status IN ('applying','reconciling')
-              AND delivery_certainty = ''
+              AND (delivery_certainty = '' OR status = 'reconciling')
             """,
             (
                 status,
@@ -5589,6 +6277,377 @@ class AutopilotRepository:
         ).fetchone()
         return self._challenge_from_row(row) if row is not None else None
 
+    def expire_challenge(
+        self,
+        challenge_id: int,
+        *,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        challenge_id = _integer(challenge_id, field="challenge_id", minimum=1)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        with self.immediate():
+            challenge = self._challenge_for_update(challenge_id)
+            self._assert_fence(challenge.account_id, fencing_token, instant)
+            if challenge.challenge_type != "ambiguous_application":
+                raise ValueError("only ambiguity expiry is implemented here")
+            if challenge.status not in {"open", "in_progress"}:
+                if challenge.status == "expired" and challenge.item_id is not None:
+                    return self._item_for_update(challenge.item_id)
+                raise StaleWrite("challenge is already closed")
+            if not challenge.expires_at or _instant(
+                challenge.expires_at,
+                field="challenge expires_at",
+            ) > instant:
+                raise ValueError("challenge has not expired")
+            if challenge.item_id is None or challenge.reservation_id is None:
+                raise StaleWrite("ambiguity challenge linkage is incomplete")
+            current = self._item_for_update(challenge.item_id)
+            if (
+                current.state is not AutopilotState.MANUAL_CHALLENGE
+                or current.challenge_id != challenge.id
+            ):
+                raise StaleWrite("ambiguity item changed")
+            self._adopt_challenge_reservation_for_update(
+                challenge.reservation_id,
+                fencing_token,
+                instant=instant,
+            )
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_challenges
+                SET status = 'expired'
+                WHERE id = ? AND status IN ('open','in_progress')
+                """,
+                (challenge.id,),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("challenge expiry compare-and-swap failed")
+            assert_transition(current.state, AutopilotState.DEAD)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'dead', version = version + 1,
+                    next_attempt_at = '',
+                    last_outcome_code = 'challenge_expired', updated_at = ?
+                WHERE id = ? AND version = ? AND challenge_id = ?
+                  AND state = 'manual_challenge'
+                """,
+                (
+                    instant.isoformat(),
+                    current.id,
+                    current.version,
+                    challenge.id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("ambiguity expiry item changed")
+            self._insert_event(
+                item_id=current.id,
+                run_id=None,
+                previous=current.state,
+                target=AutopilotState.DEAD,
+                reason="challenge_expired",
+                metadata={"challenge_id": challenge.id},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
+
+    def resolve_challenge(
+        self,
+        challenge_id: int,
+        *,
+        action: str,
+        actor: str,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        challenge_id = _integer(challenge_id, field="challenge_id", minimum=1)
+        action = _required_text(action, field="action")
+        actor = _required_text(actor, field="actor")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        allowed_actions = {
+            "confirmed_applied",
+            "confirmed_not_applied_retry",
+            "confirmed_not_applied_skip",
+            "retry_reconciliation",
+        }
+        if action not in allowed_actions:
+            raise ValueError("unsupported ambiguity resolution action")
+        instant = _instant(now, field="now")
+        with self.immediate():
+            challenge = self._challenge_for_update(challenge_id)
+            self._assert_fence(challenge.account_id, fencing_token, instant)
+            if challenge.challenge_type != "ambiguous_application":
+                raise ValueError("challenge is not an ambiguous application")
+            if challenge.status == "resolved":
+                if challenge.resolution_action != action or challenge.item_id is None:
+                    raise StaleWrite("challenge was resolved differently")
+                return self._item_for_update(challenge.item_id)
+            if challenge.status not in {
+                "open",
+                "in_progress",
+                "dismissed",
+                "expired",
+            }:
+                raise StaleWrite("challenge cannot be resolved")
+            if challenge.item_id is None or challenge.reservation_id is None:
+                raise StaleWrite("ambiguity challenge linkage is incomplete")
+            current = self._item_for_update(challenge.item_id)
+            if current.challenge_id != challenge.id or current.state not in {
+                AutopilotState.MANUAL_CHALLENGE,
+                AutopilotState.DEAD,
+            }:
+                raise StaleWrite("ambiguity item changed")
+            reservation = self._adopt_challenge_reservation_for_update(
+                challenge.reservation_id,
+                fencing_token,
+                instant=instant,
+            )
+            if reservation.attempt_id is None:
+                raise StaleWrite("ambiguity reservation has no attempt")
+            attempt = self.get_application_attempt(reservation.attempt_id)
+            if attempt is None or attempt.item_id != current.id:
+                raise StaleWrite("ambiguity attempt changed")
+            context = self._reconciliation_context_for_update(
+                current,
+                attempt,
+                reservation,
+                fencing_token=fencing_token,
+                challenge_id=challenge.id,
+                challenge_type=challenge.challenge_type,
+            )
+            prepared = context.prepared
+
+            if action == "confirmed_applied":
+                raw_ids = challenge.metadata.get("remote_negotiation_ids", ())
+                if isinstance(raw_ids, (str, bytes)) or not isinstance(
+                    raw_ids, (list, tuple)
+                ) or not raw_ids:
+                    raise ValueError("confirmed_applied requires a remote negotiation id")
+                remote_id = _required_text(raw_ids[0], field="remote_negotiation_id")
+                outcome = DispatchOutcome(
+                    code="applied",
+                    certainty=DeliveryCertainty.DEFINITE_RESPONSE,
+                    payload={"id": remote_id},
+                )
+                stored_outcome = _dispatch_storage_payload(outcome)
+                item = self._finalize_applied_for_update(
+                    prepared,
+                    outcome,
+                    stored_outcome=stored_outcome,
+                    outcome_json=_json_dumps(
+                        stored_outcome,
+                        field="dispatch outcome",
+                    ),
+                    instant=instant,
+                    allowed_states=frozenset(
+                        {
+                            AutopilotState.MANUAL_CHALLENGE,
+                            AutopilotState.DEAD,
+                        }
+                    ),
+                    reason="confirmed_applied",
+                )
+            else:
+                target = {
+                    "confirmed_not_applied_retry": AutopilotState.READY,
+                    "confirmed_not_applied_skip": AutopilotState.SKIPPED,
+                    "retry_reconciliation": AutopilotState.RECONCILING,
+                }[action]
+                if target is not AutopilotState.RECONCILING:
+                    self._change_reservation_state_for_update(
+                        reservation.id,
+                        fencing_token,
+                        target=QuotaReservationState.RELEASED,
+                        remote_negotiation_id=None,
+                        instant=instant,
+                    )
+                    cursor = self.conn.execute(
+                        """
+                        DELETE FROM hh_application_account_guards
+                        WHERE account_profile_id = ? AND source = 'hh'
+                          AND source_id = ? AND status = 'active'
+                          AND owner_attempt_id = ?
+                        """,
+                        (
+                            prepared.account_id,
+                            prepared.vacancy_id,
+                            prepared.attempt_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleWrite("ambiguity guard release failed")
+                    cursor = self.conn.execute(
+                        """
+                        UPDATE hh_application_attempts
+                        SET status = ?, reason = ?, finished_at = ?
+                        WHERE id = ? AND status IN ('applying','reconciling')
+                        """,
+                        (
+                            target.value,
+                            action,
+                            instant.isoformat(),
+                            prepared.attempt_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleWrite("ambiguity attempt resolution failed")
+                    self._finish_literal_target_for_update(
+                        prepared,
+                        succeeded=False,
+                        terminal=target is AutopilotState.SKIPPED,
+                        instant=instant,
+                    )
+                cursor = self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_items
+                    SET state = ?, retry_stage = ?, version = version + 1,
+                        next_attempt_at = ?, challenge_id = NULL,
+                        last_outcome_code = ?, updated_at = ?
+                    WHERE id = ? AND version = ? AND challenge_id = ?
+                      AND state = ?
+                    """,
+                    (
+                        target.value,
+                        (
+                            RetryStage.RECONCILIATION.value
+                            if target is AutopilotState.RECONCILING
+                            else RetryStage.APPLICATION.value
+                        ),
+                        instant.isoformat()
+                        if target is AutopilotState.RECONCILING
+                        else "",
+                        action,
+                        instant.isoformat(),
+                        current.id,
+                        current.version,
+                        challenge.id,
+                        current.state.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleWrite("ambiguity item resolution failed")
+                self._insert_event(
+                    item_id=current.id,
+                    run_id=None,
+                    previous=current.state,
+                    target=target,
+                    reason=action,
+                    metadata={"challenge_id": challenge.id, "actor": actor},
+                    created_at=instant,
+                )
+                item = self._item_for_update(current.id)
+
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_challenges
+                SET status = 'resolved', resolution_at = ?,
+                    resolution_actor = ?, resolution_action = ?
+                WHERE id = ? AND status IN (
+                    'open','in_progress','dismissed','expired'
+                )
+                """,
+                (instant.isoformat(), actor, action, challenge.id),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("challenge resolution compare-and-swap failed")
+            return item
+
+    def requeue_dead(
+        self,
+        item_id: int | None,
+        *,
+        actor: str,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        actor = _required_text(actor, field="actor")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            self._assert_fence(current.account_id, fencing_token, instant)
+            if current.state is not AutopilotState.DEAD:
+                raise StaleWrite("only dead items can be requeued")
+            if current.challenge_id is not None:
+                challenge = self._challenge_for_update(current.challenge_id)
+                if challenge.challenge_type == "ambiguous_application" and (
+                    challenge.status != "resolved"
+                ):
+                    raise RuntimeError("unresolved_ambiguity")
+            held = self.conn.execute(
+                """
+                SELECT 1 FROM hh_autopilot_quota_reservations
+                WHERE attempt_id = ? AND state = 'held'
+                """,
+                (current.active_attempt_id,),
+            ).fetchone()
+            if held is not None:
+                raise RuntimeError("unresolved_ambiguity")
+            target = {
+                RetryStage.ELIGIBILITY: AutopilotState.ELIGIBLE,
+                RetryStage.APPLICATION: AutopilotState.READY,
+                RetryStage.RECONCILIATION: AutopilotState.RECONCILING,
+            }[current.retry_stage]
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = ?, version = version + 1,
+                    next_attempt_at = ?, challenge_id = NULL,
+                    last_outcome_code = 'operator_requeue', updated_at = ?
+                WHERE id = ? AND version = ? AND state = 'dead'
+                """,
+                (
+                    target.value,
+                    instant.isoformat()
+                    if target is AutopilotState.RECONCILING
+                    else "",
+                    instant.isoformat(),
+                    current.id,
+                    current.version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("dead item requeue compare-and-swap failed")
+            self._insert_event(
+                item_id=current.id,
+                run_id=None,
+                previous=current.state,
+                target=target,
+                reason="operator_requeue",
+                metadata={"actor": actor},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
+
+    def _adopt_challenge_reservation_for_update(
+        self,
+        reservation_id: int,
+        fencing_token: int,
+        *,
+        instant: datetime,
+    ) -> QuotaReservationRecord:
+        reservation = self._reservation_for_update(reservation_id)
+        self._assert_fence(reservation.account_id, fencing_token, instant)
+        if reservation.state is not QuotaReservationState.HELD:
+            raise StaleWrite("ambiguity reservation is not held")
+        if reservation.fencing_token == fencing_token:
+            return reservation
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_quota_reservations
+            SET fencing_token = ?
+            WHERE id = ? AND fencing_token = ? AND state = 'held'
+            """,
+            (fencing_token, reservation.id, reservation.fencing_token),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite("ambiguity reservation adoption failed")
+        return self._reservation_for_update(reservation.id)
+
     def _change_reservation_state(
         self,
         reservation_id: int,
@@ -5724,6 +6783,15 @@ class AutopilotRepository:
         if row is None:
             raise StaleWrite(f"reservation {reservation_id} does not exist")
         return self._reservation_from_row(row)
+
+    def _challenge_for_update(self, challenge_id: int) -> ChallengeRecord:
+        row = self.conn.execute(
+            "SELECT * FROM hh_autopilot_challenges WHERE id = ?",
+            (challenge_id,),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite(f"challenge {challenge_id} does not exist")
+        return self._challenge_from_row(row)
 
     def _assert_cooldown_for_update(
         self,

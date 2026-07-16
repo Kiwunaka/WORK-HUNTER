@@ -184,6 +184,25 @@ class HHApiSession:
         data = self.request_json("GET", "/negotiations", params={"status": status})
         return list(data.get("items") or [])
 
+    def list_negotiations_page(
+        self,
+        *,
+        status: str,
+        page: int,
+        per_page: int = 100,
+    ) -> SearchPage:
+        status = _path_identifier(status, field="status")
+        if type(page) is not int or page < 0:
+            raise ValueError("page must be a nonnegative integer")
+        if type(per_page) is not int or not 1 <= per_page <= 100:
+            raise ValueError("per_page must be in 1..100")
+        data = self.request_json(
+            "GET",
+            "/negotiations",
+            params={"status": status, "page": page, "per_page": per_page},
+        )
+        return _search_page(data)
+
     def list_negotiation_messages(self, negotiation_id: str) -> list[dict[str, Any]]:
         data = self.request_json("GET", f"/negotiations/{negotiation_id}/messages")
         if isinstance(data.get("items"), list):

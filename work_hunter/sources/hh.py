@@ -19,6 +19,7 @@ from ..hh_transport.errors import (
     HHTransportError,
 )
 from ..hh_autopilot.sanitization import sanitize_text
+from ..hh_autopilot.reconcile import NegotiationSnapshot
 from ..hh_autopilot.types import (
     DeliveryCertainty,
     DispatchOutcome,
@@ -374,6 +375,45 @@ class HHApplyClient:
 
     def list_negotiations(self, status: str = "active") -> list[dict[str, Any]]:
         return self.session.list_negotiations(status=status)
+
+    def negotiation_snapshots(
+        self,
+        account_id: str | None = None,
+    ) -> tuple[NegotiationSnapshot, ...]:
+        if account_id is not None:
+            if type(account_id) is not str or not account_id.strip():
+                raise ValueError("account_id must be nonempty text")
+        configured = self.config.get("negotiation_statuses", ("active", "archived"))
+        if isinstance(configured, (str, bytes)) or not isinstance(
+            configured, (list, tuple)
+        ):
+            raise TypeError("negotiation_statuses must be a list")
+        statuses: list[str] = []
+        for value in configured:
+            if type(value) is not str or not value.strip():
+                raise ValueError("negotiation status must be nonempty text")
+            status = value.strip()
+            if status not in statuses:
+                statuses.append(status)
+        snapshots: dict[str, NegotiationSnapshot] = {}
+        for status in statuses:
+            page = 0
+            while True:
+                result = self.session.list_negotiations_page(
+                    status=status,
+                    page=page,
+                    per_page=100,
+                )
+                for payload in result.items:
+                    snapshot = NegotiationSnapshot.from_payload(
+                        payload,
+                        status=status,
+                    )
+                    snapshots.setdefault(snapshot.remote_id, snapshot)
+                page += 1
+                if page >= result.pages:
+                    break
+        return tuple(snapshots.values())
 
     def list_negotiation_messages(self, negotiation_id: str) -> list[dict[str, Any]]:
         return self.session.list_negotiation_messages(negotiation_id)

@@ -26,6 +26,7 @@ ALLOWED_TRANSITIONS = {
     },
     AutopilotState.RECONCILING: {
         AutopilotState.APPLIED,
+        AutopilotState.READY,
         AutopilotState.SKIPPED,
         AutopilotState.RETRY_WAIT,
         AutopilotState.MANUAL_CHALLENGE,
