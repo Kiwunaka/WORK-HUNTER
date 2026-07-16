@@ -196,16 +196,32 @@ def test_named_account_collector_rotation_persists_to_app_and_disk(monkeypatch, 
             },
         )
 
+    search_requests: list[dict] = []
+
+    def search_request(*args, **kwargs):
+        search_requests.append(dict(kwargs))
+        return FakeResponse(
+            200,
+            {
+                "items": [],
+                "page": 0,
+                "pages": 1,
+                "per_page": 1,
+                "found": 0,
+            },
+        )
+
     monkeypatch.setattr("requests.request", token_request)
     monkeypatch.setattr(
         "requests.sessions.Session.request",
-        lambda *args, **kwargs: FakeResponse(200, {"items": []}),
+        search_request,
     )
 
     result = app.sync_sources(sources=["hh"], limit=1)
 
     assert result["hh"] == {"status": "ok", "count": 0}
     assert refresh_payloads[0]["refresh_token"] == "personal-old-refresh"
+    assert search_requests[0]["headers"]["Authorization"] == "Bearer collector-new-access"
     assert app.hh_config()["refresh_token"] == "collector-new-refresh"
     assert app.config["sources"]["hh"]["refresh_token"] == "default-old-refresh"
 
@@ -236,10 +252,25 @@ def test_named_account_fallback_rotation_persists_to_disk(monkeypatch, tmp_path)
             },
         )
 
+    search_requests: list[dict] = []
+
+    def search_request(*args, **kwargs):
+        search_requests.append(dict(kwargs))
+        return FakeResponse(
+            200,
+            {
+                "items": [],
+                "page": 0,
+                "pages": 1,
+                "per_page": 1,
+                "found": 0,
+            },
+        )
+
     monkeypatch.setattr("requests.request", token_request)
     monkeypatch.setattr(
         "requests.sessions.Session.request",
-        lambda *args, **kwargs: FakeResponse(200, {"items": []}),
+        search_request,
     )
 
     result = app._search_hh_vacancies_web_fallback(
@@ -253,6 +284,7 @@ def test_named_account_fallback_rotation_persists_to_disk(monkeypatch, tmp_path)
     assert result["status"] == "ok"
     assert result["count"] == 0
     assert refresh_payloads[0]["refresh_token"] == "personal-old-refresh"
+    assert search_requests[0]["headers"]["Authorization"] == "Bearer fallback-new-access"
     assert WorkHunter(tmp_path).hh_config()["refresh_token"] == "fallback-new-refresh"
 
 
