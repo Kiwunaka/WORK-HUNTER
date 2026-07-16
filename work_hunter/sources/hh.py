@@ -12,6 +12,7 @@ from typing import Any
 from ..hh_transport import HHApiSession
 from ..hh_transport.backends import ConfigBackend
 from ..hh_transport.errors import HHNetworkError, HHParseError
+from ..hh_autopilot.types import SearchPage
 from ..models import Job
 from .common import USER_AGENT, absolute_url, clean_text, fetch_url
 
@@ -332,6 +333,14 @@ class HHApplyClient:
 
     def search_vacancies(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         return self.session.search_vacancies(params)
+
+    def search_vacancies_page(self, params: dict[str, Any]) -> SearchPage:
+        return self.session.search_vacancies_page(params)
+
+    def search_recommended_vacancies_page(
+        self, resume_id: str, params: dict[str, Any]
+    ) -> SearchPage:
+        return self.session.search_recommended_vacancies_page(resume_id, params)
 
     def get_similar_vacancies(self, vacancy_id: str) -> list[dict[str, Any]]:
         data = self._request_json("GET", f"/vacancies/{vacancy_id}/similar_vacancies")

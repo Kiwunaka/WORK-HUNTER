@@ -12,7 +12,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from work_hunter.storage import Storage, redact_for_storage
 
 from .state_machine import assert_transition
-from .types import AutopilotState, QuotaReservationState, RetryStage
+from .types import (
+    AutopilotState,
+    NormalizedVacancy,
+    QuotaReservationState,
+    RetryStage,
+    SearchPage,
+    SearchRequest,
+)
 
 
 RUN_TRIGGERS = frozenset(
@@ -152,6 +159,61 @@ class RunRecord:
     @property
     def counters_json(self) -> dict[str, Any]:
         return _json_copy(self.counters)
+
+
+@dataclass(frozen=True)
+class SearchCycleRecord:
+    id: int
+    account_id: str
+    policy_hash: str
+    origin_run_id: int
+    owner_run_id: int
+    claim_version: int
+    fencing_token: int
+    status: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SearchCheckpointRecord:
+    id: int
+    cycle_id: int
+    resume_id: str
+    query_key: str
+    next_page: int
+    reported_total: int | None
+    unique_vacancy_count: int
+    status: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SearchResultRecord:
+    id: int
+    cycle_id: int
+    checkpoint_id: int
+    account_id: str
+    resume_id: str
+    query_key: str
+    vacancy_id: str
+    page: int
+    normalized: dict[str, Any]
+    discovered_at: str
+
+
+@dataclass(frozen=True)
+class ShadowResultRecord:
+    id: int
+    run_id: int
+    account_id: str
+    vacancy_id: str
+    resume_id: str
+    filter_data: dict[str, Any]
+    deterministic_score: float | None
+    ai_data: dict[str, Any]
+    would_apply: bool
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -347,6 +409,27 @@ def _persisted_integer(
     return value
 
 
+def _persisted_text(
+    value: Any,
+    *,
+    field: str,
+    canonical: bool = False,
+) -> str:
+    if type(value) is not str:
+        raise StaleWrite(f"{field} is not valid persisted text")
+    try:
+        parsed = (
+            _canonical_identifier(value, field=field)
+            if canonical
+            else _required_text(value, field=field)
+        )
+    except (TypeError, ValueError) as exc:
+        raise StaleWrite(f"{field} is not valid persisted text") from exc
+    if parsed != value:
+        raise StaleWrite(f"{field} is not canonical persisted text")
+    return value
+
+
 def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
     lastrowid = cursor.lastrowid
     if lastrowid is None:
@@ -376,8 +459,10 @@ def _json_dumps(value: dict[str, Any] | None, *, field: str) -> str:
 
 
 def _json_loads(value: Any, *, field: str) -> dict[str, Any]:
+    if type(value) is not str:
+        raise ValueError(f"invalid JSON in {field}")
     try:
-        loaded = json.loads(str(value))
+        loaded = json.loads(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid JSON in {field}") from exc
     if not isinstance(loaded, dict):
@@ -698,55 +783,86 @@ class AutopilotRepository:
                 "utf-8"
             )
         ).hexdigest()
-        now = _utc_now()
         with self.immediate():
-            origin_run = self._run_for_update(origin_run_id)
-            if origin_run.account_id != account_id:
-                raise ValueError("item account_id must match its origin run")
-            cursor = self.conn.execute(
-                """
-                INSERT INTO hh_autopilot_items (
-                    origin_run_id, last_run_id, account_profile_id, vacancy_id,
-                    resume_id, query_key, state, retry_stage, idempotency_key,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(account_profile_id, idempotency_key) DO NOTHING
-                """,
-                (
-                    origin_run_id,
-                    origin_run_id,
-                    account_id,
-                    vacancy_id,
-                    resume_id,
-                    query_key,
-                    AutopilotState.DISCOVERED.value,
-                    RetryStage.ELIGIBILITY.value,
-                    idempotency_key,
-                    now,
-                    now,
-                ),
+            return self._create_item_for_update(
+                origin_run_id,
+                account_id,
+                vacancy_id,
+                resume_id,
+                query_key,
+                idempotency_key=idempotency_key,
             )
-            if cursor.rowcount == 1:
-                item_id = _required_lastrowid(cursor)
-                self._insert_event(
-                    item_id=item_id,
-                    run_id=origin_run_id,
-                    previous=None,
-                    target=AutopilotState.DISCOVERED,
-                    reason="discovered",
-                    metadata={},
-                )
-                return self._item_for_update(item_id)
-            row = self.conn.execute(
-                """
-                SELECT * FROM hh_autopilot_items
-                WHERE account_profile_id = ? AND idempotency_key = ?
-                """,
-                (account_id, idempotency_key),
-            ).fetchone()
-            if row is None:
-                raise StaleWrite("item idempotency collision could not be resolved")
-            return self._item_from_row(row)
+
+    def _create_item_for_update(
+        self,
+        origin_run_id: int,
+        account_id: str,
+        vacancy_id: str,
+        resume_id: str,
+        query_key: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> ItemRecord:
+        """Create an already-validated item inside the caller's transaction."""
+        if idempotency_key is None:
+            idempotency_key = hashlib.sha256(
+                (
+                    account_id
+                    + "\0"
+                    + resume_id
+                    + "\0"
+                    + vacancy_id
+                    + "\0apply"
+                ).encode("utf-8")
+            ).hexdigest()
+        origin_run = self._run_for_update(origin_run_id)
+        if origin_run.account_id != account_id:
+            raise ValueError("item account_id must match its origin run")
+        now = _utc_now()
+        cursor = self.conn.execute(
+            """
+            INSERT INTO hh_autopilot_items (
+                origin_run_id, last_run_id, account_profile_id, vacancy_id,
+                resume_id, query_key, state, retry_stage, idempotency_key,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_profile_id, idempotency_key) DO NOTHING
+            """,
+            (
+                origin_run_id,
+                origin_run_id,
+                account_id,
+                vacancy_id,
+                resume_id,
+                query_key,
+                AutopilotState.DISCOVERED.value,
+                RetryStage.ELIGIBILITY.value,
+                idempotency_key,
+                now,
+                now,
+            ),
+        )
+        if cursor.rowcount == 1:
+            item_id = _required_lastrowid(cursor)
+            self._insert_event(
+                item_id=item_id,
+                run_id=origin_run_id,
+                previous=None,
+                target=AutopilotState.DISCOVERED,
+                reason="discovered",
+                metadata={},
+            )
+            return self._item_for_update(item_id)
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_items
+            WHERE account_profile_id = ? AND idempotency_key = ?
+            """,
+            (account_id, idempotency_key),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite("item idempotency collision could not be resolved")
+        return self._item_from_row(row)
 
     def get_item(self, item_id: int) -> ItemRecord | None:
         item_id = _integer(item_id, field="item_id", minimum=1)
@@ -754,6 +870,685 @@ class AutopilotRepository:
             "SELECT * FROM hh_autopilot_items WHERE id = ?", (item_id,)
         ).fetchone()
         return self._item_from_row(row) if row is not None else None
+
+    def create_search_cycle(
+        self,
+        account_id: str,
+        run_id: int,
+        policy_hash: str,
+        fencing_token: int,
+        *,
+        mode: str = "live",
+    ) -> SearchCycleRecord:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        policy_hash = _required_text(policy_hash, field="policy_hash")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        mode = self._search_mode(mode)
+        instant = _instant(None, field="now")
+        with self.immediate():
+            existing = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_search_cycles
+                WHERE owner_run_id = ? AND status = 'running'
+                ORDER BY id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+            if len(existing) > 1:
+                raise StaleWrite("run owns multiple running search cycles")
+            if existing:
+                cycle = self._search_cycle_from_row(existing[0])
+                self._assert_search_runtime_for_update(
+                    cycle,
+                    account_id=account_id,
+                    run_id=run_id,
+                    policy_hash=policy_hash,
+                    fencing_token=fencing_token,
+                    mode=mode,
+                    instant=instant,
+                )
+                return cycle
+            run = self._run_for_update(run_id)
+            self._assert_search_run_for_update(
+                run,
+                account_id=account_id,
+                policy_hash=policy_hash,
+                fencing_token=fencing_token,
+                mode=mode,
+                instant=instant,
+            )
+            now = instant.isoformat()
+            cursor = self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_search_cycles (
+                    account_profile_id, policy_hash, origin_run_id, owner_run_id,
+                    claim_version, fencing_token, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 0, ?, 'running', ?, ?)
+                """,
+                (
+                    account_id,
+                    policy_hash,
+                    run_id,
+                    run_id,
+                    fencing_token,
+                    now,
+                    now,
+                ),
+            )
+            return self._search_cycle_for_update(_required_lastrowid(cursor))
+
+    def get_or_create_owned_cycle(
+        self,
+        request: SearchRequest | None = None,
+        *,
+        account_id: str | None = None,
+        run_id: int | None = None,
+        policy_hash: str | None = None,
+        fencing_token: int | None = None,
+        mode: str | None = None,
+    ) -> SearchCycleRecord:
+        if request is not None:
+            if not isinstance(request, SearchRequest):
+                raise TypeError("request must be a SearchRequest")
+            if any(
+                value is not None
+                for value in (account_id, run_id, policy_hash, fencing_token, mode)
+            ):
+                raise ValueError("request cannot be combined with explicit cycle fields")
+            account_id = request.account_id
+            run_id = request.run_id
+            policy_hash = request.policy_hash
+            fencing_token = request.fencing_token
+            mode = request.mode
+        if None in (account_id, run_id, policy_hash, fencing_token, mode):
+            raise ValueError("all search cycle fields are required")
+        assert isinstance(account_id, str)
+        assert isinstance(run_id, int)
+        assert isinstance(policy_hash, str)
+        assert isinstance(fencing_token, int)
+        assert isinstance(mode, str)
+        return self.create_search_cycle(
+            account_id,
+            run_id,
+            policy_hash,
+            fencing_token,
+            mode=mode,
+        )
+
+    def get_search_cycle(self, cycle_id: int) -> SearchCycleRecord | None:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        row = self.conn.execute(
+            "SELECT * FROM hh_autopilot_search_cycles WHERE id = ?", (cycle_id,)
+        ).fetchone()
+        return self._search_cycle_from_row(row) if row is not None else None
+
+    def get_owned_search_cycle(self, run_id: int) -> SearchCycleRecord | None:
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_search_cycles
+            WHERE owner_run_id = ? AND status = 'running'
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+        if len(rows) > 1:
+            raise StaleWrite("run owns multiple running search cycles")
+        return self._search_cycle_from_row(rows[0]) if rows else None
+
+    def list_search_cycles(self, account_id: str | None = None) -> list[SearchCycleRecord]:
+        if account_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM hh_autopilot_search_cycles ORDER BY id ASC"
+            ).fetchall()
+        else:
+            account_id = _canonical_identifier(account_id, field="account_id")
+            rows = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_search_cycles
+                WHERE account_profile_id = ? ORDER BY id ASC
+                """,
+                (account_id,),
+            ).fetchall()
+        return [self._search_cycle_from_row(row) for row in rows]
+
+    def count_search_cycles(self, account_id: str | None = None) -> int:
+        return len(self.list_search_cycles(account_id))
+
+    def ensure_search_checkpoint(
+        self,
+        cycle_id: int,
+        resume_id: str,
+        query_key: str,
+    ) -> SearchCheckpointRecord:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        resume_id = _required_text(resume_id, field="resume_id")
+        query_key = _required_text(query_key, field="query_key")
+        with self.immediate():
+            cycle = self._search_cycle_for_update(cycle_id)
+            if cycle.status != "running":
+                raise StaleWrite("search cycle is not running")
+            run = self._run_for_update(cycle.owner_run_id)
+            mode = "shadow" if run.trigger == "shadow" else "live"
+            self._assert_search_runtime_for_update(
+                cycle,
+                account_id=cycle.account_id,
+                run_id=cycle.owner_run_id,
+                policy_hash=cycle.policy_hash,
+                fencing_token=cycle.fencing_token,
+                mode=mode,
+                instant=_instant(None, field="now"),
+            )
+            now = _utc_now()
+            self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_search_checkpoints (
+                    cycle_id, resume_id, query_key, next_page,
+                    unique_vacancy_count, status, updated_at
+                ) VALUES (?, ?, ?, 0, 0, 'pending', ?)
+                ON CONFLICT(cycle_id, resume_id, query_key) DO NOTHING
+                """,
+                (cycle_id, resume_id, query_key, now),
+            )
+            row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_search_checkpoints
+                WHERE cycle_id = ? AND resume_id = ? AND query_key = ?
+                """,
+                (cycle_id, resume_id, query_key),
+            ).fetchone()
+            if row is None:
+                raise StaleWrite("search checkpoint disappeared")
+            return self._search_checkpoint_from_row(row)
+
+    def get_checkpoint(
+        self, cycle_id: int, resume_id: str, query_key: str
+    ) -> SearchCheckpointRecord | None:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        resume_id = _required_text(resume_id, field="resume_id")
+        query_key = _required_text(query_key, field="query_key")
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_search_checkpoints
+            WHERE cycle_id = ? AND resume_id = ? AND query_key = ?
+            """,
+            (cycle_id, resume_id, query_key),
+        ).fetchone()
+        return self._search_checkpoint_from_row(row) if row is not None else None
+
+    def list_search_checkpoints(self, cycle_id: int) -> list[SearchCheckpointRecord]:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_search_checkpoints
+            WHERE cycle_id = ? ORDER BY id ASC
+            """,
+            (cycle_id,),
+        ).fetchall()
+        return [self._search_checkpoint_from_row(row) for row in rows]
+
+    def commit_search_page(
+        self,
+        checkpoint_id: int,
+        *,
+        expected_next_page: int,
+        page: SearchPage,
+        normalized: Iterable[NormalizedVacancy],
+        fencing_token: int,
+        mode: str | None = None,
+        owner_run_id: int | None = None,
+        expected_claim_version: int | None = None,
+        policy_hash: str | None = None,
+    ) -> SearchCheckpointRecord:
+        checkpoint_id = _integer(checkpoint_id, field="checkpoint_id", minimum=1)
+        expected_next_page = _integer(expected_next_page, field="expected_next_page")
+        if not isinstance(page, SearchPage):
+            raise TypeError("page must be a SearchPage")
+        if page.page != expected_next_page:
+            raise ValueError("page.page must equal expected_next_page")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        if mode is not None:
+            mode = self._search_mode(mode)
+        owner_run_id = _optional_integer(owner_run_id, field="owner_run_id")
+        if owner_run_id == 0:
+            raise ValueError("owner_run_id must be at least 1")
+        expected_claim_version = _optional_integer(
+            expected_claim_version, field="expected_claim_version"
+        )
+        if policy_hash is not None:
+            policy_hash = _required_text(policy_hash, field="policy_hash")
+        if isinstance(normalized, (str, bytes)):
+            raise TypeError("normalized must be an iterable of NormalizedVacancy")
+        detached: list[tuple[NormalizedVacancy, str]] = []
+        seen: set[str] = set()
+        try:
+            values = list(normalized)
+        except TypeError as exc:
+            raise TypeError("normalized must be iterable") from exc
+        for index, vacancy in enumerate(values):
+            if not isinstance(vacancy, NormalizedVacancy):
+                raise TypeError(f"normalized[{index}] must be a NormalizedVacancy")
+            if vacancy.id in seen:
+                continue
+            seen.add(vacancy.id)
+            detached.append(
+                (vacancy, _json_dumps(vacancy.to_dict(), field="normalized vacancy"))
+            )
+        instant = _instant(None, field="now")
+        with self.immediate():
+            checkpoint = self._search_checkpoint_for_update(checkpoint_id)
+            cycle = self._search_cycle_for_update(checkpoint.cycle_id)
+            if mode is None:
+                run = self._run_for_update(cycle.owner_run_id)
+                mode = "shadow" if run.trigger == "shadow" else "live"
+            self._assert_search_commit_provenance(
+                cycle,
+                owner_run_id=owner_run_id,
+                expected_claim_version=expected_claim_version,
+                policy_hash=policy_hash,
+                fencing_token=fencing_token,
+                mode=mode,
+                instant=instant,
+            )
+            if checkpoint.next_page != expected_next_page:
+                raise StaleWrite("search checkpoint next_page changed")
+            if checkpoint.status == "complete":
+                raise StaleWrite("search checkpoint is complete")
+            inserted = 0
+            for vacancy, normalized_json in detached:
+                cursor = self.conn.execute(
+                    """
+                    INSERT INTO hh_autopilot_search_results (
+                        cycle_id, checkpoint_id, account_profile_id, resume_id,
+                        query_key, vacancy_id, page, normalized_json, discovered_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(cycle_id, resume_id, query_key, vacancy_id) DO NOTHING
+                    """,
+                    (
+                        cycle.id,
+                        checkpoint.id,
+                        cycle.account_id,
+                        checkpoint.resume_id,
+                        checkpoint.query_key,
+                        vacancy.id,
+                        page.page,
+                        normalized_json,
+                        instant.isoformat(),
+                    ),
+                )
+                inserted += 1 if cursor.rowcount == 1 else 0
+                if mode == "live":
+                    self._create_item_for_update(
+                        cycle.origin_run_id,
+                        cycle.account_id,
+                        vacancy.id,
+                        checkpoint.resume_id,
+                        checkpoint.query_key,
+                    )
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_search_checkpoints
+                SET next_page = ?, reported_total = ?,
+                    unique_vacancy_count = unique_vacancy_count + ?,
+                    status = 'running', updated_at = ?
+                WHERE id = ? AND next_page = ? AND status != 'complete'
+                """,
+                (
+                    page.page + 1,
+                    page.total,
+                    inserted,
+                    instant.isoformat(),
+                    checkpoint.id,
+                    expected_next_page,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("search checkpoint compare-and-swap failed")
+            self.conn.execute(
+                "UPDATE hh_autopilot_search_cycles SET updated_at = ? WHERE id = ?",
+                (instant.isoformat(), cycle.id),
+            )
+            return self._search_checkpoint_for_update(checkpoint.id)
+
+    def complete_checkpoint(
+        self,
+        checkpoint_id: int,
+        fencing_token: int,
+        *,
+        owner_run_id: int | None = None,
+        expected_claim_version: int | None = None,
+        policy_hash: str | None = None,
+    ) -> SearchCheckpointRecord:
+        checkpoint_id = _integer(checkpoint_id, field="checkpoint_id", minimum=1)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        owner_run_id = _optional_integer(owner_run_id, field="owner_run_id")
+        expected_claim_version = _optional_integer(
+            expected_claim_version, field="expected_claim_version"
+        )
+        if policy_hash is not None:
+            policy_hash = _required_text(policy_hash, field="policy_hash")
+        instant = _instant(None, field="now")
+        with self.immediate():
+            checkpoint = self._search_checkpoint_for_update(checkpoint_id)
+            cycle = self._search_cycle_for_update(checkpoint.cycle_id)
+            run = self._run_for_update(cycle.owner_run_id)
+            mode = "shadow" if run.trigger == "shadow" else "live"
+            self._assert_search_commit_provenance(
+                cycle,
+                owner_run_id=owner_run_id,
+                expected_claim_version=expected_claim_version,
+                policy_hash=policy_hash,
+                fencing_token=fencing_token,
+                mode=mode,
+                instant=instant,
+            )
+            if checkpoint.status != "complete":
+                self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_search_checkpoints
+                    SET status = 'complete', updated_at = ? WHERE id = ?
+                    """,
+                    (instant.isoformat(), checkpoint.id),
+                )
+            return self._search_checkpoint_for_update(checkpoint.id)
+
+    def interrupt_search_cycle(
+        self, cycle_id: int, fencing_token: int
+    ) -> SearchCycleRecord:
+        return self._change_search_cycle_status(
+            cycle_id, fencing_token, expected="running", target="interrupted"
+        )
+
+    def complete_search_cycle(
+        self, cycle_id: int, fencing_token: int
+    ) -> SearchCycleRecord:
+        return self._change_search_cycle_status(
+            cycle_id, fencing_token, expected="running", target="complete"
+        )
+
+    def supersede_search_cycle(
+        self, cycle_id: int, fencing_token: int
+    ) -> SearchCycleRecord:
+        return self._change_search_cycle_status(
+            cycle_id,
+            fencing_token,
+            expected=("running", "interrupted"),
+            target="superseded",
+        )
+
+    def _change_search_cycle_status(
+        self,
+        cycle_id: int,
+        fencing_token: int,
+        *,
+        expected: str | tuple[str, ...],
+        target: str,
+    ) -> SearchCycleRecord:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(None, field="now")
+        expected_values = (expected,) if isinstance(expected, str) else expected
+        with self.immediate():
+            cycle = self._search_cycle_for_update(cycle_id)
+            if cycle.status == target:
+                return cycle
+            if cycle.status not in expected_values:
+                raise StaleWrite(f"search cycle cannot become {target}")
+            self._assert_fence(cycle.account_id, fencing_token, instant)
+            if cycle.fencing_token != fencing_token:
+                raise LostLease("search cycle fencing token changed")
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_search_cycles
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND fencing_token = ?
+                """,
+                (target, instant.isoformat(), cycle.id, cycle.status, fencing_token),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("search cycle status compare-and-swap failed")
+            return self._search_cycle_for_update(cycle.id)
+
+    def claim_search_cycle(
+        self,
+        cycle_id: int,
+        *,
+        expected_claim_version: int,
+        new_run_id: int,
+        policy_hash: str,
+        fencing_token: int,
+    ) -> SearchCycleRecord | None:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        expected_claim_version = _integer(
+            expected_claim_version, field="expected_claim_version"
+        )
+        new_run_id = _integer(new_run_id, field="new_run_id", minimum=1)
+        policy_hash = _required_text(policy_hash, field="policy_hash")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(None, field="now")
+        with self.immediate():
+            cycle = self._search_cycle_for_update(cycle_id)
+            if cycle.status != "interrupted":
+                raise StaleWrite("only an interrupted search cycle can be claimed")
+            if cycle.claim_version != expected_claim_version:
+                raise StaleWrite("search cycle claim version changed")
+            run = self._run_for_update(new_run_id)
+            if run.trigger != "recovery":
+                raise RepositoryAuthorizationDenied("search_recovery_run_required")
+            self._assert_search_run_for_update(
+                run,
+                account_id=cycle.account_id,
+                policy_hash=policy_hash,
+                fencing_token=fencing_token,
+                mode="live",
+                instant=instant,
+            )
+            if cycle.policy_hash != policy_hash:
+                self._supersede_and_reset_search_items_for_update(
+                    cycle, run_id=new_run_id, instant=instant
+                )
+                return None
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_search_cycles
+                SET owner_run_id = ?, claim_version = claim_version + 1,
+                    fencing_token = ?, status = 'running', updated_at = ?
+                WHERE id = ? AND status = 'interrupted' AND claim_version = ?
+                """,
+                (
+                    new_run_id,
+                    fencing_token,
+                    instant.isoformat(),
+                    cycle.id,
+                    expected_claim_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("search cycle claim compare-and-swap failed")
+            return self._search_cycle_for_update(cycle.id)
+
+    def save_shadow_result(
+        self,
+        run_id: int,
+        account_id: str,
+        vacancy_id: str,
+        resume_id: str,
+        *,
+        filter_data: dict[str, Any],
+        deterministic_score: float | int | None,
+        ai_data: dict[str, Any] | None = None,
+        would_apply: bool,
+        fencing_token: int,
+    ) -> ShadowResultRecord:
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        account_id = _canonical_identifier(account_id, field="account_id")
+        vacancy_id = _required_text(vacancy_id, field="vacancy_id")
+        resume_id = _required_text(resume_id, field="resume_id")
+        if not isinstance(filter_data, dict):
+            raise TypeError("filter_data must be a dictionary")
+        filter_json = _json_dumps(filter_data, field="filter_data")
+        if ai_data is not None and not isinstance(ai_data, dict):
+            raise TypeError("ai_data must be a dictionary or None")
+        ai_json = _json_dumps(ai_data, field="ai_data")
+        if deterministic_score is not None:
+            if isinstance(deterministic_score, bool) or not isinstance(
+                deterministic_score, (int, float)
+            ):
+                raise TypeError("deterministic_score must be numeric or None")
+            deterministic_score = float(deterministic_score)
+            if deterministic_score != deterministic_score or abs(deterministic_score) == float("inf"):
+                raise ValueError("deterministic_score must be finite")
+        if type(would_apply) is not bool:
+            raise TypeError("would_apply must be a boolean")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(None, field="now")
+        with self.immediate():
+            run = self._run_for_update(run_id)
+            if (
+                run.account_id != account_id
+                or run.trigger != "shadow"
+                or run.status != "running"
+                or run.fencing_token != fencing_token
+            ):
+                raise RepositoryAuthorizationDenied("shadow_run_mismatch")
+            self._assert_fence(account_id, fencing_token, instant)
+            self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_shadow_results (
+                    run_id, account_profile_id, vacancy_id, resume_id,
+                    filter_json, deterministic_score, ai_json,
+                    would_apply, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, vacancy_id, resume_id) DO NOTHING
+                """,
+                (
+                    run_id,
+                    account_id,
+                    vacancy_id,
+                    resume_id,
+                    filter_json,
+                    deterministic_score,
+                    ai_json,
+                    int(would_apply),
+                    instant.isoformat(),
+                ),
+            )
+            row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_shadow_results
+                WHERE run_id = ? AND vacancy_id = ? AND resume_id = ?
+                """,
+                (run_id, vacancy_id, resume_id),
+            ).fetchone()
+            if row is None:
+                raise StaleWrite("shadow result disappeared")
+            record = self._shadow_result_from_row(row)
+            if (
+                record.account_id != account_id
+                or _json_dumps(record.filter_data, field="filter_data") != filter_json
+                or record.deterministic_score != deterministic_score
+                or _json_dumps(record.ai_data, field="ai_data") != ai_json
+                or record.would_apply != would_apply
+            ):
+                raise StaleWrite("contradictory shadow result replay")
+            return record
+
+    def list_search_results(self, *, cycle_id: int) -> list[SearchResultRecord]:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_search_results
+            WHERE cycle_id = ? ORDER BY id ASC
+            """,
+            (cycle_id,),
+        ).fetchall()
+        return [self._search_result_from_row(row) for row in rows]
+
+    def count_search_results(
+        self,
+        run_id: int | None = None,
+        *,
+        cycle_id: int | None = None,
+    ) -> int:
+        cycle_id = _optional_integer(cycle_id, field="cycle_id")
+        run_id = _optional_integer(run_id, field="run_id")
+        if cycle_id is not None and cycle_id < 1:
+            raise ValueError("cycle_id must be at least 1")
+        if run_id is not None and run_id < 1:
+            raise ValueError("run_id must be at least 1")
+        if cycle_id is not None and run_id is not None:
+            raise ValueError("supply cycle_id or run_id, not both")
+        if cycle_id is not None:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS total FROM hh_autopilot_search_results WHERE cycle_id = ?",
+                (cycle_id,),
+            ).fetchone()
+        elif run_id is not None:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(*) AS total FROM hh_autopilot_search_results AS result
+                JOIN hh_autopilot_search_cycles AS cycle ON cycle.id = result.cycle_id
+                WHERE cycle.origin_run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS total FROM hh_autopilot_search_results"
+            ).fetchone()
+        return _persisted_integer(row["total"], field="search result count")
+
+    def list_search_cycle_vacancy_ids(self, cycle_id: int) -> tuple[str, ...]:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        rows = self.conn.execute(
+            """
+            SELECT vacancy_id, MIN(id) AS first_id
+            FROM hh_autopilot_search_results WHERE cycle_id = ?
+            GROUP BY vacancy_id ORDER BY first_id ASC
+            """,
+            (cycle_id,),
+        ).fetchall()
+        return tuple(_required_text(row["vacancy_id"], field="stored vacancy_id") for row in rows)
+
+    def count_items(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) AS total FROM hh_autopilot_items").fetchone()
+        return _persisted_integer(row["total"], field="item count")
+
+    def count_guards(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM hh_application_account_guards"
+        ).fetchone()
+        return _persisted_integer(row["total"], field="guard count")
+
+    def count_application_attempts(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM hh_application_attempts"
+        ).fetchone()
+        return _persisted_integer(row["total"], field="application attempt count")
+
+    def count_reservations(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM hh_autopilot_quota_reservations"
+        ).fetchone()
+        return _persisted_integer(row["total"], field="reservation count")
+
+    def count_challenges(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM hh_autopilot_challenges"
+        ).fetchone()
+        return _persisted_integer(row["total"], field="challenge count")
+
+    def list_shadow_results(self, run_id: int) -> list[ShadowResultRecord]:
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        rows = self.conn.execute(
+            "SELECT * FROM hh_autopilot_shadow_results WHERE run_id = ? ORDER BY id ASC",
+            (run_id,),
+        ).fetchall()
+        return [self._shadow_result_from_row(row) for row in rows]
+
+    def count_shadow_results(self, run_id: int) -> int:
+        return len(self.list_shadow_results(run_id))
 
     def transition_item(
         self,
@@ -2621,6 +3416,186 @@ class AutopilotRepository:
                 blocked_until.isoformat(),
             )
 
+    @staticmethod
+    def _search_mode(mode: Any) -> str:
+        if type(mode) is not str:
+            raise TypeError("mode must be a string")
+        if mode not in {"live", "shadow"}:
+            raise ValueError("mode must be live or shadow")
+        return mode
+
+    def _assert_search_run_for_update(
+        self,
+        run: RunRecord,
+        *,
+        account_id: str,
+        policy_hash: str,
+        fencing_token: int,
+        mode: str,
+        instant: datetime,
+    ) -> None:
+        self._assert_fence(account_id, fencing_token, instant)
+        if run.account_id != account_id:
+            raise RepositoryAuthorizationDenied("run_account_mismatch")
+        if run.status != "running":
+            raise RepositoryAuthorizationDenied("run_not_active")
+        if run.policy_hash != policy_hash:
+            raise RepositoryAuthorizationDenied("run_policy_mismatch")
+        if run.fencing_token != fencing_token:
+            raise RepositoryAuthorizationDenied("run_fencing_token_mismatch")
+        if mode == "shadow":
+            if run.trigger != "shadow":
+                raise RepositoryAuthorizationDenied("shadow_run_required")
+            return
+        if run.trigger == "shadow":
+            raise RepositoryAuthorizationDenied("live_search_forbids_shadow_run")
+        grant = self._active_grant_for_update(account_id)
+        if grant is None:
+            raise RepositoryAuthorizationDenied("authorization_state_mismatch")
+        if run.grant_id != grant.id:
+            raise RepositoryAuthorizationDenied("run_grant_mismatch")
+        if grant.policy_hash != policy_hash:
+            raise RepositoryAuthorizationDenied("policy_hash_mismatch")
+        if self._pause_active_for_update(account_id):
+            raise RepositoryAuthorizationDenied("autopilot_disabled_or_paused")
+        if self._kill_switch_active_for_update(account_id):
+            raise RepositoryAuthorizationDenied("kill_switch_active")
+
+    def _assert_search_runtime_for_update(
+        self,
+        cycle: SearchCycleRecord,
+        *,
+        account_id: str,
+        run_id: int,
+        policy_hash: str,
+        fencing_token: int,
+        mode: str,
+        instant: datetime,
+    ) -> None:
+        if cycle.status != "running":
+            raise StaleWrite("search cycle is not running")
+        if cycle.account_id != account_id:
+            raise RepositoryAuthorizationDenied("search_cycle_account_mismatch")
+        if cycle.owner_run_id != run_id:
+            raise StaleWrite("search cycle owner changed")
+        if cycle.policy_hash != policy_hash:
+            raise RepositoryAuthorizationDenied("search_cycle_policy_mismatch")
+        if cycle.fencing_token != fencing_token:
+            raise LostLease("search cycle fencing token changed")
+        run = self._run_for_update(run_id)
+        self._assert_search_run_for_update(
+            run,
+            account_id=account_id,
+            policy_hash=policy_hash,
+            fencing_token=fencing_token,
+            mode=mode,
+            instant=instant,
+        )
+
+    def _assert_search_commit_provenance(
+        self,
+        cycle: SearchCycleRecord,
+        *,
+        owner_run_id: int | None,
+        expected_claim_version: int | None,
+        policy_hash: str | None,
+        fencing_token: int,
+        mode: str,
+        instant: datetime,
+    ) -> None:
+        if owner_run_id is not None and cycle.owner_run_id != owner_run_id:
+            raise StaleWrite("search cycle owner changed")
+        if (
+            expected_claim_version is not None
+            and cycle.claim_version != expected_claim_version
+        ):
+            raise StaleWrite("search cycle claim version changed")
+        if policy_hash is not None and cycle.policy_hash != policy_hash:
+            raise RepositoryAuthorizationDenied("search_cycle_policy_mismatch")
+        self._assert_search_runtime_for_update(
+            cycle,
+            account_id=cycle.account_id,
+            run_id=cycle.owner_run_id,
+            policy_hash=cycle.policy_hash,
+            fencing_token=fencing_token,
+            mode=mode,
+            instant=instant,
+        )
+
+    def _supersede_and_reset_search_items_for_update(
+        self,
+        cycle: SearchCycleRecord,
+        *,
+        run_id: int,
+        instant: datetime,
+    ) -> None:
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_search_cycles
+            SET status = 'superseded', updated_at = ?
+            WHERE id = ? AND status = 'interrupted' AND claim_version = ?
+            """,
+            (instant.isoformat(), cycle.id, cycle.claim_version),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite("search cycle supersede compare-and-swap failed")
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_items
+            WHERE origin_run_id = ?
+              AND state IN ('discovered','eligible','ranked','ready','retry_wait')
+              AND application_attempt_count = 0
+              AND active_attempt_id IS NULL
+            ORDER BY id ASC
+            """,
+            (cycle.origin_run_id,),
+        ).fetchall()
+        for row in rows:
+            item = self._item_from_row(row)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'discovered', retry_stage = 'eligibility',
+                    filter_json = '{}', deterministic_score = NULL,
+                    ai_json = '{}', next_attempt_at = '',
+                    last_outcome_code = '', challenge_id = NULL,
+                    last_run_id = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ? AND application_attempt_count = 0
+                  AND active_attempt_id IS NULL
+                """,
+                (run_id, instant.isoformat(), item.id, item.version),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("search item reset compare-and-swap failed")
+            self._insert_event(
+                item_id=item.id,
+                run_id=run_id,
+                previous=item.state,
+                target=AutopilotState.DISCOVERED,
+                reason="search_policy_superseded",
+                metadata={"cycle_id": cycle.id},
+                created_at=instant,
+            )
+
+    def _search_cycle_for_update(self, cycle_id: int) -> SearchCycleRecord:
+        row = self.conn.execute(
+            "SELECT * FROM hh_autopilot_search_cycles WHERE id = ?", (cycle_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"search cycle {cycle_id} does not exist")
+        return self._search_cycle_from_row(row)
+
+    def _search_checkpoint_for_update(
+        self, checkpoint_id: int
+    ) -> SearchCheckpointRecord:
+        row = self.conn.execute(
+            "SELECT * FROM hh_autopilot_search_checkpoints WHERE id = ?",
+            (checkpoint_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"search checkpoint {checkpoint_id} does not exist")
+        return self._search_checkpoint_from_row(row)
+
     def _assert_fence(
         self,
         account_id: str,
@@ -2703,6 +3678,158 @@ class AutopilotRepository:
         if row is None:
             raise KeyError(f"item {item_id} does not exist")
         return self._item_from_row(row)
+
+    @staticmethod
+    def _search_cycle_from_row(row: sqlite3.Row) -> SearchCycleRecord:
+        status = _persisted_text(row["status"], field="search cycle status")
+        if status not in {"running", "complete", "failed", "interrupted", "superseded"}:
+            raise StaleWrite("invalid search cycle status in storage")
+        return SearchCycleRecord(
+            id=_persisted_integer(row["id"], field="search cycle id", minimum=1),
+            account_id=_persisted_text(
+                row["account_profile_id"],
+                field="search cycle account_id",
+                canonical=True,
+            ),
+            policy_hash=_persisted_text(
+                row["policy_hash"], field="search cycle policy_hash"
+            ),
+            origin_run_id=_persisted_integer(
+                row["origin_run_id"], field="search cycle origin_run_id", minimum=1
+            ),
+            owner_run_id=_persisted_integer(
+                row["owner_run_id"], field="search cycle owner_run_id", minimum=1
+            ),
+            claim_version=_persisted_integer(
+                row["claim_version"], field="search cycle claim_version"
+            ),
+            fencing_token=_persisted_integer(
+                row["fencing_token"],
+                field="search cycle fencing_token",
+                minimum=1,
+                error_type=LostLease,
+            ),
+            status=status,
+            created_at=_persisted_text(
+                row["created_at"], field="search cycle created_at"
+            ),
+            updated_at=_persisted_text(
+                row["updated_at"], field="search cycle updated_at"
+            ),
+        )
+
+    @staticmethod
+    def _search_checkpoint_from_row(row: sqlite3.Row) -> SearchCheckpointRecord:
+        status = _persisted_text(row["status"], field="search checkpoint status")
+        if status not in {"pending", "running", "complete", "failed"}:
+            raise StaleWrite("invalid search checkpoint status in storage")
+        reported_total = row["reported_total"]
+        if reported_total is not None:
+            reported_total = _persisted_integer(
+                reported_total, field="search checkpoint reported_total"
+            )
+        return SearchCheckpointRecord(
+            id=_persisted_integer(
+                row["id"], field="search checkpoint id", minimum=1
+            ),
+            cycle_id=_persisted_integer(
+                row["cycle_id"], field="search checkpoint cycle_id", minimum=1
+            ),
+            resume_id=_persisted_text(
+                row["resume_id"], field="search checkpoint resume_id"
+            ),
+            query_key=_persisted_text(
+                row["query_key"], field="search checkpoint query_key"
+            ),
+            next_page=_persisted_integer(
+                row["next_page"], field="search checkpoint next_page"
+            ),
+            reported_total=reported_total,
+            unique_vacancy_count=_persisted_integer(
+                row["unique_vacancy_count"],
+                field="search checkpoint unique_vacancy_count",
+            ),
+            status=status,
+            updated_at=_persisted_text(
+                row["updated_at"], field="search checkpoint updated_at"
+            ),
+        )
+
+    @staticmethod
+    def _search_result_from_row(row: sqlite3.Row) -> SearchResultRecord:
+        return SearchResultRecord(
+            id=_persisted_integer(row["id"], field="search result id", minimum=1),
+            cycle_id=_persisted_integer(
+                row["cycle_id"], field="search result cycle_id", minimum=1
+            ),
+            checkpoint_id=_persisted_integer(
+                row["checkpoint_id"],
+                field="search result checkpoint_id",
+                minimum=1,
+            ),
+            account_id=_persisted_text(
+                row["account_profile_id"],
+                field="search result account_id",
+                canonical=True,
+            ),
+            resume_id=_persisted_text(
+                row["resume_id"], field="search result resume_id"
+            ),
+            query_key=_persisted_text(
+                row["query_key"], field="search result query_key"
+            ),
+            vacancy_id=_persisted_text(
+                row["vacancy_id"], field="search result vacancy_id"
+            ),
+            page=_persisted_integer(row["page"], field="search result page"),
+            normalized=_json_loads(
+                row["normalized_json"], field="search result normalized_json"
+            ),
+            discovered_at=_persisted_text(
+                row["discovered_at"], field="search result discovered_at"
+            ),
+        )
+
+    @staticmethod
+    def _shadow_result_from_row(row: sqlite3.Row) -> ShadowResultRecord:
+        raw_score = row["deterministic_score"]
+        if raw_score is not None:
+            if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+                raise StaleWrite("shadow result score is malformed")
+            raw_score = float(raw_score)
+            if raw_score != raw_score or abs(raw_score) == float("inf"):
+                raise StaleWrite("shadow result score is malformed")
+        would_apply = _persisted_integer(
+            row["would_apply"], field="shadow result would_apply"
+        )
+        if would_apply not in {0, 1}:
+            raise StaleWrite("shadow result would_apply is malformed")
+        return ShadowResultRecord(
+            id=_persisted_integer(row["id"], field="shadow result id", minimum=1),
+            run_id=_persisted_integer(
+                row["run_id"], field="shadow result run_id", minimum=1
+            ),
+            account_id=_persisted_text(
+                row["account_profile_id"],
+                field="shadow result account_id",
+                canonical=True,
+            ),
+            vacancy_id=_persisted_text(
+                row["vacancy_id"], field="shadow result vacancy_id"
+            ),
+            resume_id=_persisted_text(
+                row["resume_id"], field="shadow result resume_id"
+            ),
+            filter_data=_json_loads(
+                row["filter_json"], field="shadow result filter_json"
+            ),
+            deterministic_score=raw_score,
+            ai_data=_json_loads(row["ai_json"], field="shadow result ai_json"),
+            would_apply=bool(would_apply),
+            created_at=_persisted_text(
+                row["created_at"], field="shadow result created_at"
+            ),
+        )
 
     @staticmethod
     def _run_from_row(row: sqlite3.Row) -> RunRecord:
@@ -2988,7 +4115,11 @@ __all__ = [
     "QuotaExceeded",
     "QuotaReservationRecord",
     "RunRecord",
+    "SearchCheckpointRecord",
+    "SearchCycleRecord",
+    "SearchResultRecord",
     "RepositoryAuthorizationDenied",
+    "ShadowResultRecord",
     "StaleWrite",
     "TimezoneChangeUnsafe",
 ]

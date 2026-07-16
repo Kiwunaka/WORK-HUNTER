@@ -22,6 +22,9 @@ from work_hunter.hh_transport import (
     extract_xsrf_token,
 )
 from work_hunter.hh_transport.backends import DictConfigBackend, JsonCookieBackend
+from work_hunter.hh_transport.errors import HHParseError
+from work_hunter.hh_autopilot.types import SearchPage
+from work_hunter.sources.hh import HHApplyClient
 
 
 def make_cookie(domain: str, name: str = "sid", value: str = "1") -> Cookie:
@@ -44,6 +47,105 @@ def make_cookie(domain: str, name: str = "sid", value: str = "1") -> Cookie:
         rest={},
         rfc2109=False,
     )
+
+
+def test_search_page_preserves_metadata_without_mutating_params(monkeypatch):
+    session = HHApiSession({"access_token": "token"})
+    params = {"text": "python", "page": 2, "per_page": 50, "area": [1, 2]}
+    calls = []
+
+    def fake_request_json(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        kwargs["params"]["area"].append(3)
+        return {
+            "items": [{"id": "1"}],
+            "page": 2,
+            "pages": 4,
+            "per_page": 50,
+            "found": 151,
+        }
+
+    monkeypatch.setattr(session, "request_json", fake_request_json)
+
+    page = session.search_vacancies_page(params)
+
+    assert page == SearchPage([{"id": "1"}], 2, 4, 50, 151)
+    assert params == {"text": "python", "page": 2, "per_page": 50, "area": [1, 2]}
+    assert calls[0][0:2] == ("GET", "/vacancies")
+
+
+def test_resume_recommendation_page_uses_original_private_encoded_endpoint(monkeypatch):
+    session = HHApiSession({"access_token": "token"})
+    calls = []
+
+    def fake_request_json(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {
+            "items": [{"id": "9"}],
+            "page": 1,
+            "pages": 3,
+            "per_page": 20,
+            "found": 42,
+        }
+
+    monkeypatch.setattr(session, "request_json", fake_request_json)
+
+    page = session.search_recommended_vacancies_page(
+        "resume/id +", {"page": 1, "per_page": 20}
+    )
+
+    assert page.page == 1
+    assert page.total == 42
+    assert calls == [
+        (
+            "GET",
+            "/resumes/resume%2Fid%20%2B/similar_vacancies",
+            {"params": {"page": 1, "per_page": 20}},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"items": "bad", "page": 0, "pages": 1, "per_page": 20, "found": 1},
+        {"items": [], "page": False, "pages": 1, "per_page": 20, "found": 0},
+        {"items": [], "page": 0, "pages": 1.5, "per_page": 20, "found": 0},
+        {"items": [], "page": 0, "pages": 1, "per_page": 101, "found": 0},
+    ],
+)
+def test_search_page_rejects_malformed_shape_and_metadata(monkeypatch, payload):
+    session = HHApiSession({"access_token": "token"})
+    monkeypatch.setattr(session, "request_json", lambda *args, **kwargs: payload)
+
+    with pytest.raises(HHParseError):
+        session.search_vacancies_page({"page": 0, "per_page": 20})
+
+
+def test_list_search_and_vacancy_similar_apis_remain_compatible(monkeypatch):
+    session = HHApiSession({"access_token": "token"})
+    upstream = {"id": "1", "nested": {"value": "first"}}
+    monkeypatch.setattr(
+        session,
+        "search_vacancies_page",
+        lambda params: SearchPage([upstream], 0, 1, 20, 1),
+    )
+
+    items = session.search_vacancies({"text": "python"})
+    items[0]["nested"]["value"] = "changed"
+    assert upstream["nested"]["value"] == "first"
+
+    client = HHApplyClient({"access_token": "token"})
+    calls = []
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda method, path, **kwargs: calls.append((method, path, kwargs))
+        or {"items": [{"id": "2"}]},
+    )
+    assert client.get_similar_vacancies("vacancy-1") == [{"id": "2"}]
+    assert calls == [("GET", "/vacancies/vacancy-1/similar_vacancies", {})]
 
 
 def test_android_user_agent_is_hh_android_like():

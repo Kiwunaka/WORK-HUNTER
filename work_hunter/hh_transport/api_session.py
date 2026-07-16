@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import urllib.parse
+from copy import deepcopy
 from typing import Any
 
 import requests
@@ -19,6 +20,7 @@ from .errors import (
 )
 from .identity import HHIdentity
 from .user_agent import build_android_user_agent
+from work_hunter.hh_autopilot.types import SearchPage
 
 
 class HHApiSession:
@@ -122,9 +124,28 @@ class HHApiSession:
     def get_resume(self, resume_id: str) -> dict[str, Any]:
         return self.request_json("GET", f"/resumes/{resume_id}")
 
+    def search_vacancies_page(self, params: dict[str, Any]) -> SearchPage:
+        copied = _search_params(params)
+        data = self.request_json("GET", "/vacancies", params=copied)
+        return _search_page(data)
+
+    def search_recommended_vacancies_page(
+        self,
+        resume_id: str,
+        params: dict[str, Any],
+    ) -> SearchPage:
+        resume_id = _path_identifier(resume_id, field="resume_id")
+        copied = _search_params(params)
+        path_id = urllib.parse.quote(resume_id, safe="")
+        data = self.request_json(
+            "GET",
+            f"/resumes/{path_id}/similar_vacancies",
+            params=copied,
+        )
+        return _search_page(data)
+
     def search_vacancies(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        data = self.request_json("GET", "/vacancies", params=params)
-        return list(data.get("items") or [])
+        return [deepcopy(dict(item)) for item in self.search_vacancies_page(params).items]
 
     def get_vacancy(self, vacancy_id: str) -> dict[str, Any]:
         return self.request_json("GET", f"/vacancies/{vacancy_id}")
@@ -241,3 +262,47 @@ def _error_from_response(status_code: int, payload: dict[str, Any]) -> HHTranspo
 
 class HHApiTransport(HHApiSession):
     pass
+
+
+def _path_identifier(value: Any, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string")
+    value = value.strip()
+    if not value:
+        raise ValueError(f"{field} must not be empty")
+    if "\0" in value:
+        raise ValueError(f"{field} must not contain NUL")
+    return value
+
+
+def _search_params(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError("params must be a dictionary")
+    for key in value:
+        if not isinstance(key, str):
+            raise TypeError("params keys must be strings")
+    return deepcopy(value)
+
+
+def _search_page(data: Any) -> SearchPage:
+    if not isinstance(data, dict):
+        raise HHParseError("HH search response must be an object", code="parse_error")
+    required = {"items", "page", "pages", "per_page", "found"}
+    if not required.issubset(data):
+        raise HHParseError("HH search response metadata is incomplete", code="parse_error")
+    items = data["items"]
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise HHParseError("HH search items must be a list of objects", code="parse_error")
+    try:
+        return SearchPage(
+            items=items,
+            page=data["page"],
+            pages=data["pages"],
+            per_page=data["per_page"],
+            total=data["found"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise HHParseError(
+            "HH search response metadata is invalid",
+            code="parse_error",
+        ) from exc

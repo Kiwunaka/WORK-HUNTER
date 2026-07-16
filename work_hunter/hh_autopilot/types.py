@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import copy
+import html
+import math
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 
 class AutopilotState(StrEnum):
@@ -123,3 +127,318 @@ class DispatchOutcome:
     retry_after_seconds: int | None = None
     location: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+def _text(value: Any, *, field_name: str, canonical: bool = False) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    value = value.strip()
+    if canonical:
+        value = value.casefold()
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+    if "\0" in value:
+        raise ValueError(f"{field_name} must not contain NUL")
+    return value
+
+
+def _int(value: Any, *, field_name: str, minimum: int, maximum: int | None = None) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{field_name} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{field_name} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{field_name} must be at most {maximum}")
+    return value
+
+
+def _mapping(value: Any, *, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    detached: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{field_name} keys must be strings")
+        _text(key, field_name=f"{field_name} key")
+        detached[key] = copy.deepcopy(item)
+    return detached
+
+
+_MARKUP = re.compile(r"<[^>]*>")
+_SPACES = re.compile(r"\s+")
+
+
+def _clean_text(value: Any, *, field_name: str, maximum: int = 8_000) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if "\0" in value:
+        raise ValueError(f"{field_name} must not contain NUL")
+    cleaned = _SPACES.sub(" ", _MARKUP.sub(" ", html.unescape(value))).strip()
+    return cleaned[:maximum]
+
+
+def _json_value(value: Any, *, field_name: str, depth: int = 0) -> Any:
+    if depth > 8:
+        raise ValueError(f"{field_name} is nested too deeply")
+    if value is None or type(value) in {bool, int}:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} contains a non-finite number")
+        return value
+    if isinstance(value, str):
+        if "\0" in value:
+            raise ValueError(f"{field_name} must not contain NUL")
+        return value
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        if len(value) > 500:
+            raise ValueError(f"{field_name} has too many keys")
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{field_name} keys must be strings")
+            _text(key, field_name=f"{field_name} key")
+            result[key] = _json_value(
+                item, field_name=f"{field_name}.{key}", depth=depth + 1
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        if len(value) > 500:
+            raise ValueError(f"{field_name} has too many values")
+        return [
+            _json_value(item, field_name=f"{field_name}[{index}]", depth=depth + 1)
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(f"{field_name} contains a non-JSON value")
+
+
+@dataclass(frozen=True)
+class SearchPage:
+    items: tuple[dict[str, Any], ...] | Sequence[Mapping[str, Any]]
+    page: int
+    pages: int
+    per_page: int
+    total: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.items, (str, bytes)) or not isinstance(self.items, Sequence):
+            raise TypeError("items must be a sequence of mappings")
+        detached: list[dict[str, Any]] = []
+        for index, item in enumerate(self.items):
+            detached.append(_mapping(item, field_name=f"items[{index}]"))
+        page = _int(self.page, field_name="page", minimum=0)
+        pages = _int(self.pages, field_name="pages", minimum=0)
+        per_page = _int(self.per_page, field_name="per_page", minimum=1, maximum=100)
+        total = _int(self.total, field_name="total", minimum=0)
+        if len(detached) > per_page:
+            raise ValueError("items cannot exceed per_page")
+        if pages > 0 and page >= pages:
+            raise ValueError("page must be lower than pages")
+        if detached and total == 0:
+            raise ValueError("a non-empty page must report a positive total")
+        if pages == 0 and total > 0:
+            raise ValueError("a positive total must report at least one page")
+        if page * per_page + len(detached) > total and total > 0:
+            raise ValueError("page items exceed the reported total")
+        object.__setattr__(self, "items", tuple(detached))
+        object.__setattr__(self, "page", page)
+        object.__setattr__(self, "pages", pages)
+        object.__setattr__(self, "per_page", per_page)
+        object.__setattr__(self, "total", total)
+
+
+@dataclass(frozen=True)
+class SearchRequest:
+    account_id: str
+    run_id: int
+    resume_id: str
+    query_key: str
+    params: dict[str, Any] | Mapping[str, Any]
+    per_page: int
+    max_pages: int
+    remaining_budget: int
+    policy_hash: str
+    fencing_token: int
+    mode: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "account_id", _text(self.account_id, field_name="account_id", canonical=True))
+        object.__setattr__(self, "run_id", _int(self.run_id, field_name="run_id", minimum=1))
+        object.__setattr__(self, "resume_id", _text(self.resume_id, field_name="resume_id"))
+        object.__setattr__(self, "query_key", _text(self.query_key, field_name="query_key"))
+        if not isinstance(self.params, Mapping):
+            raise TypeError("params must be a mapping")
+        detached_params = _json_value(self.params, field_name="params")
+        assert isinstance(detached_params, dict)
+        object.__setattr__(self, "params", detached_params)
+        object.__setattr__(self, "per_page", _int(self.per_page, field_name="per_page", minimum=1, maximum=100))
+        object.__setattr__(self, "max_pages", _int(self.max_pages, field_name="max_pages", minimum=1, maximum=100))
+        object.__setattr__(self, "remaining_budget", _int(self.remaining_budget, field_name="remaining_budget", minimum=0))
+        object.__setattr__(self, "policy_hash", _text(self.policy_hash, field_name="policy_hash"))
+        object.__setattr__(self, "fencing_token", _int(self.fencing_token, field_name="fencing_token", minimum=1))
+        if type(self.mode) is not str or self.mode not in {"live", "shadow"}:
+            raise ValueError("mode must be live or shadow")
+
+
+@dataclass(frozen=True)
+class NormalizedVacancy:
+    id: str
+    title: str
+    employer_id: str = ""
+    employer_name: str = ""
+    area_id: str = ""
+    area_name: str = ""
+    salary_from: int | None = None
+    salary_to: int | None = None
+    salary_currency: str = ""
+    salary_gross: bool | None = None
+    schedule_id: str = ""
+    work_format_ids: tuple[str, ...] = ()
+    employment_id: str = ""
+    experience_id: str = ""
+    professional_role_ids: tuple[str, ...] = ()
+    key_skills: tuple[str, ...] = ()
+    published_at: str = ""
+    url: str = ""
+    archived: bool = False
+    status: str = "open"
+    vacancy_type: str = ""
+    description: str = ""
+    response_url: str = ""
+    apply_alternate_url: str = ""
+    relations: tuple[str, ...] = ()
+    has_test: bool = False
+    response_letter_required: bool = False
+    accept_incomplete_resumes: bool = False
+    accept_temporary: bool = False
+    job: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", _text(self.id, field_name="vacancy id"))
+        for field_name in (
+            "title",
+            "employer_id",
+            "employer_name",
+            "area_id",
+            "area_name",
+            "salary_currency",
+            "schedule_id",
+            "employment_id",
+            "experience_id",
+            "published_at",
+            "url",
+            "status",
+            "vacancy_type",
+            "description",
+            "response_url",
+            "apply_alternate_url",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _clean_text(getattr(self, field_name), field_name=field_name),
+            )
+        for field_name in ("salary_from", "salary_to"):
+            value = getattr(self, field_name)
+            if value is not None and type(value) is not int:
+                raise TypeError(f"{field_name} must be an integer or None")
+        if self.salary_gross is not None and type(self.salary_gross) is not bool:
+            raise TypeError("salary_gross must be a boolean or None")
+        for field_name in (
+            "archived",
+            "has_test",
+            "response_letter_required",
+            "accept_incomplete_resumes",
+            "accept_temporary",
+        ):
+            if type(getattr(self, field_name)) is not bool:
+                raise TypeError(f"{field_name} must be a boolean")
+        for field_name in (
+            "work_format_ids",
+            "professional_role_ids",
+            "key_skills",
+            "relations",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+                raise TypeError(f"{field_name} must be a sequence")
+            cleaned = tuple(
+                _clean_text(item, field_name=f"{field_name} item", maximum=256)
+                for item in value[:100]
+            )
+            object.__setattr__(self, field_name, cleaned)
+        if not isinstance(self.job, Mapping):
+            raise TypeError("job must be a mapping")
+        detached_job = _json_value(self.job, field_name="job")
+        assert isinstance(detached_job, dict)
+        for key, value in tuple(detached_job.items()):
+            if isinstance(value, str):
+                detached_job[key] = _clean_text(
+                    value, field_name=f"job.{key}", maximum=8_000
+                )
+        object.__setattr__(self, "job", detached_job)
+
+    def to_dict(self) -> dict[str, Any]:
+        return copy.deepcopy(
+            {
+                "id": self.id,
+                "title": self.title,
+                "employer_id": self.employer_id,
+                "employer_name": self.employer_name,
+                "area_id": self.area_id,
+                "area_name": self.area_name,
+                "salary_from": self.salary_from,
+                "salary_to": self.salary_to,
+                "salary_currency": self.salary_currency,
+                "salary_gross": self.salary_gross,
+                "schedule_id": self.schedule_id,
+                "work_format_ids": list(self.work_format_ids),
+                "employment_id": self.employment_id,
+                "experience_id": self.experience_id,
+                "professional_role_ids": list(self.professional_role_ids),
+                "key_skills": list(self.key_skills),
+                "published_at": self.published_at,
+                "url": self.url,
+                "archived": self.archived,
+                "status": self.status,
+                "vacancy_type": self.vacancy_type,
+                "description": self.description,
+                "response_url": self.response_url,
+                "apply_alternate_url": self.apply_alternate_url,
+                "relations": list(self.relations),
+                "has_test": self.has_test,
+                "response_letter_required": self.response_letter_required,
+                "accept_incomplete_resumes": self.accept_incomplete_resumes,
+                "accept_temporary": self.accept_temporary,
+                "job": self.job,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    vacancies: tuple[NormalizedVacancy, ...]
+    next_page: int
+    cycle_id: int
+    inserted_count: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.vacancies, (str, bytes)) or not isinstance(
+            self.vacancies, Sequence
+        ):
+            raise TypeError("vacancies must be a sequence")
+        vacancies = tuple(self.vacancies)
+        if any(not isinstance(item, NormalizedVacancy) for item in vacancies):
+            raise TypeError("vacancies must contain only NormalizedVacancy values")
+        object.__setattr__(self, "vacancies", vacancies)
+        object.__setattr__(
+            self, "next_page", _int(self.next_page, field_name="next_page", minimum=0)
+        )
+        object.__setattr__(
+            self, "cycle_id", _int(self.cycle_id, field_name="cycle_id", minimum=1)
+        )
+        object.__setattr__(
+            self,
+            "inserted_count",
+            _int(self.inserted_count, field_name="inserted_count", minimum=0),
+        )
