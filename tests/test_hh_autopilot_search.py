@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -2184,3 +2185,191 @@ def test_claim_validates_old_live_owner_historical_grant_without_mutation(
 
     assert repo.get_search_cycle(cycle.id) == before_cycle
     assert repo.get_run(first.run.id) == before_run
+
+
+def test_second_recovery_rejects_live_owner_tampered_into_shadow_without_mutation(
+    repo: AutopilotRepository,
+) -> None:
+    first = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", first.run.id, "hash", first.lease.fencing_token
+    )
+    repo.interrupt_search_cycle(cycle.id, first.lease.fencing_token)
+    recovery_one = _recovery_context(repo, first, owner="recovery-one")
+    claimed_once = repo.claim_search_cycle(
+        cycle.id,
+        expected_claim_version=0,
+        new_run_id=recovery_one.run.id,
+        policy_hash="hash",
+        fencing_token=recovery_one.lease.fencing_token,
+    )
+    assert claimed_once is not None
+    repo.interrupt_search_cycle(cycle.id, recovery_one.lease.fencing_token)
+    recovery_two = _recovery_context(repo, recovery_one, owner="recovery-two")
+    repo.conn.execute("PRAGMA ignore_check_constraints = ON")
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_runs
+        SET trigger = 'shadow', grant_id = NULL
+        WHERE id = ?
+        """,
+        (recovery_one.run.id,),
+    )
+    repo.conn.commit()
+    before_cycle = repo.get_search_cycle(cycle.id)
+    before_owner = repo.conn.execute(
+        "SELECT trigger, status, grant_id FROM hh_autopilot_runs WHERE id = ?",
+        (recovery_one.run.id,),
+    ).fetchone()
+    before_counts = (
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    )
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        repo.claim_search_cycle(
+            cycle.id,
+            expected_claim_version=1,
+            new_run_id=recovery_two.run.id,
+            policy_hash="hash",
+            fencing_token=recovery_two.lease.fencing_token,
+        )
+
+    assert repo.get_search_cycle(cycle.id) == before_cycle
+    after_owner = repo.conn.execute(
+        "SELECT trigger, status, grant_id FROM hh_autopilot_runs WHERE id = ?",
+        (recovery_one.run.id,),
+    ).fetchone()
+    assert tuple(after_owner) == tuple(before_owner)
+    assert (
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    ) == before_counts
+
+
+def test_valid_live_cycle_supports_multiple_recovery_claims(
+    repo: AutopilotRepository,
+) -> None:
+    first = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", first.run.id, "hash", first.lease.fencing_token
+    )
+    repo.interrupt_search_cycle(cycle.id, first.lease.fencing_token)
+    recovery_one = _recovery_context(repo, first, owner="recovery-one")
+    claimed_once = repo.claim_search_cycle(
+        cycle.id,
+        expected_claim_version=0,
+        new_run_id=recovery_one.run.id,
+        policy_hash="hash",
+        fencing_token=recovery_one.lease.fencing_token,
+    )
+    assert claimed_once is not None
+    repo.interrupt_search_cycle(cycle.id, recovery_one.lease.fencing_token)
+    recovery_two = _recovery_context(repo, recovery_one, owner="recovery-two")
+
+    claimed_twice = repo.claim_search_cycle(
+        cycle.id,
+        expected_claim_version=1,
+        new_run_id=recovery_two.run.id,
+        policy_hash="hash",
+        fencing_token=recovery_two.lease.fencing_token,
+    )
+
+    assert claimed_twice is not None
+    assert claimed_twice.owner_run_id == recovery_two.run.id
+    assert claimed_twice.claim_version == 2
+
+
+@pytest.mark.parametrize(
+    ("column", "stored"),
+    [
+        ("account_profile_id", sqlite3.Binary(b"default")),
+        ("account_profile_id", " Default "),
+        ("trigger", sqlite3.Binary(b"manual")),
+        ("status", sqlite3.Binary(b"running")),
+        ("policy_hash", sqlite3.Binary(b"hash")),
+        ("policy_hash", " hash "),
+    ],
+)
+def test_run_reader_rejects_noncanonical_or_non_text_provenance(
+    repo: AutopilotRepository,
+    column: str,
+    stored: Any,
+) -> None:
+    ctx = _context(repo)
+    repo.conn.execute("PRAGMA ignore_check_constraints = ON")
+    repo.conn.execute(
+        f"UPDATE hh_autopilot_runs SET {column} = ? WHERE id = ?",
+        (stored, ctx.run.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises(StaleWrite):
+        repo.get_run(ctx.run.id)
+
+
+def test_blob_run_policy_cannot_match_its_string_representation(
+    repo: AutopilotRepository,
+) -> None:
+    policy_hash = "b'hash'"
+    ctx = _context(repo, policy_hash=policy_hash)
+    repo.conn.execute(
+        "UPDATE hh_autopilot_runs SET policy_hash = ? WHERE id = ?",
+        (sqlite3.Binary(b"hash"), ctx.run.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises(StaleWrite):
+        repo.create_search_cycle(
+            "default",
+            ctx.run.id,
+            policy_hash,
+            ctx.lease.fencing_token,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "valid_entry", "invalid_entry"),
+    [
+        ("relations", "relation", 101),
+        ("work_format", {"id": "remote"}, {"id": 101}),
+        ("professional_roles", {"id": "96"}, None),
+        ("key_skills", {"name": "Python"}, {"name": 101}),
+    ],
+)
+def test_normalization_rejects_malformed_collection_entry_after_storage_cap(
+    field: str,
+    valid_entry: Any,
+    invalid_entry: Any,
+) -> None:
+    entries = [valid_entry for _ in range(100)]
+    entries.append(invalid_entry)
+
+    with pytest.raises((TypeError, ValueError)):
+        normalize_vacancy(_vacancy("late-malformed", **{field: entries}))
+
+
+def test_normalized_collections_validate_all_entries_but_store_first_100_unique() -> None:
+    identifiers = [{"id": "duplicate"}, {"id": "duplicate"}] + [
+        {"id": f"format-{index}"} for index in range(120)
+    ]
+    relations = ["duplicate", "duplicate"] + [
+        f"relation-{index}" for index in range(120)
+    ]
+
+    vacancy = normalize_vacancy(
+        _vacancy(
+            "bounded-collections",
+            work_format=identifiers,
+            relations=relations,
+        )
+    )
+
+    assert vacancy.work_format_ids == (
+        "duplicate",
+        *(f"format-{index}" for index in range(99)),
+    )
+    assert vacancy.relations == (
+        "duplicate",
+        *(f"relation-{index}" for index in range(99)),
+    )

@@ -97,7 +97,7 @@ def _identifier_list(
         raise TypeError(f"{key} must be a list, tuple, or None")
     result: list[str] = []
     seen: set[str] = set()
-    for entry in value[:_MAX_COLLECTION]:
+    for entry in value:
         field_name = "name" if named else "id"
         if type(entry) is str:
             raw = entry
@@ -112,7 +112,7 @@ def _identifier_list(
         cleaned = _clean(raw, limit=256)
         if not cleaned:
             raise ValueError(f"{key} entries must not be empty")
-        if cleaned not in seen:
+        if cleaned not in seen and len(result) < _MAX_COLLECTION:
             result.append(cleaned)
             seen.add(cleaned)
     return tuple(result)
@@ -125,7 +125,8 @@ def _relation_list(source: Mapping[str, Any]) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise TypeError("relations must be a list, tuple, or None")
     result: list[str] = []
-    for entry in value[:_MAX_COLLECTION]:
+    seen: set[str] = set()
+    for entry in value:
         if type(entry) is str:
             raw = entry
         elif isinstance(entry, Mapping):
@@ -139,8 +140,9 @@ def _relation_list(source: Mapping[str, Any]) -> tuple[str, ...]:
         relation = _clean(raw, limit=128)
         if not relation:
             raise ValueError("relations entries must not be empty")
-        if relation not in result:
+        if relation not in seen and len(result) < _MAX_COLLECTION:
             result.append(relation)
+            seen.add(relation)
     return tuple(result)
 
 

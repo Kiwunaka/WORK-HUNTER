@@ -3776,6 +3776,7 @@ class AutopilotRepository:
     def _assert_search_owner_provenance_for_update(
         self, cycle: SearchCycleRecord
     ) -> RunRecord:
+        origin_mode = self._search_cycle_origin_mode_for_update(cycle)
         owner = self._run_for_update(cycle.owner_run_id)
         if owner.id != cycle.owner_run_id:
             raise StaleWrite("search cycle owner run id changed")
@@ -3785,10 +3786,18 @@ class AutopilotRepository:
             raise StaleWrite("search cycle owner policy changed")
         if owner.fencing_token != cycle.fencing_token:
             raise LostLease("search cycle owner fencing token changed")
-        if owner.trigger == "shadow":
-            if owner.grant_id is not None:
-                raise StaleWrite("shadow search owner unexpectedly has a grant")
+        if origin_mode == "shadow":
+            if (
+                owner.id != cycle.origin_run_id
+                or owner.trigger != "shadow"
+                or owner.grant_id is not None
+            ):
+                raise StaleWrite("shadow search owner provenance changed")
         else:
+            if owner.trigger == "shadow":
+                raise StaleWrite("live search owner became shadow")
+            if owner.id != cycle.origin_run_id and owner.trigger != "recovery":
+                raise StaleWrite("recovered live search owner trigger changed")
             self._assert_historical_search_grant_for_update(owner, cycle=cycle)
         return owner
 
@@ -4269,15 +4278,19 @@ class AutopilotRepository:
 
     @staticmethod
     def _run_from_row(row: sqlite3.Row) -> RunRecord:
-        trigger = str(row["trigger"])
-        status = str(row["status"])
+        trigger = _persisted_text(row["trigger"], field="run trigger")
+        status = _persisted_text(row["status"], field="run status")
         if trigger not in RUN_TRIGGERS:
-            raise ValueError(f"invalid run trigger in storage: {trigger}")
+            raise StaleWrite(f"invalid run trigger in storage: {trigger}")
         if status not in RUN_STATUSES:
-            raise ValueError(f"invalid run status in storage: {status}")
+            raise StaleWrite(f"invalid run status in storage: {status}")
         return RunRecord(
-            id=int(row["id"]),
-            account_id=str(row["account_profile_id"]),
+            id=_persisted_integer(row["id"], field="run id", minimum=1),
+            account_id=_persisted_text(
+                row["account_profile_id"],
+                field="run account_id",
+                canonical=True,
+            ),
             trigger=trigger,
             status=status,
             grant_id=(
@@ -4289,7 +4302,9 @@ class AutopilotRepository:
                     minimum=1,
                 )
             ),
-            policy_hash=str(row["policy_hash"]),
+            policy_hash=_persisted_text(
+                row["policy_hash"], field="run policy_hash"
+            ),
             fencing_token=_persisted_integer(
                 row["fencing_token"],
                 field="run fencing_token",
