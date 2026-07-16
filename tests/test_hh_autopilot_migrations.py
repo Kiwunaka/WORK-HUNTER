@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import shutil
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -645,6 +646,82 @@ def test_packaged_migration_adds_attempt_provenance_without_losing_rows(
     ).fetchone()
     assert attempt["vacancy_id"] == "v1"
     assert attempt["account_profile_id"] == "legacy"
+
+
+def test_search_budget_migration_upgrades_0003_database_without_losing_cycle(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "at-0003.sqlite3"
+    packaged = Path(__file__).parents[1] / "work_hunter" / "migrations"
+    old_migrations = tmp_path / "old-migrations"
+    old_migrations.mkdir()
+    for name in (
+        "0001_backbone.sql",
+        "0002_account_aware_applications.sql",
+        "0003_hh_autopilot_runtime.sql",
+    ):
+        shutil.copyfile(packaged / name, old_migrations / name)
+    old = Storage(path, migrations_dir=old_migrations)
+    try:
+        old.conn.execute(
+            """
+            INSERT INTO hh_autopilot_runs (
+                account_profile_id, trigger, status, grant_id, policy_hash,
+                fencing_token, counters_json, error, started_at, finished_at,
+                created_at
+            ) VALUES (
+                'default', 'shadow', 'running', NULL, 'hash', 1, '{}', '',
+                '2026-07-16T00:00:00+00:00', '', '2026-07-16T00:00:00+00:00'
+            )
+            """
+        )
+        run_id = old.conn.execute(
+            "SELECT id FROM hh_autopilot_runs"
+        ).fetchone()["id"]
+        old.conn.execute(
+            """
+            INSERT INTO hh_autopilot_search_cycles (
+                account_profile_id, policy_hash, origin_run_id, owner_run_id,
+                claim_version, fencing_token, status, created_at, updated_at
+            ) VALUES (
+                'default', 'hash', ?, ?, 0, 1, 'running',
+                '2026-07-16T00:00:00+00:00', '2026-07-16T00:00:00+00:00'
+            )
+            """,
+            (run_id, run_id),
+        )
+        old.conn.commit()
+    finally:
+        old.close()
+
+    upgraded = Storage(path)
+    try:
+        columns = {
+            row["name"]
+            for row in upgraded.conn.execute(
+                "PRAGMA table_info(hh_autopilot_search_cycles)"
+            ).fetchall()
+        }
+        cycle = upgraded.conn.execute(
+            "SELECT * FROM hh_autopilot_search_cycles"
+        ).fetchone()
+        applied = {
+            row["version"]
+            for row in upgraded.conn.execute(
+                "SELECT version FROM schema_migrations"
+            ).fetchall()
+        }
+    finally:
+        upgraded.close()
+
+    assert "distinct_vacancy_cap" in columns
+    assert cycle["account_profile_id"] == "default"
+    assert cycle["policy_hash"] == "hash"
+    assert cycle["origin_run_id"] == run_id
+    assert cycle["owner_run_id"] == run_id
+    assert cycle["status"] == "running"
+    assert cycle["distinct_vacancy_cap"] is None
+    assert "0004_hh_autopilot_search_budget.sql" in applied
 
 
 def test_legacy_identity_listing_is_deterministic_and_excludes_payloads(

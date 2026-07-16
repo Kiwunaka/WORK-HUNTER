@@ -70,29 +70,76 @@ def _optional_bool_fact(source: Mapping[str, Any], key: str, *, prefix: str = ""
     return value
 
 
-def _identifier_list(value: Any, *, named: bool = False) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+def _optional_text_fact(
+    source: Mapping[str, Any],
+    key: str,
+    *,
+    limit: int,
+) -> str:
+    if key not in source or source[key] is None:
+        return ""
+    value = source[key]
+    if type(value) is not str:
+        raise TypeError(f"{key} must be a string or None")
+    return _clean(value, limit=limit)
+
+
+def _identifier_list(
+    source: Mapping[str, Any],
+    key: str,
+    *,
+    named: bool = False,
+) -> tuple[str, ...]:
+    if key not in source or source[key] is None:
         return ()
+    value = source[key]
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{key} must be a list, tuple, or None")
     result: list[str] = []
     seen: set[str] = set()
     for entry in value[:_MAX_COLLECTION]:
-        item = _object(entry)
-        raw = item.get("name" if named else "id")
+        field_name = "name" if named else "id"
+        if type(entry) is str:
+            raw = entry
+        elif isinstance(entry, Mapping):
+            if field_name not in entry or type(entry[field_name]) is not str:
+                raise TypeError(
+                    f"{key} entries must contain an exact string {field_name}"
+                )
+            raw = entry[field_name]
+        else:
+            raise TypeError(f"{key} entries must be strings or mappings")
         cleaned = _clean(raw, limit=256)
-        if cleaned and cleaned not in seen:
+        if not cleaned:
+            raise ValueError(f"{key} entries must not be empty")
+        if cleaned not in seen:
             result.append(cleaned)
             seen.add(cleaned)
     return tuple(result)
 
 
-def _relation_list(value: Any) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+def _relation_list(source: Mapping[str, Any]) -> tuple[str, ...]:
+    if "relations" not in source or source["relations"] is None:
         return ()
+    value = source["relations"]
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("relations must be a list, tuple, or None")
     result: list[str] = []
     for entry in value[:_MAX_COLLECTION]:
-        raw = entry.get("id") if isinstance(entry, Mapping) else entry
+        if type(entry) is str:
+            raw = entry
+        elif isinstance(entry, Mapping):
+            if "id" not in entry or type(entry["id"]) is not str:
+                raise TypeError(
+                    "relation mappings must contain an exact string id"
+                )
+            raw = entry["id"]
+        else:
+            raise TypeError("relations entries must be strings or mappings")
         relation = _clean(raw, limit=128)
-        if relation and relation not in result:
+        if not relation:
+            raise ValueError("relations entries must not be empty")
+        if relation not in result:
             result.append(relation)
     return tuple(result)
 
@@ -136,7 +183,12 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
     currency = _clean(salary.get("currency"), limit=32)
     schedule_id = _clean(schedule.get("id"), limit=128)
     published_at = _clean(raw.get("published_at"), limit=128)
-    url = _clean(raw.get("alternate_url") or raw.get("apply_alternate_url"), limit=2_000)
+    alternate_url = _optional_text_fact(raw, "alternate_url", limit=2_000)
+    apply_alternate_url = _optional_text_fact(
+        raw, "apply_alternate_url", limit=2_000
+    )
+    response_url = _optional_text_fact(raw, "response_url", limit=2_000)
+    url = alternate_url or apply_alternate_url
     salary_text = ""
     if salary_from is not None and salary_to is not None:
         salary_text = f"{salary_from}-{salary_to} {currency}".strip()
@@ -182,20 +234,20 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
         salary_currency=currency,
         salary_gross=_optional_bool_fact(salary, "gross", prefix="salary"),
         schedule_id=schedule_id,
-        work_format_ids=_identifier_list(raw.get("work_format")),
+        work_format_ids=_identifier_list(raw, "work_format"),
         employment_id=_clean(employment.get("id"), limit=128),
         experience_id=_clean(experience.get("id"), limit=128),
-        professional_role_ids=_identifier_list(raw.get("professional_roles")),
-        key_skills=_identifier_list(raw.get("key_skills"), named=True),
+        professional_role_ids=_identifier_list(raw, "professional_roles"),
+        key_skills=_identifier_list(raw, "key_skills", named=True),
         published_at=published_at,
         url=url,
         archived=archived,
         status=status,
         vacancy_type=_clean(vacancy_type.get("id"), limit=128),
         description=description,
-        response_url=_clean(raw.get("response_url"), limit=2_000),
-        apply_alternate_url=_clean(raw.get("apply_alternate_url"), limit=2_000),
-        relations=_relation_list(raw.get("relations")),
+        response_url=response_url,
+        apply_alternate_url=apply_alternate_url,
+        relations=_relation_list(raw),
         has_test=has_test,
         response_letter_required=letter_required,
         accept_incomplete_resumes=incomplete,
@@ -264,11 +316,22 @@ class HHSearchProvider:
         checkpoint = self.repository.ensure_search_checkpoint(
             cycle.id, request.resume_id, request.query_key
         )
+        cycle = self.repository.initialize_search_cycle_distinct_cap(
+            cycle.id,
+            request.remaining_budget,
+            fencing_token=request.fencing_token,
+            mode=request.mode,
+            owner_run_id=request.run_id,
+            expected_claim_version=cycle.claim_version,
+            policy_hash=request.policy_hash,
+        )
+        absolute_distinct_cap = cycle.distinct_vacancy_cap
+        if absolute_distinct_cap is None:
+            raise RuntimeError("search cycle distinct cap was not initialized")
         if checkpoint.status == "complete":
             return SearchResult((), checkpoint.next_page, cycle.id, 0, 0)
 
         known_cycle_ids = set(self.repository.list_search_cycle_vacancy_ids(cycle.id))
-        absolute_distinct_cap = len(known_cycle_ids) + request.remaining_budget
         newly_budgeted: set[str] = set()
         result: dict[str, NormalizedVacancy] = {}
         page_number = checkpoint.next_page

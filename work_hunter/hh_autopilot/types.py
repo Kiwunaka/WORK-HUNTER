@@ -265,7 +265,11 @@ class SearchRequest:
     def __post_init__(self) -> None:
         object.__setattr__(self, "account_id", _text(self.account_id, field_name="account_id", canonical=True))
         object.__setattr__(self, "run_id", _int(self.run_id, field_name="run_id", minimum=1))
-        object.__setattr__(self, "resume_id", _text(self.resume_id, field_name="resume_id"))
+        object.__setattr__(
+            self,
+            "resume_id",
+            _text(self.resume_id, field_name="resume_id", canonical=True),
+        )
         object.__setattr__(self, "query_key", _text(self.query_key, field_name="query_key"))
         if not isinstance(self.params, Mapping):
             raise TypeError("params must be a mapping")

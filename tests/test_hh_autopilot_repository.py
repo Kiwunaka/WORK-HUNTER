@@ -128,6 +128,7 @@ RUNTIME_TABLE_COLUMNS = {
         "status",
         "created_at",
         "updated_at",
+        "distinct_vacancy_cap",
     ),
     "hh_autopilot_search_checkpoints": (
         "id",

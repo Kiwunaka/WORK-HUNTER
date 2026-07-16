@@ -392,6 +392,7 @@ def test_stale_checkpoint_cas_cannot_replay_a_page(repo: AutopilotRepository) ->
         owner_run_id=ctx.run.id,
         expected_claim_version=cycle.claim_version,
         policy_hash="hash",
+        absolute_distinct_cap=20,
     )
 
     with pytest.raises(StaleWrite):
@@ -429,6 +430,7 @@ def test_interrupted_cycle_claim_resumes_at_first_uncommitted_page(
         owner_run_id=first.run.id,
         expected_claim_version=0,
         policy_hash="hash",
+        absolute_distinct_cap=20,
     )
     repo.interrupt_search_cycle(cycle.id, first.lease.fencing_token)
     recovery = _recovery_context(repo, first)
@@ -532,6 +534,7 @@ def test_policy_mismatch_supersedes_and_resets_only_never_dispatched_items(
         owner_run_id=first.run.id,
         expected_claim_version=0,
         policy_hash="old",
+        absolute_distinct_cap=20,
     )
     rows = repo.conn.execute(
         "SELECT id, vacancy_id FROM hh_autopilot_items ORDER BY id"
@@ -1629,3 +1632,555 @@ def test_claimed_cycle_rejects_corrupted_origin_run_provenance(
             absolute_distinct_cap=1,
         )
     assert repo.count_search_results(cycle_id=cycle.id) == 0
+
+
+def test_distinct_cap_is_durable_across_staggered_presets(
+    repo: AutopilotRepository,
+) -> None:
+    ctx = _context(repo)
+    first = HHSearchProvider(
+        FakePages([SearchPage([_vacancy("first")], 0, 1, 1, 1)]), repo
+    ).collect(
+        _request(
+            ctx,
+            query_key="preset:first",
+            per_page=1,
+            remaining_budget=1,
+        )
+    )
+
+    second_transport = FakePages(
+        [SearchPage([_vacancy("second")], 0, 1, 1, 1)]
+    )
+    second = HHSearchProvider(second_transport, repo).collect(
+        _request(
+            ctx,
+            query_key="preset:second",
+            per_page=1,
+            remaining_budget=1,
+        )
+    )
+
+    cycle = repo.get_search_cycle(first.cycle_id)
+    assert cycle is not None
+    assert cycle.distinct_vacancy_cap == 1
+    assert [vacancy.id for vacancy in first.vacancies] == ["first"]
+    assert second.vacancies == ()
+    assert second.inserted_reference_count == 0
+    assert second.new_distinct_count == 0
+    assert repo.list_search_cycle_vacancy_ids(first.cycle_id) == ("first",)
+    assert repo.count_items() == 1
+
+
+def test_zero_budget_initializes_durable_cap_without_remote_io(
+    repo: AutopilotRepository,
+) -> None:
+    ctx = _context(repo)
+    transport = FakePages([])
+
+    result = HHSearchProvider(transport, repo).collect(
+        _request(ctx, remaining_budget=0)
+    )
+
+    cycle = repo.get_search_cycle(result.cycle_id)
+    assert cycle is not None
+    assert cycle.distinct_vacancy_cap == 0
+    assert transport.requested == []
+    assert result.vacancies == ()
+
+
+def test_recovery_cannot_expand_durable_distinct_cap(
+    repo: AutopilotRepository,
+) -> None:
+    first = _context(repo)
+    initial = HHSearchProvider(
+        FakePages([SearchPage([_vacancy("first")], 0, 1, 1, 1)]), repo
+    ).collect(
+        _request(
+            first,
+            query_key="preset:first",
+            per_page=1,
+            remaining_budget=1,
+        )
+    )
+    repo.interrupt_search_cycle(initial.cycle_id, first.lease.fencing_token)
+    recovery = _recovery_context(repo, first)
+    claimed = repo.claim_search_cycle(
+        initial.cycle_id,
+        expected_claim_version=0,
+        new_run_id=recovery.run.id,
+        policy_hash="hash",
+        fencing_token=recovery.lease.fencing_token,
+    )
+    assert claimed is not None
+
+    resumed = HHSearchProvider(
+        FakePages([SearchPage([_vacancy("second")], 0, 1, 1, 1)]), repo
+    ).collect(
+        _request(
+            recovery,
+            query_key="preset:second",
+            per_page=1,
+            remaining_budget=10,
+        )
+    )
+
+    cycle = repo.get_search_cycle(initial.cycle_id)
+    assert cycle is not None
+    assert cycle.distinct_vacancy_cap == 1
+    assert resumed.vacancies == ()
+    assert repo.list_search_cycle_vacancy_ids(initial.cycle_id) == ("first",)
+    assert repo.count_items() == 1
+
+
+@pytest.mark.parametrize("stored", [1.5, "bad", -1])
+def test_malformed_stored_distinct_cap_fails_closed(
+    repo: AutopilotRepository, stored: Any
+) -> None:
+    ctx = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", ctx.run.id, "hash", ctx.lease.fencing_token
+    )
+    repo.conn.execute("PRAGMA ignore_check_constraints = ON")
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_search_cycles
+        SET distinct_vacancy_cap = ?
+        WHERE id = ?
+        """,
+        (stored, cycle.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises(StaleWrite):
+        repo.get_search_cycle(cycle.id)
+
+
+def test_direct_page_commit_requires_initialized_or_exact_durable_cap(
+    repo: AutopilotRepository,
+) -> None:
+    ctx = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", ctx.run.id, "hash", ctx.lease.fencing_token
+    )
+    checkpoint = repo.ensure_search_checkpoint(
+        cycle.id, "r-1", "preset:python"
+    )
+
+    with pytest.raises(StaleWrite):
+        repo.commit_search_page(
+            checkpoint.id,
+            expected_next_page=0,
+            page=SearchPage([_vacancy("one")], 0, 1, 1, 1),
+            normalized=[normalize_vacancy(_vacancy("one"))],
+            fencing_token=ctx.lease.fencing_token,
+            mode="live",
+            owner_run_id=ctx.run.id,
+            expected_claim_version=0,
+            policy_hash="hash",
+            terminal=True,
+        )
+
+    stored = repo.get_search_cycle(cycle.id)
+    assert stored is not None
+    assert stored.distinct_vacancy_cap is None
+    assert repo.count_search_results(cycle_id=cycle.id) == 0
+    assert repo.count_items() == 0
+    current_checkpoint = repo.get_checkpoint(
+        cycle.id, "r-1", "preset:python"
+    )
+    assert current_checkpoint is not None
+    assert (current_checkpoint.next_page, current_checkpoint.status) == (
+        0,
+        "pending",
+    )
+
+
+def test_repeated_reference_on_next_page_is_not_returned_as_newly_accepted(
+    repo: AutopilotRepository,
+) -> None:
+    ctx = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", ctx.run.id, "hash", ctx.lease.fencing_token
+    )
+    checkpoint = repo.ensure_search_checkpoint(
+        cycle.id, "r-1", "preset:python"
+    )
+    repo.commit_search_page(
+        checkpoint.id,
+        expected_next_page=0,
+        page=SearchPage([_vacancy("same")], 0, 2, 1, 2),
+        normalized=[normalize_vacancy(_vacancy("same"))],
+        fencing_token=ctx.lease.fencing_token,
+        mode="live",
+        owner_run_id=ctx.run.id,
+        expected_claim_version=0,
+        policy_hash="hash",
+        terminal=False,
+        absolute_distinct_cap=10,
+    )
+    transport = FakePages(
+        [
+            SearchPage([], 0, 2, 1, 2),
+            SearchPage([_vacancy("same")], 1, 2, 1, 2),
+        ]
+    )
+
+    result = HHSearchProvider(transport, repo).collect(
+        _request(ctx, per_page=1, remaining_budget=9)
+    )
+
+    assert transport.requested == [1]
+    assert result.vacancies == ()
+    assert result.inserted_reference_count == 0
+    assert result.new_distinct_count == 0
+    assert repo.count_search_results(cycle_id=cycle.id) == 1
+    assert repo.count_items() == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("alternate_url", {"href": "https://hh.ru/vacancy/1"}),
+        ("response_url", {"form": "x"}),
+        ("apply_alternate_url", []),
+        ("relations", "got_response"),
+        ("relations", [123]),
+        ("relations", [{"id": 123}]),
+        ("work_format", "remote"),
+        ("work_format", [123]),
+        ("professional_roles", [{}]),
+        ("key_skills", [{"name": 123}]),
+    ],
+)
+def test_normalization_rejects_malformed_url_relation_and_list_facts(
+    field: str, invalid: Any
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        normalize_vacancy(_vacancy("strict", **{field: invalid}))
+
+
+def test_normalization_accepts_valid_url_relation_and_list_facts() -> None:
+    vacancy = normalize_vacancy(
+        _vacancy(
+            "strict",
+            response_url="https://hh.ru/response/strict",
+            apply_alternate_url="https://hh.ru/apply/strict",
+            relations=["got_response", {"id": "favorited"}],
+            work_format=[{"id": "remote"}],
+            professional_roles=[{"id": "96"}],
+            key_skills=[{"name": "Python"}],
+        )
+    )
+
+    assert vacancy.response_url == "https://hh.ru/response/strict"
+    assert vacancy.apply_alternate_url == "https://hh.ru/apply/strict"
+    assert vacancy.relations == ("got_response", "favorited")
+    assert vacancy.work_format_ids == ("remote",)
+    assert vacancy.professional_role_ids == ("96",)
+    assert vacancy.key_skills == ("Python",)
+
+
+def test_every_search_result_count_validates_normalized_evidence(
+    repo: AutopilotRepository,
+) -> None:
+    ctx = _context(repo)
+    result = HHSearchProvider(
+        FakePages([SearchPage([_vacancy("stored")], 0, 1, 1, 1)]), repo
+    ).collect(_request(ctx, per_page=1))
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_search_results
+        SET normalized_json = '{"id":"stored"}'
+        WHERE cycle_id = ?
+        """,
+        (result.cycle_id,),
+    )
+    repo.conn.commit()
+
+    count_calls = (
+        lambda: repo.count_search_results(cycle_id=result.cycle_id),
+        lambda: repo.count_search_results(ctx.run.id),
+        repo.count_search_results,
+    )
+    for count in count_calls:
+        with pytest.raises(StaleWrite):
+            count()
+
+
+def test_search_canonicalizes_resume_identity_for_checkpoints_results_and_items(
+    repo: AutopilotRepository,
+) -> None:
+    ctx = _context(repo)
+    first_request = _request(
+        ctx,
+        resume_id=" R-1 ",
+        query_key="preset:first",
+        per_page=1,
+        remaining_budget=1,
+    )
+    assert first_request.resume_id == "r-1"
+    first = HHSearchProvider(
+        FakePages([SearchPage([_vacancy("same")], 0, 1, 1, 1)]), repo
+    ).collect(first_request)
+    public_item = repo.create_item(
+        ctx.run.id,
+        "default",
+        "same",
+        "r-1",
+        "public:create-item",
+    )
+    second = HHSearchProvider(
+        FakePages([SearchPage([_vacancy("same")], 0, 1, 1, 1)]), repo
+    ).collect(
+        _request(
+            ctx,
+            resume_id="r-1",
+            query_key="preset:second",
+            per_page=1,
+            remaining_budget=1,
+        )
+    )
+
+    items = repo.conn.execute(
+        "SELECT id, resume_id FROM hh_autopilot_items ORDER BY id"
+    ).fetchall()
+    assert [(row["id"], row["resume_id"]) for row in items] == [
+        (public_item.id, "r-1")
+    ]
+    assert repo.count_search_results(cycle_id=first.cycle_id) == 2
+    assert second.inserted_reference_count == 1
+    assert second.new_distinct_count == 0
+    assert {
+        checkpoint.resume_id
+        for checkpoint in repo.list_search_checkpoints(first.cycle_id)
+    } == {"r-1"}
+
+
+def _insert_running_sibling_cycle(
+    repo: AutopilotRepository,
+    cycle: Any,
+) -> int:
+    cursor = repo.conn.execute(
+        """
+        INSERT INTO hh_autopilot_search_cycles (
+            account_profile_id, policy_hash, origin_run_id, owner_run_id,
+            claim_version, fencing_token, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 0, ?, 'running', ?, ?)
+        """,
+        (
+            cycle.account_id,
+            cycle.policy_hash,
+            cycle.origin_run_id,
+            cycle.owner_run_id,
+            cycle.fencing_token,
+            cycle.created_at,
+            cycle.updated_at,
+        ),
+    )
+    repo.conn.commit()
+    assert cursor.lastrowid is not None
+    return cursor.lastrowid
+
+
+def _assert_sibling_claim_rejected_without_mutation(
+    repo: AutopilotRepository,
+    *,
+    target_id: int,
+    sibling_id: int,
+    old_run_id: int,
+    recovery: RunLease,
+) -> None:
+    before = (
+        repo.get_search_cycle(target_id),
+        repo.get_search_cycle(sibling_id),
+        repo.get_run(old_run_id),
+    )
+    with pytest.raises(StaleWrite):
+        repo.claim_search_cycle(
+            target_id,
+            expected_claim_version=0,
+            new_run_id=recovery.run.id,
+            policy_hash="hash",
+            fencing_token=recovery.lease.fencing_token,
+        )
+    after = (
+        repo.get_search_cycle(target_id),
+        repo.get_search_cycle(sibling_id),
+        repo.get_run(old_run_id),
+    )
+    assert after == before
+
+
+def test_claim_rejects_running_sibling_owned_by_abandoned_run_without_mutation(
+    repo: AutopilotRepository,
+) -> None:
+    first = _context(repo)
+    target = repo.create_search_cycle(
+        "default", first.run.id, "hash", first.lease.fencing_token
+    )
+    sibling_id = _insert_running_sibling_cycle(repo, target)
+    recovery = _recovery_context(repo, first)
+
+    _assert_sibling_claim_rejected_without_mutation(
+        repo,
+        target_id=target.id,
+        sibling_id=sibling_id,
+        old_run_id=first.run.id,
+        recovery=recovery,
+    )
+
+
+def test_second_connection_claim_rejects_old_owner_running_sibling(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "old-owner-sibling.db"
+    storage = Storage(path)
+    repo = AutopilotRepository(storage)
+    try:
+        first = _context(repo)
+        target = repo.create_search_cycle(
+            "default", first.run.id, "hash", first.lease.fencing_token
+        )
+        sibling_id = _insert_running_sibling_cycle(repo, target)
+        recovery = _recovery_context(repo, first)
+        second_storage = Storage(path)
+        second_repo = AutopilotRepository(second_storage)
+        try:
+            _assert_sibling_claim_rejected_without_mutation(
+                second_repo,
+                target_id=target.id,
+                sibling_id=sibling_id,
+                old_run_id=first.run.id,
+                recovery=recovery,
+            )
+        finally:
+            second_storage.close()
+        assert repo.get_run(first.run.id).status == "running"
+        assert repo.get_search_cycle(target.id).status == "running"
+        assert repo.get_search_cycle(sibling_id).status == "running"
+    finally:
+        storage.close()
+
+
+def _rotate_grant_before_recovery(
+    repo: AutopilotRepository,
+    first: RunLease,
+) -> tuple[int, RunLease]:
+    historical_grant_id = first.run.grant_id
+    assert historical_grant_id is not None
+    repo.create_grants([("default", "hash", "operator", "rotation")])
+    recovery = _recovery_context(repo, first)
+    assert recovery.run.grant_id != historical_grant_id
+    return historical_grant_id, recovery
+
+
+def test_claim_accepts_valid_inactive_historical_grant(
+    repo: AutopilotRepository,
+) -> None:
+    first = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", first.run.id, "hash", first.lease.fencing_token
+    )
+    repo.interrupt_search_cycle(cycle.id, first.lease.fencing_token)
+    _, recovery = _rotate_grant_before_recovery(repo, first)
+
+    claimed = repo.claim_search_cycle(
+        cycle.id,
+        expected_claim_version=0,
+        new_run_id=recovery.run.id,
+        policy_hash="hash",
+        fencing_token=recovery.lease.fencing_token,
+    )
+
+    assert claimed is not None
+    assert claimed.owner_run_id == recovery.run.id
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "null-run-grant",
+        "missing-grant",
+        "wrong-account",
+        "wrong-policy",
+        "wrong-scope",
+        "real-generation",
+        "text-generation",
+        "malformed-active",
+    ],
+)
+def test_claim_validates_old_live_owner_historical_grant_without_mutation(
+    repo: AutopilotRepository,
+    tamper: str,
+) -> None:
+    first = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", first.run.id, "hash", first.lease.fencing_token
+    )
+    repo.interrupt_search_cycle(cycle.id, first.lease.fencing_token)
+    historical_grant_id, recovery = _rotate_grant_before_recovery(repo, first)
+    repo.conn.execute("PRAGMA ignore_check_constraints = ON")
+    if tamper == "null-run-grant":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_runs SET grant_id = NULL WHERE id = ?",
+            (first.run.id,),
+        )
+    elif tamper == "missing-grant":
+        repo.conn.commit()
+        repo.conn.execute("PRAGMA foreign_keys = OFF")
+        repo.conn.execute(
+            "UPDATE hh_autopilot_runs SET grant_id = 999999 WHERE id = ?",
+            (first.run.id,),
+        )
+        repo.conn.commit()
+        repo.conn.execute("PRAGMA foreign_keys = ON")
+    elif tamper == "wrong-account":
+        repo.conn.execute(
+            """
+            UPDATE hh_autopilot_grants
+            SET account_profile_id = 'other'
+            WHERE id = ?
+            """,
+            (historical_grant_id,),
+        )
+    elif tamper == "wrong-policy":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_grants SET policy_hash = 'other' WHERE id = ?",
+            (historical_grant_id,),
+        )
+    elif tamper == "wrong-scope":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_grants SET scope = 'other' WHERE id = ?",
+            (historical_grant_id,),
+        )
+    elif tamper == "real-generation":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_grants SET generation = 1.5 WHERE id = ?",
+            (historical_grant_id,),
+        )
+    elif tamper == "text-generation":
+        repo.conn.execute(
+            "UPDATE hh_autopilot_grants SET generation = 'bad' WHERE id = ?",
+            (historical_grant_id,),
+        )
+    else:
+        repo.conn.execute(
+            "UPDATE hh_autopilot_grants SET active = 2 WHERE id = ?",
+            (historical_grant_id,),
+        )
+    repo.conn.commit()
+    before_cycle = repo.get_search_cycle(cycle.id)
+    before_run = repo.get_run(first.run.id)
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        repo.claim_search_cycle(
+            cycle.id,
+            expected_claim_version=0,
+            new_run_id=recovery.run.id,
+            policy_hash="hash",
+            fencing_token=recovery.lease.fencing_token,
+        )
+
+    assert repo.get_search_cycle(cycle.id) == before_cycle
+    assert repo.get_run(first.run.id) == before_run

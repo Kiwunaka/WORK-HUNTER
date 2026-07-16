@@ -170,6 +170,7 @@ class SearchCycleRecord:
     owner_run_id: int
     claim_version: int
     fencing_token: int
+    distinct_vacancy_cap: int | None
     status: str
     created_at: str
     updated_at: str
@@ -849,17 +850,23 @@ class AutopilotRepository:
         idempotency_key: str | None = None,
     ) -> ItemRecord:
         """Create an already-validated item inside the caller's transaction."""
-        if idempotency_key is None:
-            idempotency_key = hashlib.sha256(
-                (
-                    account_id
-                    + "\0"
-                    + resume_id
-                    + "\0"
-                    + vacancy_id
-                    + "\0apply"
-                ).encode("utf-8")
-            ).hexdigest()
+        resume_id = _canonical_identifier(resume_id, field="resume_id")
+        expected_idempotency_key = hashlib.sha256(
+            (
+                account_id
+                + "\0"
+                + resume_id
+                + "\0"
+                + vacancy_id
+                + "\0apply"
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            idempotency_key is not None
+            and idempotency_key != expected_idempotency_key
+        ):
+            raise ValueError("idempotency_key does not match canonical item identity")
+        idempotency_key = expected_idempotency_key
         origin_run = self._run_for_update(origin_run_id)
         if origin_run.account_id != account_id:
             raise ValueError("item account_id must match its origin run")
@@ -1068,7 +1075,7 @@ class AutopilotRepository:
         query_key: str,
     ) -> SearchCheckpointRecord:
         cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
-        resume_id = _required_text(resume_id, field="resume_id")
+        resume_id = _canonical_identifier(resume_id, field="resume_id")
         query_key = _required_text(query_key, field="query_key")
         with self.immediate():
             cycle = self._search_cycle_for_update(cycle_id)
@@ -1110,7 +1117,7 @@ class AutopilotRepository:
         self, cycle_id: int, resume_id: str, query_key: str
     ) -> SearchCheckpointRecord | None:
         cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
-        resume_id = _required_text(resume_id, field="resume_id")
+        resume_id = _canonical_identifier(resume_id, field="resume_id")
         query_key = _required_text(query_key, field="query_key")
         row = self.conn.execute(
             """
@@ -1131,6 +1138,85 @@ class AutopilotRepository:
             (cycle_id,),
         ).fetchall()
         return [self._search_checkpoint_from_row(row) for row in rows]
+
+    def initialize_search_cycle_distinct_cap(
+        self,
+        cycle_id: int,
+        remaining_budget: int,
+        *,
+        fencing_token: int,
+        mode: str | None = None,
+        owner_run_id: int | None = None,
+        expected_claim_version: int | None = None,
+        policy_hash: str | None = None,
+    ) -> SearchCycleRecord:
+        cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
+        remaining_budget = _integer(
+            remaining_budget, field="remaining_budget"
+        )
+        fencing_token = _integer(
+            fencing_token, field="fencing_token", minimum=1
+        )
+        if mode is not None:
+            mode = self._search_mode(mode)
+        owner_run_id = _optional_integer(owner_run_id, field="owner_run_id")
+        if owner_run_id == 0:
+            raise ValueError("owner_run_id must be at least 1")
+        expected_claim_version = _optional_integer(
+            expected_claim_version, field="expected_claim_version"
+        )
+        if policy_hash is not None:
+            policy_hash = _required_text(policy_hash, field="policy_hash")
+        instant = _instant(None, field="now")
+        with self.immediate():
+            cycle = self._search_cycle_for_update(cycle_id)
+            if mode is None:
+                mode = self._search_cycle_origin_mode_for_update(cycle)
+            self._assert_search_commit_provenance(
+                cycle,
+                owner_run_id=owner_run_id,
+                expected_claim_version=expected_claim_version,
+                policy_hash=policy_hash,
+                fencing_token=fencing_token,
+                mode=mode,
+                instant=instant,
+            )
+            current_distinct = len(
+                {
+                    result.vacancy_id
+                    for result in self.list_search_results(cycle_id=cycle.id)
+                }
+            )
+            stored_cap = cycle.distinct_vacancy_cap
+            if stored_cap is not None and current_distinct > stored_cap:
+                raise StaleWrite(
+                    "search cycle distinct count exceeds its persisted cap"
+                )
+            proposed_cap = current_distinct + remaining_budget
+            effective_cap = (
+                proposed_cap
+                if stored_cap is None
+                else min(stored_cap, max(current_distinct, proposed_cap))
+            )
+            if stored_cap != effective_cap:
+                cursor = self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_search_cycles
+                    SET distinct_vacancy_cap = ?, updated_at = ?
+                    WHERE id = ? AND distinct_vacancy_cap IS ?
+                    """,
+                    (
+                        effective_cap,
+                        instant.isoformat(),
+                        cycle.id,
+                        stored_cap,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleWrite(
+                        "search cycle distinct cap compare-and-swap failed"
+                    )
+            return self._search_cycle_for_update(cycle.id)
 
     def commit_search_page(
         self,
@@ -1208,17 +1294,51 @@ class AutopilotRepository:
                 for result in self.list_search_results(cycle_id=cycle.id)
             }
             distinct_before = len(distinct_ids)
+            stored_cap = cycle.distinct_vacancy_cap
+            if stored_cap is not None and distinct_before > stored_cap:
+                raise StaleWrite(
+                    "search cycle distinct count exceeds its persisted cap"
+                )
+            if stored_cap is None and absolute_distinct_cap is None:
+                raise StaleWrite(
+                    "search cycle distinct cap must be initialized before commit"
+                )
+            if absolute_distinct_cap is not None:
+                proposed_cap = max(distinct_before, absolute_distinct_cap)
+                effective_cap = (
+                    proposed_cap
+                    if stored_cap is None
+                    else min(stored_cap, proposed_cap)
+                )
+                if effective_cap != stored_cap:
+                    cursor = self.conn.execute(
+                        """
+                        UPDATE hh_autopilot_search_cycles
+                        SET distinct_vacancy_cap = ?, updated_at = ?
+                        WHERE id = ? AND distinct_vacancy_cap IS ?
+                        """,
+                        (
+                            effective_cap,
+                            instant.isoformat(),
+                            cycle.id,
+                            stored_cap,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleWrite(
+                            "search cycle distinct cap compare-and-swap failed"
+                        )
+                    stored_cap = effective_cap
             inserted = 0
             accepted: list[str] = []
             for vacancy, normalized_json in detached:
                 is_new_distinct = vacancy.id not in distinct_ids
                 if (
                     is_new_distinct
-                    and absolute_distinct_cap is not None
-                    and len(distinct_ids) >= absolute_distinct_cap
+                    and stored_cap is not None
+                    and len(distinct_ids) >= stored_cap
                 ):
                     continue
-                accepted.append(vacancy.id)
                 cursor = self.conn.execute(
                     """
                     INSERT INTO hh_autopilot_search_results (
@@ -1239,7 +1359,39 @@ class AutopilotRepository:
                         instant.isoformat(),
                     ),
                 )
-                inserted += 1 if cursor.rowcount == 1 else 0
+                if cursor.rowcount != 1:
+                    existing_row = self.conn.execute(
+                        """
+                        SELECT * FROM hh_autopilot_search_results
+                        WHERE cycle_id = ? AND resume_id = ?
+                          AND query_key = ? AND vacancy_id = ?
+                        """,
+                        (
+                            cycle.id,
+                            checkpoint.resume_id,
+                            checkpoint.query_key,
+                            vacancy.id,
+                        ),
+                    ).fetchone()
+                    if existing_row is None:
+                        raise StaleWrite(
+                            "search result conflict could not be resolved"
+                        )
+                    existing = self._search_result_from_row(existing_row)
+                    if (
+                        existing.cycle_id != cycle.id
+                        or existing.checkpoint_id != checkpoint.id
+                        or existing.account_id != cycle.account_id
+                        or existing.resume_id != checkpoint.resume_id
+                        or existing.query_key != checkpoint.query_key
+                        or existing.vacancy_id != vacancy.id
+                    ):
+                        raise StaleWrite(
+                            "search result conflict provenance changed"
+                        )
+                    continue
+                accepted.append(vacancy.id)
+                inserted += 1
                 if is_new_distinct:
                     distinct_ids.add(vacancy.id)
                 if mode == "live":
@@ -1251,8 +1403,8 @@ class AutopilotRepository:
                         checkpoint.query_key,
                     )
             effective_terminal = terminal or (
-                absolute_distinct_cap is not None
-                and len(distinct_ids) >= absolute_distinct_cap
+                stored_cap is not None
+                and len(distinct_ids) >= stored_cap
             )
             target_status = "complete" if effective_terminal else "running"
             cursor = self.conn.execute(
@@ -1439,6 +1591,9 @@ class AutopilotRepository:
             ).fetchone()
             if another is not None:
                 raise StaleWrite("recovery run already owns a running search cycle")
+            self._assert_no_running_search_siblings_for_update(
+                cycle, old_owner=old_owner
+            )
             if cycle.policy_hash != policy_hash:
                 self._supersede_and_reset_search_items_for_update(
                     cycle,
@@ -1489,7 +1644,7 @@ class AutopilotRepository:
         run_id = _integer(run_id, field="run_id", minimum=1)
         account_id = _canonical_identifier(account_id, field="account_id")
         vacancy_id = _required_text(vacancy_id, field="vacancy_id")
-        resume_id = _required_text(resume_id, field="resume_id")
+        resume_id = _canonical_identifier(resume_id, field="resume_id")
         if not isinstance(filter_data, dict):
             raise TypeError("filter_data must be a dictionary")
         filter_json = _json_dumps(filter_data, field="filter_data")
@@ -1585,24 +1740,24 @@ class AutopilotRepository:
         if cycle_id is not None and run_id is not None:
             raise ValueError("supply cycle_id or run_id, not both")
         if cycle_id is not None:
-            row = self.conn.execute(
-                "SELECT COUNT(*) AS total FROM hh_autopilot_search_results WHERE cycle_id = ?",
+            rows = self.conn.execute(
+                "SELECT * FROM hh_autopilot_search_results WHERE cycle_id = ?",
                 (cycle_id,),
-            ).fetchone()
+            ).fetchall()
         elif run_id is not None:
-            row = self.conn.execute(
+            rows = self.conn.execute(
                 """
-                SELECT COUNT(*) AS total FROM hh_autopilot_search_results AS result
+                SELECT result.* FROM hh_autopilot_search_results AS result
                 JOIN hh_autopilot_search_cycles AS cycle ON cycle.id = result.cycle_id
                 WHERE cycle.origin_run_id = ?
                 """,
                 (run_id,),
-            ).fetchone()
+            ).fetchall()
         else:
-            row = self.conn.execute(
-                "SELECT COUNT(*) AS total FROM hh_autopilot_search_results"
-            ).fetchone()
-        return _persisted_integer(row["total"], field="search result count")
+            rows = self.conn.execute(
+                "SELECT * FROM hh_autopilot_search_results"
+            ).fetchall()
+        return len([self._search_result_from_row(row) for row in rows])
 
     def list_search_cycle_vacancy_ids(self, cycle_id: int) -> tuple[str, ...]:
         cycle_id = _integer(cycle_id, field="cycle_id", minimum=1)
@@ -3611,7 +3766,12 @@ class AutopilotRepository:
             and origin.fencing_token != cycle.fencing_token
         ):
             raise LostLease("search cycle origin fencing token changed")
-        return "shadow" if origin.trigger == "shadow" else "live"
+        if origin.trigger == "shadow":
+            if origin.grant_id is not None:
+                raise StaleWrite("shadow search origin unexpectedly has a grant")
+            return "shadow"
+        self._assert_historical_search_grant_for_update(origin, cycle=cycle)
+        return "live"
 
     def _assert_search_owner_provenance_for_update(
         self, cycle: SearchCycleRecord
@@ -3625,7 +3785,97 @@ class AutopilotRepository:
             raise StaleWrite("search cycle owner policy changed")
         if owner.fencing_token != cycle.fencing_token:
             raise LostLease("search cycle owner fencing token changed")
+        if owner.trigger == "shadow":
+            if owner.grant_id is not None:
+                raise StaleWrite("shadow search owner unexpectedly has a grant")
+        else:
+            self._assert_historical_search_grant_for_update(owner, cycle=cycle)
         return owner
+
+    def _assert_historical_search_grant_for_update(
+        self,
+        run: RunRecord,
+        *,
+        cycle: SearchCycleRecord,
+    ) -> None:
+        grant_id = run.grant_id
+        if grant_id is None:
+            raise StaleWrite("live search run has no historical grant")
+        row = self.conn.execute(
+            "SELECT * FROM hh_autopilot_grants WHERE id = ?",
+            (grant_id,),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite("live search historical grant is missing")
+        try:
+            stored_id = _persisted_integer(
+                row["id"], field="historical grant id", minimum=1
+            )
+            account_id = _persisted_text(
+                row["account_profile_id"],
+                field="historical grant account_id",
+                canonical=True,
+            )
+            scope = _persisted_text(
+                row["scope"], field="historical grant scope"
+            )
+            policy_hash = _persisted_text(
+                row["policy_hash"], field="historical grant policy_hash"
+            )
+            _persisted_integer(
+                row["generation"],
+                field="historical grant generation",
+                minimum=1,
+            )
+            active = _persisted_integer(
+                row["active"], field="historical grant active"
+            )
+        except (StaleWrite, TypeError, ValueError) as exc:
+            raise StaleWrite("live search historical grant is malformed") from exc
+        if active not in {0, 1}:
+            raise StaleWrite("live search historical grant active flag is malformed")
+        if (
+            stored_id != grant_id
+            or account_id != run.account_id
+            or account_id != cycle.account_id
+            or scope != APPLICATION_SCOPE
+            or policy_hash != run.policy_hash
+            or policy_hash != cycle.policy_hash
+        ):
+            raise StaleWrite("live search historical grant provenance changed")
+
+    def _assert_no_running_search_siblings_for_update(
+        self,
+        cycle: SearchCycleRecord,
+        *,
+        old_owner: RunRecord,
+    ) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_search_cycles
+            WHERE owner_run_id = ? AND status = 'running' AND id != ?
+            ORDER BY id ASC
+            """,
+            (old_owner.id, cycle.id),
+        ).fetchall()
+        for row in rows:
+            sibling = self._search_cycle_from_row(row)
+            sibling_mode = self._search_cycle_origin_mode_for_update(sibling)
+            sibling_owner = self._assert_search_owner_provenance_for_update(
+                sibling
+            )
+            if (
+                sibling.owner_run_id != old_owner.id
+                or sibling_owner.id != old_owner.id
+                or sibling_mode != "live"
+            ):
+                raise StaleWrite(
+                    "abandoned search owner sibling provenance changed"
+                )
+        if rows:
+            raise StaleWrite(
+                "abandoned search owner still owns another running cycle"
+            )
 
     def _interrupt_abandoned_search_owner_for_update(
         self,
@@ -3856,6 +4106,12 @@ class AutopilotRepository:
         status = _persisted_text(row["status"], field="search cycle status")
         if status not in {"running", "complete", "failed", "interrupted", "superseded"}:
             raise StaleWrite("invalid search cycle status in storage")
+        distinct_vacancy_cap = row["distinct_vacancy_cap"]
+        if distinct_vacancy_cap is not None:
+            distinct_vacancy_cap = _persisted_integer(
+                distinct_vacancy_cap,
+                field="search cycle distinct_vacancy_cap",
+            )
         return SearchCycleRecord(
             id=_persisted_integer(row["id"], field="search cycle id", minimum=1),
             account_id=_persisted_text(
@@ -3881,6 +4137,7 @@ class AutopilotRepository:
                 minimum=1,
                 error_type=LostLease,
             ),
+            distinct_vacancy_cap=distinct_vacancy_cap,
             status=status,
             created_at=_persisted_text(
                 row["created_at"], field="search cycle created_at"
@@ -3908,7 +4165,9 @@ class AutopilotRepository:
                 row["cycle_id"], field="search checkpoint cycle_id", minimum=1
             ),
             resume_id=_persisted_text(
-                row["resume_id"], field="search checkpoint resume_id"
+                row["resume_id"],
+                field="search checkpoint resume_id",
+                canonical=True,
             ),
             query_key=_persisted_text(
                 row["query_key"], field="search checkpoint query_key"
@@ -3948,7 +4207,9 @@ class AutopilotRepository:
                 canonical=True,
             ),
             resume_id=_persisted_text(
-                row["resume_id"], field="search result resume_id"
+                row["resume_id"],
+                field="search result resume_id",
+                canonical=True,
             ),
             query_key=_persisted_text(
                 row["query_key"], field="search result query_key"
@@ -3991,7 +4252,9 @@ class AutopilotRepository:
                 row["vacancy_id"], field="shadow result vacancy_id"
             ),
             resume_id=_persisted_text(
-                row["resume_id"], field="shadow result resume_id"
+                row["resume_id"],
+                field="shadow result resume_id",
+                canonical=True,
             ),
             filter_data=_json_loads(
                 row["filter_json"], field="shadow result filter_json"
