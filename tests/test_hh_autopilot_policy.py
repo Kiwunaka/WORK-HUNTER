@@ -161,6 +161,8 @@ def test_each_hard_filter_has_a_stable_reason(
         case["context"]["relocation_allowed"] = False
     if path == "vacancy.schedule_id":
         case["vacancy"]["work_format_ids"] = ["office"]
+    if path == "vacancy.salary_to":
+        case["vacancy"]["salary_from"] = 100_000
     if path == "context.history.already_applied":
         case["context"]["history"]["applied_vacancy_ids"] = ["v-1"]
     if path == "context.history.active":
@@ -634,3 +636,185 @@ def test_keyword_matching_uses_alphanumeric_phrase_boundaries() -> None:
     case["filters"]["required_keywords"] = ["go engineer"]
     case["vacancy"]["description"] = "Python and Go Engineer services"
     assert _evaluate(case).passed is True
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "Bearer&amp;#32;abc123",
+        "&amp;lt;script&amp;gt;secret&amp;lt;/script&amp;gt;",
+    ],
+)
+def test_filter_decision_rejects_nested_encoded_credentials_and_markup(
+    encoded: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        FilterDecision(
+            False,
+            "hard_filter:excluded_keywords",
+            {"matched": (encoded,)},
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("matched", "john@example.test"),
+        ("missing", "+7 (999) 123-45-67"),
+    ],
+)
+def test_filter_decision_rejects_personal_data_in_term_evidence(
+    key: str,
+    value: str,
+) -> None:
+    reason = (
+        "hard_filter:excluded_keywords"
+        if key == "matched"
+        else "hard_filter:required_keywords"
+    )
+    with pytest.raises((TypeError, ValueError)):
+        FilterDecision(False, reason, {key: (value,)})
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "secretary",
+        "secretary-role-1",
+        "cookiecutter",
+        "hotplug",
+        "proxying",
+    ],
+)
+def test_legitimate_job_words_are_not_treated_as_credentials(word: str) -> None:
+    decision = FilterDecision(
+        False,
+        "hard_filter:excluded_keywords",
+        {"matched": (word,)},
+    )
+    assert decision.evidence["matched"] == (word,)
+
+    case = _base_case()
+    case["candidate"]["stop_words"] = []
+    case["filters"]["excluded_keywords"] = [word]
+    case["filters"]["required_keywords"] = []
+    case["vacancy"]["title"] = word
+    result = _evaluate(case)
+    assert result.reason == "hard_filter:excluded_keywords"
+    assert result.evidence["matched"] == (word,)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: FilterDecision(
+            False,
+            "hard_filter:area",
+            {"area_id": "2", "relocation_allowed": True},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:required_keywords",
+            {"missing": ()},
+        ),
+        lambda: FilterDecision(
+            False,
+            "missing_required_data",
+            {"field": "made_up"},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:already_applied",
+            {"vacancy_id": "John Smith lives at 123 Main Street"},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:minimum_salary",
+            {"salary_known": True, "minimum": 100},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:required_application_capabilities",
+            {"required": ("direct",), "unavailable": ("form",)},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:allowed_role_families",
+            {"actual": ("96",), "allowed": ("96",)},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:minimum_salary",
+            {"currency": "RUR", "expected_currency": "RUR"},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:minimum_salary",
+            {"maximum": 200, "minimum": 100},
+        ),
+        lambda: FilterDecision(
+            False,
+            "hard_filter:vacancy_closed",
+            {"archived": False, "status": "open"},
+        ),
+    ],
+)
+def test_filter_decision_rejects_semantically_forged_evidence(factory) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        factory()
+
+
+def test_keyword_phrases_cannot_cross_independent_vacancy_facts() -> None:
+    case = _base_case()
+    case["candidate"]["stop_words"] = []
+    case["vacancy"]["title"] = "Go"
+    case["vacancy"]["description"] = "Engineer"
+    case["vacancy"]["employer_name"] = "Acme"
+    case["vacancy"]["key_skills"] = ["Python"]
+    case["filters"]["required_keywords"] = ["go engineer"]
+
+    required = _evaluate(case)
+    assert required.reason == "hard_filter:required_keywords"
+    assert required.evidence["missing"] == ("go engineer",)
+
+    case["filters"]["required_keywords"] = []
+    case["filters"]["excluded_keywords"] = ["go engineer"]
+    assert _evaluate(case).passed is True
+
+
+def test_keyword_matching_keeps_per_fact_skill_and_symbol_boundaries() -> None:
+    case = _base_case()
+    case["candidate"]["stop_words"] = []
+    case["vacancy"]["title"] = "Backend"
+    case["vacancy"]["description"] = "Services"
+    case["vacancy"]["employer_name"] = "Acme"
+    case["vacancy"]["key_skills"] = ["Django"]
+    case["filters"]["required_keywords"] = ["go"]
+    assert _evaluate(case).reason == "hard_filter:required_keywords"
+
+    for term, fact in (
+        ("go", "Go,"),
+        ("go engineer", "Go Engineer"),
+        (".net", ".NET"),
+        ("c++", "C++"),
+        ("strasse", "STRASSE"),
+    ):
+        positive = _base_case()
+        positive["candidate"]["stop_words"] = []
+        positive["filters"]["required_keywords"] = [term]
+        positive["vacancy"]["title"] = fact
+        positive["vacancy"]["description"] = ""
+        positive["vacancy"]["key_skills"] = ["Python"]
+        assert _evaluate(positive).passed is True
+
+
+def test_hard_filter_validates_salary_range_even_when_floor_is_disabled() -> None:
+    case = _base_case()
+    case["filters"]["minimum_salary"] = 0
+    case["vacancy"]["salary_from"] = 250_000
+    case["vacancy"]["salary_to"] = 100_000
+
+    decision = _evaluate(case)
+
+    assert decision.reason == "missing_required_data"
+    assert decision.evidence["field"] == "vacancy.salary"

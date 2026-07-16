@@ -16,6 +16,7 @@ from work_hunter.hh_autopilot.ranking import (
     StructuredAIRanker,
     select_resume,
 )
+from work_hunter.hh_autopilot.search import normalize_vacancy
 from work_hunter.hh_autopilot.types import (
     AIDecision,
     FilterDecision,
@@ -1009,19 +1010,12 @@ def test_structured_ai_global_budget_also_caps_utf8_bytes() -> None:
     assert total_bytes <= 20_000
 
 
-def test_structured_ai_redacts_secrets_even_from_allowlisted_prompt_fields() -> None:
-    captured: dict[str, Any] = {}
+def test_structured_ai_rejects_secrets_from_allowlisted_prompt_fields() -> None:
+    calls: list[Any] = []
 
     def structured_call(messages, *args, **kwargs):
-        captured["messages"] = messages
-        return SimpleNamespace(
-            parsed={
-                "suitable": True,
-                "confidence": 0.9,
-                "evidence": ["Python"],
-                "reasons": [],
-            }
-        )
+        calls.append((messages, args, kwargs))
+        raise AssertionError("sensitive prompt input must not reach the backend")
 
     vacancy, resume, candidate = _facts()
     vacancy["description"] = "Python Authorization: Bearer vacancy-secret"
@@ -1034,10 +1028,9 @@ def test_structured_ai_redacts_secrets_even_from_allowlisted_prompt_fields() -> 
         structured_call=structured_call,
     ).evaluate(vacancy, resume, candidate, detail="heavy")
 
-    assert decision.available is True
-    prompt = repr(captured["messages"]).casefold()
-    assert "vacancy-secret" not in prompt
-    assert "session-secret" not in prompt
+    assert decision.available is False
+    assert decision.reason == "ai_unavailable"
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -1111,11 +1104,363 @@ def test_structured_ai_persists_sanitized_grounded_output() -> None:
                 "suitable": True,
                 "confidence": 0.9,
                 "evidence": ["  Python   Backend Engineer  "],
-                "reasons": ["  explicit role match  "],
+                "reasons": ["  Python  "],
             }
         ),
     ).evaluate(vacancy, resume, candidate, detail="light")
 
     assert decision.available is True
     assert decision.evidence == ("Python Backend Engineer",)
-    assert decision.reasons == ("explicit role match",)
+    assert decision.reasons == ("Python",)
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "Bearer&amp;#32;abc123",
+        "&amp;lt;script&amp;gt;secret&amp;lt;/script&amp;gt;",
+    ],
+)
+def test_ai_decision_rejects_nested_encoded_credentials_and_markup(
+    encoded: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        AIDecision(
+            available=True,
+            suitable=True,
+            confidence=0.9,
+            evidence=(encoded,),
+            reasons=(),
+        )
+
+
+@pytest.mark.parametrize(
+    "personal",
+    [
+        "john@example.test",
+        "+7 (999) 123-45-67",
+        "John Smith lives at 123 Main Street",
+    ],
+)
+def test_ai_decision_rejects_personal_data_defense_in_depth(
+    personal: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        AIDecision(
+            available=True,
+            suitable=True,
+            confidence=0.9,
+            evidence=(personal,),
+            reasons=(),
+        )
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "Bearer&amp;#32;abc123",
+        "&amp;lt;script&amp;gt;secret&amp;lt;/script&amp;gt;",
+    ],
+)
+def test_structured_ai_never_calls_backend_with_nested_encoded_secrets(
+    encoded: str,
+) -> None:
+    calls: list[Any] = []
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = encoded
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: calls.append((args, kwargs)),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is False
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "Secretary",
+        "secretary-role-1",
+        "cookiecutter",
+        "hotplug",
+        "proxying",
+    ],
+)
+def test_legitimate_job_words_survive_ai_prompt_and_output(word: str) -> None:
+    captured: dict[str, Any] = {}
+
+    def structured_call(messages, *args, **kwargs):
+        captured["messages"] = messages
+        return SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": [word],
+                "reasons": [word],
+            }
+        )
+
+    vacancy, resume, candidate = _facts()
+    vacancy["title"] = word
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=structured_call,
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is True
+    assert decision.evidence == (word,)
+    assert decision.reasons == (word,)
+    assert word.casefold() in repr(captured["messages"]).casefold()
+
+
+def test_structured_ai_list_aliases_agree_after_unicode_normalization() -> None:
+    vacancy, resume, candidate = _facts()
+    vacancy["skills"] = ["python", "fastapi"]
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": ["Python"],
+                "reasons": [],
+            }
+        ),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is True
+    assert decision.evidence == ("Python",)
+
+
+def test_deterministic_skill_phrases_do_not_cross_vacancy_facts() -> None:
+    vacancy, resume, candidate = _facts()
+    vacancy.pop("key_skills")
+    vacancy["title"] = "Go"
+    vacancy["description"] = "Engineer"
+    candidate["must_have_skills"] = ["go engineer"]
+    resume["skills"] = ["go engineer"]
+    weights = {name: 0.0 for name in COMPONENTS}
+    weights["skills"] = 1.0
+
+    score = DeterministicRanker().score(vacancy, resume, candidate, weights)
+
+    assert score.components["skills"] == 0.0
+    assert score.score == 0.0
+
+
+def test_deterministic_skill_matching_uses_phrase_boundaries() -> None:
+    vacancy, resume, candidate = _facts()
+    weights = {name: 0.0 for name in COMPONENTS}
+    weights["skills"] = 1.0
+    candidate["must_have_skills"] = ["go"]
+    resume["skills"] = ["go"]
+    vacancy["key_skills"] = ["Django"]
+    assert (
+        DeterministicRanker().score(vacancy, resume, candidate, weights).score
+        == 0.0
+    )
+
+    for required, observed in (
+        ("go", "Go"),
+        (".net", ".NET"),
+        ("c++", "C++"),
+        ("strasse", "STRASSE"),
+    ):
+        vacancy["key_skills"] = [observed]
+        candidate["must_have_skills"] = [required]
+        resume["skills"] = [required]
+        assert (
+            DeterministicRanker().score(
+                vacancy,
+                resume,
+                candidate,
+                weights,
+            ).score
+            == 100.0
+        )
+
+
+def test_deterministic_ranker_rejects_inverted_salary_range() -> None:
+    vacancy, resume, candidate = _facts()
+    vacancy["salary_from"] = 250_000
+    vacancy["salary_to"] = 100_000
+
+    with pytest.raises((TypeError, ValueError)):
+        DeterministicRanker().score(vacancy, resume, candidate, _weights())
+
+
+def test_weight_normalization_corrects_a_positive_component() -> None:
+    vacancy, resume, candidate = _facts()
+    weights = dict(
+        zip(
+            COMPONENTS,
+            [0.4, 0.7, 0.8, 0.7, 0.7, 0.8, 0.0],
+            strict=True,
+        )
+    )
+
+    score = DeterministicRanker().score(vacancy, resume, candidate, weights)
+
+    assert math.fsum(score.weights.values()) == pytest.approx(1.0)
+    assert score.weights["industry"] == 0.0
+    assert all(value >= 0.0 for value in score.weights.values())
+
+
+def test_rank_score_stores_only_the_canonical_rounded_total() -> None:
+    components = {name: 80.0 for name in COMPONENTS}
+    weights = {name: 1 / len(COMPONENTS) for name in COMPONENTS}
+
+    score = RankScore(
+        score=80.0000000005,
+        components=components,
+        weights=weights,
+    )
+
+    assert score.score == 80.0
+
+
+def test_canonical_score_preserves_normal_tie_breaking() -> None:
+    components = {name: 80.0 for name in COMPONENTS}
+    weights = {name: 1 / len(COMPONENTS) for name in COMPONENTS}
+    noisy = RankingDecision(
+        ready=True,
+        retry=False,
+        reason="deterministic_score",
+        rank_score=RankScore(80.0000000005, components, weights),
+        ai_decision=None,
+    )
+    exact = RankingDecision(
+        ready=True,
+        retry=False,
+        reason="deterministic_score",
+        rank_score=RankScore(80.0, components, weights),
+        ai_decision=None,
+    )
+
+    selected = select_resume(
+        [
+            RankedCandidate("default", "v-1", "r-2", "", noisy),
+            RankedCandidate("default", "v-1", "r-1", "", exact),
+        ],
+        "best_resume_only",
+    )
+
+    assert selected.resume_id == "r-1"
+
+
+def test_rank_score_canonicalizes_signed_zero() -> None:
+    score = RankScore(
+        score=-0.0,
+        components={name: -0.0 for name in COMPONENTS},
+        weights={
+            name: (1.0 if name == "role" else -0.0)
+            for name in COMPONENTS
+        },
+    )
+
+    assert math.copysign(1.0, score.score) == 1.0
+    assert all(math.copysign(1.0, value) == 1.0 for value in score.components.values())
+    assert all(math.copysign(1.0, value) == 1.0 for value in score.weights.values())
+
+
+def test_area_scoring_validates_all_relocation_aliases() -> None:
+    vacancy, resume, candidate = _facts()
+    vacancy["area_id"] = "2"
+    candidate["area_ids"] = ["1"]
+    candidate["relocation_allowed"] = True
+    candidate["allow_relocation"] = False
+
+    with pytest.raises((TypeError, ValueError)):
+        DeterministicRanker().score(vacancy, resume, candidate, _weights())
+
+
+def test_normalized_vacancy_empty_sentinels_are_optional_absence() -> None:
+    vacancy = normalize_vacancy({"id": "absent"})
+    score = DeterministicRanker().score(
+        vacancy,
+        {},
+        {},
+        _weights(),
+    )
+    assert score.score == 50.0
+    assert all(value == 50.0 for value in score.components.values())
+
+    calls: list[Any] = []
+
+    def structured_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": [],
+                "reasons": [],
+            }
+        )
+
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=structured_call,
+    ).evaluate(vacancy, {}, {}, detail="light")
+    assert decision.available is True
+    assert len(calls) == 1
+
+    with pytest.raises((TypeError, ValueError)):
+        DeterministicRanker().score(
+            {"id": "explicit", "title": ""},
+            {},
+            {},
+            _weights(),
+        )
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["Python"],
+            "reasons": ["Kubernetes"],
+        },
+        {
+            "suitable": True,
+            "confidence": 0.9,
+            "evidence": ["Python"],
+            "reasons": ["Go Engineer"],
+        },
+    ],
+)
+def test_structured_ai_grounds_reasons_in_one_supplied_fact(
+    parsed: dict[str, Any],
+) -> None:
+    vacancy, resume, candidate = _facts()
+    vacancy["title"] = "Go"
+    vacancy["description"] = "Engineer"
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: SimpleNamespace(parsed=parsed),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is False
+    assert decision.reason == "ai_unavailable"
+
+
+def test_redacted_prompt_sentinel_cannot_ground_ai_output() -> None:
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = "access_token=abc123"
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": ["redacted"],
+                "reasons": [],
+            }
+        ),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is False
+    assert decision.reason == "ai_unavailable"

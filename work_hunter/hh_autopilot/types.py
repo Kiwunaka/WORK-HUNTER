@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import html
 import math
 import re
 from dataclasses import dataclass, field
@@ -9,6 +8,8 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
+
+from .sanitization import sanitize_text
 
 
 class AutopilotState(StrEnum):
@@ -166,23 +167,6 @@ def _mapping(value: Any, *, field_name: str) -> dict[str, Any]:
     return detached
 
 
-_MARKUP = re.compile(r"<[^>]*>")
-_SPACES = re.compile(r"\s+")
-_SECRET_BEARING = re.compile(
-    r"(?i)(?:"
-    r"bearer\s+\S+|"
-    r"authorization|"
-    r"access[_ -]?token|"
-    r"refresh[_ -]?token|"
-    r"set-cookie|cookie|"
-    r"password|passwd|"
-    r"proxy(?:[_ -]?(?:url|password|credential))?|"
-    r"api[_ -]?key|"
-    r"credential|"
-    r"otp|"
-    r"secret"
-    r")"
-)
 _FILTER_CHECKS = (
     "vacancy_open",
     "history",
@@ -194,6 +178,101 @@ _FILTER_CHECKS = (
     "salary",
     "candidate_constraints",
     "application_capabilities",
+)
+_CLOSED_VACANCY_STATUSES = frozenset(
+    {"archived", "closed", "deleted", "not_published", "unpublished"}
+)
+_APPLICATION_CAPABILITIES = frozenset({"direct", "screening", "form"})
+_ALLOWED_MISSING_FIELDS = frozenset(
+    {
+        "application_capabilities",
+        "area_id",
+        "blacklist",
+        "blacklist.employer",
+        "blacklist.employer_ids",
+        "blacklist.vacancy",
+        "blacklist.vacancy_ids",
+        "candidate.citizenships",
+        "candidate.languages",
+        "candidate.relocation_allowed",
+        "candidate.relocation_area_ids",
+        "candidate.stop_words",
+        "citizenships",
+        "context.relocation_allowed",
+        "context.relocation_area_ids",
+        "context.supported_application_capabilities",
+        "employment_id",
+        "experience_id",
+        "filters.allowed_role_families",
+        "filters.areas",
+        "filters.citizenships",
+        "filters.employment_types",
+        "filters.excluded_keywords",
+        "filters.experience_levels",
+        "filters.languages",
+        "filters.minimum_salary",
+        "filters.remote",
+        "filters.required_application_capabilities",
+        "filters.required_keywords",
+        "filters.salary_currency",
+        "filters.schedules",
+        "filters.unknown_salary",
+        "filters.use_employer_blacklist",
+        "history",
+        "history.active",
+        "history.active_vacancy_ids",
+        "history.already_applied",
+        "history.applied_vacancy_ids",
+        "history.permanently_skipped",
+        "history.permanently_skipped_vacancy_ids",
+        "languages",
+        "professional_role_ids",
+        "relocation",
+        "remote",
+        "resume.relocation_allowed",
+        "resume.relocation_area_ids",
+        "salary_currency",
+        "schedule_id",
+        "vacancy.application_capabilities",
+        "vacancy.application_capability",
+        "vacancy.apply_alternate_url",
+        "vacancy.archived",
+        "vacancy.area",
+        "vacancy.area.id",
+        "vacancy.area_id",
+        "vacancy.description",
+        "vacancy.employer",
+        "vacancy.employer.name",
+        "vacancy.employer_id",
+        "vacancy.employer_name",
+        "vacancy.employment",
+        "vacancy.employment.id",
+        "vacancy.employment_id",
+        "vacancy.experience",
+        "vacancy.experience.id",
+        "vacancy.experience_id",
+        "vacancy.has_test",
+        "vacancy.id",
+        "vacancy.key_skills",
+        "vacancy.relocation_allowed",
+        "vacancy.relocation_area_ids",
+        "vacancy.remote",
+        "vacancy.response_url",
+        "vacancy.salary",
+        "vacancy.salary.currency",
+        "vacancy.salary.from",
+        "vacancy.salary.to",
+        "vacancy.salary_currency",
+        "vacancy.salary_from",
+        "vacancy.salary_to",
+        "vacancy.schedule",
+        "vacancy.schedule.id",
+        "vacancy.schedule_id",
+        "vacancy.status",
+        "vacancy.title",
+        "vacancy.work_format_ids",
+        "vacancy_open",
+    }
 )
 _HARD_FILTER_REASONS = frozenset(
     {
@@ -235,12 +314,17 @@ _RANKING_REASONS = frozenset(
 
 
 def _clean_text(value: Any, *, field_name: str, maximum: int = 8_000) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise TypeError(f"{field_name} must be a string")
-    if "\0" in value:
-        raise ValueError(f"{field_name} must not contain NUL")
-    cleaned = _SPACES.sub(" ", _MARKUP.sub(" ", html.unescape(value))).strip()
-    return cleaned[:maximum]
+    return sanitize_text(
+        value,
+        field=field_name,
+        maximum=maximum,
+        allow_empty=True,
+        markup="strip",
+        sensitive="redact",
+        overflow="truncate",
+    )
 
 
 def _safe_output_text(
@@ -252,19 +336,14 @@ def _safe_output_text(
 ) -> str:
     if type(value) is not str:
         raise TypeError(f"{field_name} must be a string")
-    unescaped = html.unescape(value)
-    if _MARKUP.search(unescaped) or "<" in unescaped or ">" in unescaped:
-        raise ValueError(f"{field_name} must not contain markup")
-    parsed = _SPACES.sub(" ", unescaped).strip()
-    if not parsed and not allow_empty:
-        raise ValueError(f"{field_name} must not be empty")
-    if "\0" in parsed:
-        raise ValueError(f"{field_name} must not contain NUL")
-    if len(parsed) > maximum:
-        raise ValueError(f"{field_name} must be at most {maximum} characters")
-    if _SECRET_BEARING.search(parsed):
-        raise ValueError(f"{field_name} must not contain secret-bearing text")
-    return parsed
+    return sanitize_text(
+        value,
+        field=field_name,
+        maximum=maximum,
+        allow_empty=allow_empty,
+        markup="reject",
+        sensitive="reject",
+    )
 
 
 def _filter_sequence(
@@ -285,6 +364,12 @@ def _filter_sequence(
         )
         for index, item in enumerate(value)
     )
+
+
+def _stable_identifier(value: str, *, field_name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}", value):
+        raise ValueError(f"{field_name} must be a stable identifier")
+    return value
 
 
 def _filter_evidence(
@@ -384,9 +469,79 @@ def _filter_evidence(
                 parsed_text,
             ):
                 raise ValueError("evidence.field is not a stable field name")
+            if key == "field" and parsed_text not in _ALLOWED_MISSING_FIELDS:
+                raise ValueError("evidence.field is not emitted by the hard filter")
+            if key in {
+                "area_id",
+                "currency",
+                "employer_id",
+                "employment",
+                "expected_currency",
+                "experience",
+                "schedule",
+                "vacancy_id",
+            } or (key == "status" and parsed_text):
+                parsed_text = _stable_identifier(
+                    parsed_text,
+                    field_name=f"evidence.{key}",
+                )
             frozen[key] = parsed_text
     if reason == "hard_filters_passed" and frozen["checks"] != _FILTER_CHECKS:
         raise ValueError("passing evidence must contain the complete filter checks")
+    if reason in {
+        "hard_filter:excluded_keywords",
+        "hard_filter:required_keywords",
+        "hard_filter:languages",
+        "hard_filter:citizenships",
+    }:
+        key = "matched" if reason == "hard_filter:excluded_keywords" else "missing"
+        if not frozen[key]:
+            raise ValueError(f"evidence.{key} must not be empty")
+    if reason == "hard_filter:allowed_role_families":
+        actual = frozen["actual"]
+        allowed = frozen["allowed"]
+        if not actual or not allowed:
+            raise ValueError("role evidence sets must not be empty")
+        for key, values in (("actual", actual), ("allowed", allowed)):
+            for index, item in enumerate(values):
+                _stable_identifier(
+                    item,
+                    field_name=f"evidence.{key}[{index}]",
+                )
+        if set(actual).intersection(allowed):
+            raise ValueError("rejected role evidence sets must not overlap")
+    if (
+        reason == "hard_filter:area"
+        and frozen["relocation_allowed"] is not False
+    ):
+        raise ValueError("rejected area evidence must deny relocation")
+    if reason == "hard_filter:minimum_salary":
+        keys = frozenset(frozen)
+        if keys == {"salary_known", "minimum"}:
+            if frozen["salary_known"] is not False or frozen["minimum"] <= 0:
+                raise ValueError("unknown salary evidence is contradictory")
+        elif keys == {"currency", "expected_currency"}:
+            if frozen["currency"].casefold() == frozen["expected_currency"].casefold():
+                raise ValueError("currency rejection must contain a mismatch")
+        elif keys == {"maximum", "minimum"}:
+            if frozen["minimum"] <= 0 or frozen["maximum"] >= frozen["minimum"]:
+                raise ValueError("salary rejection must be below the minimum")
+    if reason == "hard_filter:required_application_capabilities":
+        required = frozen["required"]
+        unavailable = frozen["unavailable"]
+        if (
+            not required
+            or not unavailable
+            or not set(required) <= _APPLICATION_CAPABILITIES
+            or not set(unavailable) <= set(required)
+        ):
+            raise ValueError("capability evidence is contradictory")
+    if reason == "hard_filter:vacancy_closed":
+        if (
+            frozen["archived"] is not True
+            and frozen["status"].casefold() not in _CLOSED_VACANCY_STATUSES
+        ):
+            raise ValueError("vacancy-closed evidence does not prove closure")
     return MappingProxyType(frozen)
 
 
@@ -441,7 +596,7 @@ def _strict_number(
         raise ValueError(f"{field_name} must be finite")
     if not minimum <= parsed <= maximum:
         raise ValueError(f"{field_name} must be in {minimum}..{maximum}")
-    return parsed
+    return 0.0 if parsed == 0.0 else parsed
 
 
 def _bounded_text(
@@ -618,13 +773,17 @@ class RankScore:
             minimum=0.0,
             maximum=1.0,
         )
-        total = sum(weights.values())
+        total = math.fsum(weights.values())
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError("weights must sum to 1")
         expected_score = round(
-            sum(components[name] * weights[name] for name in components),
+            math.fsum(
+                components[name] * weights[name] for name in components
+            ),
             4,
         )
+        if expected_score == 0.0:
+            expected_score = 0.0
         if not math.isclose(
             score,
             expected_score,
@@ -632,7 +791,7 @@ class RankScore:
             abs_tol=1e-9,
         ):
             raise ValueError("score must equal the canonical weighted total")
-        object.__setattr__(self, "score", score)
+        object.__setattr__(self, "score", expected_score)
         object.__setattr__(self, "components", components)
         object.__setattr__(self, "weights", weights)
 

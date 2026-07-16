@@ -1,28 +1,19 @@
 from __future__ import annotations
 
 import copy
-import html
-import re
 from typing import Any, Callable, Mapping, Sequence
 
+from .sanitization import phrase_matches_fact, sanitize_text
 from .types import FilterDecision, NormalizedVacancy
 
 
-_MARKUP = re.compile(r"<[^>]*>")
-_SPACES = re.compile(r"\s+")
-_SECRET_BEARING = re.compile(
-    r"(?i)(?:"
-    r"bearer\s+\S+|authorization|access[_ -]?token|refresh[_ -]?token|"
-    r"set-cookie|cookie|password|passwd|api[_ -]?key|credential|otp|secret|"
-    r"proxy(?:[_ -]?(?:url|password|credential))?"
-    r")"
-)
 _CLOSED_STATUSES = frozenset(
     {"archived", "closed", "deleted", "not_published", "unpublished"}
 )
 _CAPABILITIES = frozenset({"direct", "screening", "form"})
 _EVIDENCE_LIMIT = 20
 _FACT_LIMIT = 500
+_TEXT_LIMIT = 20_000
 _ABSENT = object()
 
 
@@ -41,15 +32,17 @@ class _MalformedFact(ValueError):
 def _text(value: Any, *, field: str, allow_empty: bool = False) -> str:
     if type(value) is not str:
         raise _MalformedFact(field)
-    normalized = _SPACES.sub(
-        " ",
-        _MARKUP.sub(" ", html.unescape(value)),
-    ).strip()
-    if "\0" in normalized:
-        raise _MalformedFact(field)
-    if not normalized and not allow_empty:
-        raise _MalformedFact(field)
-    return normalized
+    try:
+        return sanitize_text(
+            value,
+            field=field,
+            maximum=_TEXT_LIMIT,
+            allow_empty=allow_empty,
+            markup="strip",
+            sensitive="redact",
+        )
+    except (TypeError, ValueError) as exc:
+        raise _MalformedFact(field) from exc
 
 
 def _normalized_text(value: Any, *, field: str, allow_empty: bool = False) -> str:
@@ -235,24 +228,28 @@ def _merge_text_facts(
     return "" if agreed is _ABSENT else str(agreed)
 
 
-def _contains_term(text: str, term: str) -> bool:
-    start = 0
-    while True:
-        index = text.find(term, start)
-        if index < 0:
-            return False
-        before_ok = index == 0 or not text[index - 1].isalnum()
-        end = index + len(term)
-        after_ok = end == len(text) or not text[end].isalnum()
-        if before_ok and after_ok:
-            return True
-        start = index + 1
-
-
 def _safe_terms(values: Sequence[str]) -> tuple[str, ...]:
-    return tuple(
-        "redacted" if _SECRET_BEARING.search(value) else value[:100]
-        for value in values[:_EVIDENCE_LIMIT]
+    safe: list[str] = []
+    for index, value in enumerate(values[:_EVIDENCE_LIMIT]):
+        try:
+            parsed = sanitize_text(
+                value,
+                field=f"evidence[{index}]",
+                maximum=_TEXT_LIMIT,
+                markup="reject",
+                sensitive="redact",
+            )
+        except (TypeError, ValueError):
+            parsed = "redacted"
+        safe.append(parsed[:100])
+    return tuple(safe)
+
+
+def _matches_any_fact(term: str, facts: Sequence[str]) -> bool:
+    return any(
+        (term == "redacted" and fact == "redacted")
+        or phrase_matches_fact(term, fact)
+        for fact in facts
     )
 
 
@@ -529,7 +526,7 @@ class HardFilter:
             nested_employer_name,
             field="vacancy.employer_name",
         )
-        searchable = " ".join(
+        facts = tuple(
             part
             for part in (
                 _first_text(vacancy, ("title", "name"), field="vacancy.title"),
@@ -539,7 +536,7 @@ class HardFilter:
                     field="vacancy.description",
                 ),
                 employer_name,
-                " ".join(skills),
+                *skills,
             )
             if part
         )
@@ -555,7 +552,7 @@ class HardFilter:
         matched = tuple(
             term
             for term in dict.fromkeys(excluded)
-            if term and _contains_term(searchable, term)
+            if term and _matches_any_fact(term, facts)
         )
         if matched:
             return _reject(
@@ -564,7 +561,9 @@ class HardFilter:
             )
         required = _configured_list(self._filters, "required_keywords")
         missing = tuple(
-            term for term in required if not _contains_term(searchable, term)
+            term
+            for term in required
+            if not _matches_any_fact(term, facts)
         )
         if missing:
             return _reject(
@@ -843,8 +842,6 @@ class HardFilter:
         floor = self._filters.get("minimum_salary", 0)
         if type(floor) is not int or floor < 0:
             raise _MalformedFact("filters.minimum_salary")
-        if floor == 0:
-            return None
         top_salary_from = self._salary_amount_fact(
             vacancy,
             "salary_from",
@@ -890,17 +887,12 @@ class HardFilter:
         salary_to = (
             None if salary_to_value is _ABSENT else salary_to_value
         )
-        if salary_from is None and salary_to is None:
-            unknown = self._filters.get("unknown_salary", "allow")
-            if unknown == "allow":
-                return None
-            if unknown == "reject":
-                return _reject(
-                    "hard_filter:minimum_salary",
-                    salary_known=False,
-                    minimum=floor,
-                )
-            raise _MalformedFact("filters.unknown_salary")
+        if (
+            salary_from is not None
+            and salary_to is not None
+            and salary_from > salary_to
+        ):
+            raise _MalformedFact("vacancy.salary")
         top_currency = _text_fact_from_keys(
             vacancy,
             ("salary_currency", "currency"),
@@ -918,6 +910,19 @@ class HardFilter:
             nested_currency,
             field="vacancy.salary_currency",
         )
+        if floor == 0:
+            return None
+        if salary_from is None and salary_to is None:
+            unknown = self._filters.get("unknown_salary", "allow")
+            if unknown == "allow":
+                return None
+            if unknown == "reject":
+                return _reject(
+                    "hard_filter:minimum_salary",
+                    salary_known=False,
+                    minimum=floor,
+                )
+            raise _MalformedFact("filters.unknown_salary")
         if not currency:
             raise _MissingFact("salary_currency")
         expected_currency = _normalized_text(

@@ -1182,8 +1182,8 @@ class AutopilotRepository:
             filter_json,
             field="filter decision",
         )
-        instant = _instant(None, field="now")
         with self.immediate():
+            instant = _instant(None, field="now")
             current = self._item_for_update(item_id)
             if current.version != expected_version:
                 raise StaleWrite(f"item {item_id} version changed")
@@ -1261,8 +1261,8 @@ class AutopilotRepository:
         score = decision.rank_score.score
         if not math.isfinite(score) or not 0.0 <= score <= 100.0:
             raise ValueError("deterministic score must be finite in 0..100")
-        instant = _instant(None, field="now")
         with self.immediate():
+            instant = _instant(None, field="now")
             current = self._item_for_update(item_id)
             if current.version != expected_version:
                 raise StaleWrite(f"item {item_id} version changed")
@@ -1359,9 +1359,9 @@ class AutopilotRepository:
         )
         if fencing_token == 0:
             raise ValueError("fencing_token must be at least 1")
-        instant = _instant(None, field="now")
         ordered_ids = tuple(sorted(parsed_versions))
         with self.immediate():
+            instant = _instant(None, field="now")
             supplied = tuple(
                 self._item_for_update(item_id) for item_id in ordered_ids
             )
@@ -1464,6 +1464,7 @@ class AutopilotRepository:
                     run_id=run_id,
                     fencing_token=fencing_token,
                     fence_instant=instant,
+                    allow_stage_owned=True,
                 )
             return tuple(
                 self._item_for_update(candidate.id)
@@ -2374,9 +2375,9 @@ class AutopilotRepository:
         if run_id == 0:
             raise ValueError("run_id must be at least 1")
         fencing_token = _optional_integer(fencing_token, field="fencing_token")
-        fence_instant = _instant(None, field="now")
         sanitized_metadata = _json_loads(metadata_json, field="metadata")
         with self.immediate():
+            fence_instant = _instant(None, field="now")
             return self._transition_item_for_update(
                 item_id,
                 expected_version,
@@ -2386,6 +2387,7 @@ class AutopilotRepository:
                 run_id=run_id,
                 fencing_token=fencing_token,
                 fence_instant=fence_instant,
+                allow_stage_owned=False,
             )
 
     def _transition_item_for_update(
@@ -2399,17 +2401,33 @@ class AutopilotRepository:
         run_id: int | None,
         fencing_token: int | None,
         fence_instant: datetime,
+        allow_stage_owned: bool = False,
     ) -> ItemRecord:
         """Apply a prevalidated item transition inside the caller's transaction."""
         current = self._item_for_update(item_id)
         if current.version != expected_version:
             raise StaleWrite(f"item {item_id} version changed")
-        if fencing_token is not None:
-            self._assert_fence(current.account_id, fencing_token, fence_instant)
+        stage_owned_edges = {
+            (AutopilotState.DISCOVERED, AutopilotState.ELIGIBLE),
+            (AutopilotState.ELIGIBLE, AutopilotState.RANKED),
+            (AutopilotState.RANKED, AutopilotState.READY),
+        }
+        if not allow_stage_owned and (current.state, target) in stage_owned_edges:
+            raise ValueError("transition is stage-owned by the ranking pipeline")
         if run_id is not None:
-            run = self._run_for_update(run_id)
-            if run.account_id != current.account_id:
-                raise ValueError("transition run and item accounts must match")
+            self._assert_active_owned_run_for_update(
+                current,
+                run_id=run_id,
+                fencing_token=fencing_token,
+                instant=fence_instant,
+                operation="item transition",
+            )
+        elif fencing_token is not None:
+            self._assert_fence(
+                current.account_id,
+                fencing_token,
+                fence_instant,
+            )
         assert_transition(current.state, target)
         cursor = self.conn.execute(
             """
@@ -4654,12 +4672,17 @@ class AutopilotRepository:
             raise StaleWrite(f"{operation} requires a running run")
         if item.last_run_id != run_id:
             raise ValueError(f"{operation} requires the same run as the item")
-        if fencing_token is not None:
-            if run.fencing_token != fencing_token:
+        if run.fencing_token == 0:
+            if fencing_token is not None:
                 raise LostLease(
-                    f"{operation} run fence does not match the current lease"
+                    f"{operation} cannot add a fence to an unfenced run"
                 )
-            self._assert_fence(item.account_id, fencing_token, instant)
+            return run
+        if fencing_token != run.fencing_token:
+            raise LostLease(
+                f"{operation} requires the run fencing token"
+            )
+        self._assert_fence(item.account_id, run.fencing_token, instant)
         return run
 
     def _lease_for_update(self, account_id: str) -> LeaseRecord:
@@ -4919,6 +4942,7 @@ class AutopilotRepository:
             fencing_token=_persisted_integer(
                 row["fencing_token"],
                 field="run fencing_token",
+                minimum=0,
                 error_type=LostLease,
             ),
             counters=_json_loads(row["counters_json"], field="counters_json"),
@@ -4948,6 +4972,7 @@ class AutopilotRepository:
             row["ai_json"],
             deterministic_score=deterministic_score,
         )
+        filter_data = _persisted_filter_data(row["filter_json"])
         last_outcome_code = _persisted_optional_text(
             row["last_outcome_code"],
             field="item last_outcome_code",
@@ -4961,6 +4986,37 @@ class AutopilotRepository:
             deterministic_score is None or not ai_data
         ):
             raise StaleWrite("ranked item is missing a complete ranking decision")
+        if state in {
+            AutopilotState.ELIGIBLE,
+            AutopilotState.RANKED,
+            AutopilotState.READY,
+        }:
+            if not filter_data:
+                raise StaleWrite("item state is missing its filter decision")
+            try:
+                filter_decision = FilterDecision(
+                    passed=filter_data["passed"],
+                    reason=filter_data["reason"],
+                    evidence=filter_data["evidence"],
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StaleWrite("item filter decision is malformed") from exc
+            if not filter_decision.passed:
+                raise StaleWrite(
+                    "eligible item requires a passing filter decision"
+                )
+        ranking_decision: RankingDecision | None = None
+        if state in {AutopilotState.RANKED, AutopilotState.READY}:
+            ranking_decision = _ranking_decision_from_data(
+                ai_data,
+                field="item ranking decision",
+            )
+        if state is AutopilotState.READY and (
+            ranking_decision is None
+            or not ranking_decision.ready
+            or ranking_decision.retry
+        ):
+            raise StaleWrite("ready item requires a ready ranking decision")
         if state is AutopilotState.RANKED and last_outcome_code != ai_data["reason"]:
             raise StaleWrite("ranked item outcome disagrees with ranking decision")
         return ItemRecord(
@@ -4999,7 +5055,7 @@ class AutopilotRepository:
                 row["version"],
                 field="item version",
             ),
-            filter_data=_persisted_filter_data(row["filter_json"]),
+            filter_data=filter_data,
             deterministic_score=deterministic_score,
             ai_data=ai_data,
             published_at=_persisted_optional_text(

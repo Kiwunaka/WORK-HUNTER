@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import copy
-import html
 import json
 import math
-import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
@@ -13,6 +11,7 @@ from work_hunter.llm.structured import (
     send_structured_chat,
 )
 
+from .sanitization import phrase_matches_fact, sanitize_text
 from .types import (
     AIDecision,
     FilterDecision,
@@ -57,21 +56,6 @@ AI_OUTPUT_SCHEMA = StructuredOutputSchema(
     strict=True,
 )
 
-_MARKUP = re.compile(r"<[^>]*>")
-_SPACES = re.compile(r"\s+")
-_SECRET_BEARING = re.compile(
-    r"(?i)(?:"
-    r"bearer\s+\S+|authorization|access[_ -]?token|refresh[_ -]?token|"
-    r"set-cookie|cookie|password|passwd|api[_ -]?key|credential|otp|secret|"
-    r"proxy(?:[_ -]?(?:url|password|credential))?"
-    r")"
-)
-_PERSONAL_DATA = re.compile(
-    r"(?i)(?:"
-    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|"
-    r"(?:\+?\d[\d ()-]{7,}\d)"
-    r")"
-)
 _ABSENT = object()
 _SYSTEM_PROMPT = (
     "Judge job suitability using only supplied facts. "
@@ -94,7 +78,16 @@ def _vacancy_mapping(
     value: NormalizedVacancy | Mapping[str, Any],
 ) -> dict[str, Any]:
     if isinstance(value, NormalizedVacancy):
-        return value.to_dict()
+        return {
+            key: item
+            for key, item in value.to_dict().items()
+            if item is not None
+            and item != ""
+            and not (
+                isinstance(item, (list, tuple))
+                and not item
+            )
+        }
     return _mapping(value, field="vacancy")
 
 
@@ -107,15 +100,15 @@ def _text(
 ) -> str:
     if type(value) is not str:
         raise TypeError(f"{field} must be a string")
-    cleaned = _SPACES.sub(
-        " ",
-        _MARKUP.sub(" ", html.unescape(value)),
-    ).strip()
-    if "\0" in cleaned:
-        raise ValueError(f"{field} must not contain NUL")
-    if not cleaned and not allow_empty:
-        raise ValueError(f"{field} must not be empty")
-    return cleaned[:maximum]
+    return sanitize_text(
+        value,
+        field=field,
+        maximum=maximum,
+        allow_empty=allow_empty,
+        markup="strip",
+        sensitive="redact",
+        overflow="truncate",
+    )
 
 
 def _normalized(value: Any, *, field: str) -> str:
@@ -268,12 +261,17 @@ def _coverage(required: Sequence[str], observed: Sequence[str]) -> float:
     return round(100.0 * len(required_set.intersection(observed_set)) / len(required_set), 4)
 
 
-def _text_coverage(required: Sequence[str], text: str) -> float:
+def _text_coverage(required: Sequence[str], facts: Sequence[str]) -> float:
     required_set = set(required)
-    if not required_set or not text:
+    if not required_set or not facts:
         return 50.0
     return round(
-        100.0 * sum(term in text for term in required_set) / len(required_set),
+        100.0
+        * sum(
+            any(phrase_matches_fact(term, fact) for fact in facts)
+            for term in required_set
+        )
+        / len(required_set),
         4,
     )
 
@@ -314,7 +312,9 @@ class DeterministicRanker:
         for name, value in raw.items():
             if not math.isfinite(value) or not 0.0 <= value <= 100.0:
                 raise ValueError(f"component {name} must be finite in 0..100")
-        total = sum(raw[name] * normalized_weights[name] for name in COMPONENTS)
+        total = math.fsum(
+            raw[name] * normalized_weights[name] for name in COMPONENTS
+        )
         total = round(max(0.0, min(100.0, total)), 4)
         return RankScore(
             score=total,
@@ -335,12 +335,19 @@ class DeterministicRanker:
             )
             for name in COMPONENTS
         }
-        total = sum(parsed.values())
+        total = math.fsum(parsed.values())
         if not math.isfinite(total) or total <= 0:
             raise ValueError("weights must have a positive finite sum")
         normalized = {name: parsed[name] / total for name in COMPONENTS}
-        correction = 1.0 - sum(normalized.values())
-        normalized[COMPONENTS[-1]] += correction
+        correction = 1.0 - math.fsum(normalized.values())
+        target = max(
+            (name for name in COMPONENTS if normalized[name] > 0.0),
+            key=lambda name: normalized[name],
+        )
+        normalized[target] += correction
+        for name, value in normalized.items():
+            if value == 0.0:
+                normalized[name] = 0.0
         return normalized
 
     @staticmethod
@@ -383,7 +390,7 @@ class DeterministicRanker:
         title = _first_text(vacancy, ("title", "name"), field="vacancy.title")
         if desired_text is None or title is None:
             return 50.0
-        return _text_coverage(desired_text, title)
+        return _text_coverage(desired_text, (title,))
 
     @staticmethod
     def _skills(
@@ -414,7 +421,7 @@ class DeterministicRanker:
             return 50.0
         if vacancy_skills is not None:
             return _coverage(vacancy_skills, desired)
-        text = " ".join(
+        facts = tuple(
             value
             for value in (
                 _first_text(vacancy, ("title", "name"), field="vacancy.title"),
@@ -426,9 +433,9 @@ class DeterministicRanker:
             )
             if value
         )
-        if not text:
+        if not facts:
             return 50.0
-        return _text_coverage(desired, text)
+        return _text_coverage(desired, facts)
 
     @staticmethod
     def _experience(
@@ -537,16 +544,12 @@ class DeterministicRanker:
         salary_to = (
             None if salary_to_value in {_ABSENT, None} else salary_to_value
         )
-        minimum = _optional_numeric(
-            candidate,
-            ("salary_min", "minimum_salary"),
-            field="candidate.salary_min",
-        )
-        if minimum is None or minimum <= 0:
-            return 50.0
-        best = salary_to if salary_to is not None else salary_from
-        if best is None:
-            return 50.0
+        if (
+            salary_from is not None
+            and salary_to is not None
+            and salary_from > salary_to
+        ):
+            raise ValueError("vacancy.salary range is inverted")
         top_vacancy_currency = _first_text(
             vacancy,
             ("salary_currency", "currency"),
@@ -579,11 +582,21 @@ class DeterministicRanker:
             if vacancy_currency_value is _ABSENT
             else vacancy_currency_value
         )
+        minimum = _optional_numeric(
+            candidate,
+            ("salary_min", "minimum_salary"),
+            field="candidate.salary_min",
+        )
         desired_currency = _first_text(
             candidate,
             ("salary_currency", "currency"),
             field="candidate.salary_currency",
         )
+        if minimum is None or minimum <= 0:
+            return 50.0
+        best = salary_to if salary_to is not None else salary_from
+        if best is None:
+            return 50.0
         if vacancy_currency is None or desired_currency is None:
             return 50.0
         if vacancy_currency != desired_currency:
@@ -674,37 +687,68 @@ class DeterministicRanker:
             field="vacancy.area_id",
         )
         area = None if area_value is _ABSENT else area_value
-        desired = _string_set(
-            candidate,
-            ("area_ids", "areas"),
-            field="candidate.area_ids",
-        )
-        if desired is None:
-            single = _first_text(
-                candidate,
-                ("area_id",),
-                field="candidate.area_id",
+
+        def desired_areas(
+            source: Mapping[str, Any],
+            *,
+            prefix: str,
+        ) -> tuple[str, ...] | None:
+            multiple = _string_set(
+                source,
+                ("area_ids", "areas"),
+                field=f"{prefix}.area_ids",
             )
-            if single is None:
-                single = _first_text(
-                    resume,
-                    ("area_id",),
-                    field="resume.area_id",
+            single = _first_text(
+                source,
+                ("area_id",),
+                field=f"{prefix}.area_id",
+            )
+            if (
+                multiple is not None
+                and single is not None
+                and single not in multiple
+            ):
+                raise ValueError(f"{prefix} area aliases disagree")
+            if multiple is not None:
+                return multiple
+            return None if single is None else (single,)
+
+        candidate_areas = desired_areas(candidate, prefix="candidate")
+        resume_areas = desired_areas(resume, prefix="resume")
+        desired = (
+            candidate_areas
+            if candidate_areas is not None
+            else resume_areas
+        )
+
+        relocation_values: list[Any] = []
+        for source, prefix in ((candidate, "candidate"), (resume, "resume")):
+            aliases: list[Any] = []
+            for key in ("relocation_allowed", "allow_relocation"):
+                if key not in source:
+                    aliases.append(_ABSENT)
+                    continue
+                flag = source[key]
+                if type(flag) is not bool:
+                    raise TypeError(
+                        f"{prefix}.{key} must be a boolean"
+                    )
+                aliases.append(flag)
+            relocation_values.append(
+                _agree_aliases(
+                    aliases,
+                    field=f"{prefix}.relocation_allowed",
                 )
-            if single is not None:
-                desired = (single,)
+            )
+        relocation_value = _agree_aliases(
+            relocation_values,
+            field="relocation_allowed",
+        )
         if area is None or desired is None:
             return 50.0
         if area in desired:
             return 100.0
-        for source, prefix in ((candidate, "candidate"), (resume, "resume")):
-            if "relocation_allowed" in source:
-                flag = source["relocation_allowed"]
-                if type(flag) is not bool:
-                    raise TypeError(f"{prefix}.relocation_allowed must be a boolean")
-                if flag:
-                    return 100.0
-        return 0.0
+        return 100.0 if relocation_value is True else 0.0
 
     @staticmethod
     def _industry(
@@ -911,10 +955,17 @@ class StructuredAIRanker:
         field: str,
         maximum: int,
     ) -> str:
-        parsed = _text(value, field=field, maximum=maximum)
-        if _SECRET_BEARING.search(parsed) or _PERSONAL_DATA.search(parsed):
-            return "redacted"
-        return parsed
+        if type(value) is not str:
+            raise TypeError(f"{field} must be a string")
+        return sanitize_text(
+            value,
+            field=field,
+            maximum=maximum,
+            allow_empty=True,
+            markup="strip",
+            sensitive="reject",
+            overflow="truncate",
+        )
 
     @staticmethod
     def _safe_scalar(
@@ -956,22 +1007,43 @@ class StructuredAIRanker:
         *,
         mapping_key: str = "id",
     ) -> list[str]:
-        values = _string_set(
-            source,
-            keys,
-            field=keys[0],
-            mapping_key=mapping_key,
-        )
-        if values is None:
+        aliases: list[Any] = []
+        for key in keys:
+            if key not in source:
+                aliases.append(_ABSENT)
+                continue
+            raw = source[key]
+            if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+                raise TypeError(f"{keys[0]} must be a sequence")
+            if not raw:
+                raise ValueError(f"{keys[0]} must not be empty when present")
+            if len(raw) > 500:
+                raise ValueError(f"{keys[0]} has too many values")
+            parsed_values: list[str] = []
+            seen: set[str] = set()
+            for index, item in enumerate(raw):
+                if isinstance(item, Mapping):
+                    if mapping_key not in item:
+                        raise TypeError(
+                            f"{keys[0]}[{index}] requires {mapping_key}"
+                        )
+                    item = item[mapping_key]
+                parsed = StructuredAIRanker._safe_prompt_text(
+                    item,
+                    field=f"{keys[0]}[{index}]",
+                    maximum=100,
+                )
+                if not parsed:
+                    raise ValueError(f"{keys[0]}[{index}] must not be empty")
+                canonical = parsed.casefold()
+                if canonical not in seen:
+                    seen.add(canonical)
+                    parsed_values.append(canonical)
+            aliases.append(tuple(parsed_values))
+        values = _agree_aliases(aliases, field=keys[0], set_like=True)
+        if values is _ABSENT:
             return []
-        return [
-            (
-                "redacted"
-                if _SECRET_BEARING.search(value) or _PERSONAL_DATA.search(value)
-                else value[:100]
-            )
-            for value in values[:maximum]
-        ]
+        return list(values[:maximum])
 
     @staticmethod
     def _safe_blocks(value: Any, *, maximum_blocks: int) -> list[dict[str, str]]:
@@ -1087,26 +1159,25 @@ class StructuredAIRanker:
     def _safe_ai_output(value: Any, *, field: str) -> str:
         if type(value) is not str:
             raise TypeError(f"AI {field} must be a string")
-        if len(value) > 300:
-            raise ValueError(f"AI {field} item is too long")
-        unescaped = html.unescape(value)
-        if _MARKUP.search(unescaped) or "<" in unescaped or ">" in unescaped:
-            raise ValueError(f"AI {field} must not contain markup")
-        parsed = _SPACES.sub(" ", unescaped).strip()
-        if "\0" in parsed:
-            raise ValueError(f"AI {field} must not contain NUL")
-        if _SECRET_BEARING.search(parsed):
-            raise ValueError(f"AI {field} must not contain secret-bearing text")
-        if _PERSONAL_DATA.search(parsed):
-            raise ValueError(f"AI {field} must not contain personal data")
-        return parsed
+        return sanitize_text(
+            value,
+            field=f"AI {field}",
+            maximum=300,
+            allow_empty=True,
+            markup="reject",
+            sensitive="reject",
+        )
 
     @staticmethod
     def _grounding_values(value: Any) -> tuple[str, ...]:
         grounded: list[str] = []
         if type(value) is str:
-            parsed = _SPACES.sub(" ", value).strip().casefold()
-            if parsed:
+            parsed = _text(
+                value,
+                field="AI grounding fact",
+                maximum=20_000,
+            ).casefold()
+            if parsed and parsed != "redacted":
                 grounded.append(parsed)
         elif isinstance(value, Mapping):
             for key, item in value.items():
@@ -1117,20 +1188,6 @@ class StructuredAIRanker:
             for item in value:
                 grounded.extend(StructuredAIRanker._grounding_values(item))
         return tuple(grounded)
-
-    @staticmethod
-    def _grounded_in_fact(phrase: str, fact: str) -> bool:
-        start = 0
-        while True:
-            index = fact.find(phrase, start)
-            if index < 0:
-                return False
-            before_ok = index == 0 or not fact[index - 1].isalnum()
-            end = index + len(phrase)
-            after_ok = end == len(fact) or not fact[end].isalnum()
-            if before_ok and after_ok:
-                return True
-            start = index + 1
 
     @classmethod
     def _decision(
@@ -1167,13 +1224,15 @@ class StructuredAIRanker:
             for item in value["reasons"]
         )
         grounding = cls._grounding_values(payload)
-        for item in evidence:
-            normalized = item.casefold()
-            if normalized and not any(
-                cls._grounded_in_fact(normalized, fact)
-                for fact in grounding
-            ):
-                raise ValueError("AI evidence is not grounded in supplied facts")
+        for field, items in (("evidence", evidence), ("reasons", reasons)):
+            for item in items:
+                if item and not any(
+                    phrase_matches_fact(item, fact)
+                    for fact in grounding
+                ):
+                    raise ValueError(
+                        f"AI {field} is not grounded in supplied facts"
+                    )
         return AIDecision(
             available=True,
             suitable=value["suitable"],
