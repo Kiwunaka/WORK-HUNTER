@@ -562,6 +562,26 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return config
 
 
+@contextmanager
+def locked_current_config_snapshot(
+    path: str | Path,
+) -> Iterator[dict[str, Any] | None]:
+    """Yield the current disk snapshot while excluding cooperating writers.
+
+    A missing file is represented by ``None``. No in-memory fallback is used,
+    so service-owned authorization fields cannot be projected from stale state.
+    The process and cross-process locks remain held until the caller exits.
+    """
+    path = Path(path)
+    owner_pid = os.getpid()
+    with _CONFIG_WRITE_LOCK:
+        with _config_file_lock(path):
+            snapshot = load_config(path) if path.exists() else None
+            _assert_config_transaction_owner(owner_pid)
+            yield None if snapshot is None else copy.deepcopy(snapshot)
+            _assert_config_transaction_owner(owner_pid)
+
+
 def merge_config_snapshot_changes(
     baseline: dict[str, Any],
     desired: dict[str, Any],

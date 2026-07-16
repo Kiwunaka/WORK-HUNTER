@@ -29,6 +29,7 @@ from .config import (
     database_path,
     default_config,
     load_config,
+    locked_current_config_snapshot,
     mask_secrets,
     merge_config_snapshot_changes,
     merge_masked_config,
@@ -1029,7 +1030,13 @@ class WorkHunter:
         if self._storage is None:
             storage = Storage(database_path(self.root))
             try:
-                self._reconcile_hh_autopilot_startup(storage)
+                with locked_current_config_snapshot(
+                    self.config_path
+                ) as config_snapshot:
+                    self._reconcile_hh_autopilot_startup(
+                        storage,
+                        config_snapshot,
+                    )
                 profile_ids = _effective_hh_auth_profile_ids(
                     self.config,
                     root=self.root,
@@ -1045,7 +1052,11 @@ class WorkHunter:
             self._storage = storage
         return self._storage
 
-    def _reconcile_hh_autopilot_startup(self, storage: Storage) -> None:
+    def _reconcile_hh_autopilot_startup(
+        self,
+        storage: Storage,
+        config_snapshot: dict[str, Any] | None,
+    ) -> None:
         # Local imports keep the general service/config import graph acyclic.
         from .hh_autopilot.config import (
             AutopilotConfigError,
@@ -1054,9 +1065,9 @@ class WorkHunter:
         from .hh_autopilot.repository import AutopilotRepository
 
         projections: dict[str, tuple[bool, int | None]] = {}
-        if self.config_path.exists():
+        if config_snapshot is not None:
             try:
-                settings = parse_autopilot_settings(self.config)
+                settings = parse_autopilot_settings(config_snapshot)
             except AutopilotConfigError:
                 # A malformed autonomous policy is not repairable at startup.
                 # Empty projection revokes/stops every current autopilot account.

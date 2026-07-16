@@ -139,16 +139,6 @@ class HHAutopilotAuthorizer:
             )
             fresh_settings = parse_autopilot_settings(projected)
             for account_id, expected_hash in hashes.items():
-                active_grant = self.repository.active_grant(
-                    account_id, "applications"
-                )
-                if (
-                    active_grant is None
-                    or active_grant.generation != generations[account_id]
-                ):
-                    raise AuthorizationDenied("authorization_state_mismatch")
-                if active_grant.policy_hash != expected_hash:
-                    raise AuthorizationDenied("policy_hash_mismatch")
                 fresh_account = self._find_account(fresh_settings, account_id)
                 if (
                     not fresh_account.enabled
@@ -165,6 +155,15 @@ class HHAutopilotAuthorizer:
                     != expected_hash
                 ):
                     raise AuthorizationDenied("policy_hash_mismatch")
+            try:
+                self.repository.validate_exact_active_grants(
+                    {
+                        account_id: (generations[account_id], expected_hash)
+                        for account_id, expected_hash in hashes.items()
+                    }
+                )
+            except RepositoryAuthorizationDenied as exc:
+                raise AuthorizationDenied(exc.code) from exc
         except BaseException:
             self.repository.revoke_exact_generations(
                 generations,

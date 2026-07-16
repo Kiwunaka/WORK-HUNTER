@@ -373,6 +373,34 @@ def _authorization_annotations(
     return annotations
 
 
+def _exact_grant_expectations(
+    values: Any,
+) -> dict[str, tuple[int, str]]:
+    if not isinstance(values, Mapping):
+        raise TypeError("expectations must be a mapping")
+    expectations: dict[str, tuple[int, str]] = {}
+    for raw_account_id, raw_expectation in values.items():
+        account_id = _canonical_identifier(
+            raw_account_id, field="expectation account_id"
+        )
+        if account_id in expectations:
+            raise ValueError("expectations contains a duplicate account identifier")
+        if not isinstance(raw_expectation, tuple) or len(raw_expectation) != 2:
+            raise TypeError("expectation must be a generation/policy_hash tuple")
+        raw_generation, raw_policy_hash = raw_expectation
+        generation = _integer(
+            raw_generation,
+            field="expectation generation",
+            minimum=1,
+        )
+        policy_hash = _required_text(
+            raw_policy_hash,
+            field="expectation policy_hash",
+        )
+        expectations[account_id] = (generation, policy_hash)
+    return expectations
+
+
 class AutopilotRepository:
     def __init__(self, storage: Storage):
         if not isinstance(storage, Storage):
@@ -821,6 +849,24 @@ class AutopilotRepository:
             (scope,),
         ).fetchall()
         return [self._grant_from_row(row) for row in rows]
+
+    def validate_exact_active_grants(
+        self,
+        expectations: Mapping[str, tuple[int, str]],
+    ) -> None:
+        """Atomically validate every selected active generation and policy hash."""
+        validated = _exact_grant_expectations(expectations)
+        if not validated:
+            return
+        with self.immediate():
+            for account_id, (generation, policy_hash) in validated.items():
+                grant = self._active_grant_for_update(account_id)
+                if grant is None or grant.generation != generation:
+                    raise RepositoryAuthorizationDenied(
+                        "authorization_state_mismatch"
+                    )
+                if grant.policy_hash != policy_hash:
+                    raise RepositoryAuthorizationDenied("policy_hash_mismatch")
 
     def reconcile_authorization_projection(
         self,
