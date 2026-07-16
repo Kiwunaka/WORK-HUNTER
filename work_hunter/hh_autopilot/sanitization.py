@@ -49,6 +49,11 @@ _AUTH_SCHEME = re.compile(
     r"(?<![A-Za-z0-9_])(?P<scheme>bearer|basic)\s+(?P<payload>[^\s,;]+)",
     re.IGNORECASE,
 )
+_BEARER_TECHNICAL_DESCRIPTORS = frozenset({"token-based", "jwt-based"})
+_AUTHENTICATION_CONTINUATION = re.compile(
+    r"^\s+authentication\b",
+    re.IGNORECASE,
+)
 _EMAIL_CANDIDATE = re.compile(
     r"""
     (?<![\w@])
@@ -222,8 +227,17 @@ def _basic_payload_is_credential(payload: str) -> bool:
     )
 
 
-def _bearer_payload_is_credential(payload: str) -> bool:
+def _bearer_payload_is_credential(
+    payload: str,
+    *,
+    continuation: str,
+) -> bool:
     unquoted = payload.strip("\"'")
+    if (
+        unquoted.casefold() in _BEARER_TECHNICAL_DESCRIPTORS
+        and _AUTHENTICATION_CONTINUATION.match(continuation) is not None
+    ):
+        return False
     if any(character.isdigit() for character in unquoted):
         return True
     if any(not character.isalnum() for character in unquoted):
@@ -241,7 +255,10 @@ def _contains_auth_scheme_credential(value: str) -> bool:
         if match.group("scheme").casefold() == "basic":
             if _basic_payload_is_credential(payload):
                 return True
-        elif _bearer_payload_is_credential(payload):
+        elif _bearer_payload_is_credential(
+            payload,
+            continuation=value[match.end() :],
+        ):
             return True
     return False
 
@@ -312,6 +329,7 @@ def sanitize_text(
 ) -> str:
     decoded = decode_html_fixed_point(value, field=field)
     security_view = _security_view(decoded, field=field)
+    compact_decoded: str | None = None
     has_markup = (
         _MARKUP.search(decoded) is not None
         or "<" in decoded
@@ -327,8 +345,14 @@ def sanitize_text(
     if has_markup:
         if markup == "reject" or _DANGEROUS_MARKUP.search(decoded):
             raise ValueError(f"{field} must not contain markup")
+        compact_decoded = _MARKUP.sub("", decoded)
         decoded = _MARKUP.sub(" ", decoded)
-        if "<" in decoded or ">" in decoded:
+        if (
+            "<" in compact_decoded
+            or ">" in compact_decoded
+            or "<" in decoded
+            or ">" in decoded
+        ):
             raise ValueError(f"{field} contains malformed markup")
     normalized = _SPACES.sub(" ", decoded).strip()
     if canonical:
@@ -338,16 +362,25 @@ def sanitize_text(
     if "\0" in normalized:
         raise ValueError(f"{field} must not contain NUL")
     returned_security_view = _security_view(normalized, field=field)
-    returned_has_markup = (
-        _MARKUP.search(returned_security_view) is not None
-        or "<" in returned_security_view
-        or ">" in returned_security_view
+    compact_security_view = (
+        _security_view(compact_decoded, field=field)
+        if compact_decoded is not None
+        else returned_security_view
     )
-    if returned_has_markup:
-        raise ValueError(f"{field} contains markup after normalization")
-    if (
-        _contains_sensitive_security_view(security_view)
-        or _contains_sensitive_security_view(returned_security_view)
+    post_strip_security_views = (
+        compact_security_view,
+        returned_security_view,
+    )
+    for post_strip_security_view in post_strip_security_views:
+        if (
+            _MARKUP.search(post_strip_security_view) is not None
+            or "<" in post_strip_security_view
+            or ">" in post_strip_security_view
+        ):
+            raise ValueError(f"{field} contains markup after normalization")
+    if any(
+        _contains_sensitive_security_view(view)
+        for view in (security_view, *post_strip_security_views)
     ):
         if sensitive == "redact":
             return "redacted"

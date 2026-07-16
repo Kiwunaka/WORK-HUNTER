@@ -65,10 +65,14 @@ AUTH_TECHNICAL_PROSE = (
     "Basic SQL",
     "Experience with Bearer token authentication",
     "Bearer platform engineer",
+    "Experience with Bearer token-based authentication",
+    "Bearer JWT-based authentication",
 )
 REAL_AUTH_CREDENTIALS = (
     "Bearer abc123",
     "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+    "Bearer opaque-token",
+    "Bearer AbCdEfGhIjKlMnOpQrStUvWx",
     "Basic dXNlcjpwYXNz",
     "Authorization: Basic dXNlcjpwYXNz",
     "Authorization: Bearer opaque-token",
@@ -1604,10 +1608,20 @@ def test_structured_ai_never_sends_composite_encoded_sensitive_text(
     assert calls == []
 
 
-def test_structured_ai_rescans_after_stripping_ordinary_html() -> None:
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "Bearer<b></b> abc123",
+        "Bea<b></b>rer abc123",
+        "access_<b></b>token=abc123",
+    ],
+)
+def test_structured_ai_rescans_both_html_stripped_views(
+    unsafe: str,
+) -> None:
     calls: list[Any] = []
     vacancy, resume, candidate = _facts()
-    vacancy["description"] = "Bearer<b></b> abc123"
+    vacancy["description"] = unsafe
     decision = StructuredAIRanker(
         {"model": "test"},
         structured_call=lambda *args, **kwargs: calls.append((args, kwargs)),
@@ -1615,6 +1629,31 @@ def test_structured_ai_rescans_after_stripping_ordinary_html() -> None:
 
     assert decision.available is False
     assert calls == []
+
+
+def test_structured_ai_preserves_spaces_when_stripping_safe_html() -> None:
+    captured: dict[str, Any] = {}
+
+    def structured_call(messages, *args, **kwargs):
+        captured["payload"] = json.loads(messages[1]["content"])
+        return SimpleNamespace(
+            parsed={
+                "suitable": True,
+                "confidence": 0.9,
+                "evidence": [],
+                "reasons": [],
+            }
+        )
+
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = "Python<b></b>developer"
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=structured_call,
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is True
+    assert captured["payload"]["vacancy"]["description"] == "Python developer"
 
 
 @pytest.mark.parametrize("prose", AUTH_TECHNICAL_PROSE)
