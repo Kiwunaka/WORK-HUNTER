@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import re
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ STABLE_OUTCOME_CODES = frozenset(
         "ai_unavailable",
         "manual_assessment",
         "manual_captcha",
+        "form_required",
         "hh_daily_limit",
         "rate_limited",
         "auth_expired",
@@ -130,6 +132,228 @@ class DispatchOutcome:
     retry_after_seconds: int | None = None
     location: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if type(self.code) is not str or not self.code.strip() or "\0" in self.code:
+            raise ValueError("dispatch outcome code must be nonempty text")
+        if self.code.strip() not in STABLE_OUTCOME_CODES:
+            raise ValueError("dispatch outcome code must be stable")
+        if not isinstance(self.certainty, DeliveryCertainty):
+            raise TypeError("dispatch outcome certainty must be DeliveryCertainty")
+        if self.status_code is not None and (
+            type(self.status_code) is not int
+            or not 100 <= self.status_code <= 599
+        ):
+            raise ValueError("dispatch outcome status_code must be an HTTP status")
+        if self.retry_after_seconds is not None and (
+            type(self.retry_after_seconds) is not int
+            or not 0 <= self.retry_after_seconds <= 86_400
+        ):
+            raise ValueError(
+                "dispatch outcome retry_after_seconds must be in 0..86400"
+            )
+        if (
+            type(self.location) is not str
+            or "\0" in self.location
+            or len(self.location.strip()) > 2_000
+        ):
+            raise TypeError(
+                "dispatch outcome location must be bounded text without NUL"
+            )
+        if not isinstance(self.payload, dict):
+            raise TypeError("dispatch outcome payload must be a dictionary")
+        detached_payload = _json_value(
+            self.payload,
+            field_name="dispatch outcome payload",
+        )
+        if not isinstance(detached_payload, dict):
+            raise TypeError("dispatch outcome payload must be a dictionary")
+        if len(
+            json.dumps(
+                detached_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ) > 16_384:
+            raise ValueError("dispatch outcome payload is too large")
+        object.__setattr__(self, "code", self.code.strip())
+        object.__setattr__(self, "location", self.location.strip())
+        object.__setattr__(self, "payload", detached_payload)
+
+
+@dataclass(frozen=True)
+class DispatchConfigSnapshot:
+    account_id: str
+    enabled: bool
+    paused: bool
+    authorization_generation: int | None
+    policy_hash: str
+    within_scheduler_window: bool
+    timezone_name: str
+    daily_limit: int
+    run_limit: int
+    resume_policy: str
+    cover_letter_mode: str
+    lease_ttl_seconds: int
+    request_timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        account_id = _text(
+            self.account_id,
+            field_name="snapshot.account_id",
+            canonical=True,
+        )
+        if account_id != self.account_id:
+            raise ValueError("snapshot.account_id must be canonical")
+        if type(self.enabled) is not bool or type(self.paused) is not bool:
+            raise TypeError("snapshot enabled/paused must be booleans")
+        if self.authorization_generation is not None:
+            _int(
+                self.authorization_generation,
+                field_name="snapshot.authorization_generation",
+                minimum=1,
+            )
+        policy_hash = _text(
+            self.policy_hash,
+            field_name="snapshot.policy_hash",
+        )
+        if len(policy_hash) > 256:
+            raise ValueError("snapshot.policy_hash is too long")
+        if type(self.within_scheduler_window) is not bool:
+            raise TypeError("snapshot window flag must be a boolean")
+        timezone_name = _text(
+            self.timezone_name,
+            field_name="snapshot.timezone_name",
+        )
+        if len(timezone_name) > 128:
+            raise ValueError("snapshot.timezone_name is too long")
+        _int(self.daily_limit, field_name="snapshot.daily_limit", minimum=1)
+        _int(self.run_limit, field_name="snapshot.run_limit", minimum=1)
+        if self.resume_policy not in {"best_resume_only", "per_resume"}:
+            raise ValueError("snapshot.resume_policy is unsupported")
+        if self.cover_letter_mode not in {"none", "template", "ai"}:
+            raise ValueError("snapshot.cover_letter_mode is unsupported")
+        _int(
+            self.lease_ttl_seconds,
+            field_name="snapshot.lease_ttl_seconds",
+            minimum=1,
+            maximum=600,
+        )
+        _int(
+            self.request_timeout_seconds,
+            field_name="snapshot.request_timeout_seconds",
+            minimum=1,
+            maximum=600,
+        )
+        if self.request_timeout_seconds >= self.lease_ttl_seconds:
+            raise ValueError("snapshot request timeout must fit inside lease TTL")
+
+
+@dataclass(frozen=True)
+class PreparedDispatch:
+    item_id: int
+    item_version: int
+    attempt_id: int
+    reservation_id: int
+    run_id: int
+    account_id: str
+    vacancy_id: str
+    resume_id: str
+    authorization_kind: AuthorizationKind
+    authorization_ref: str
+    policy_hash: str
+    fencing_token: int
+    cover_letter_mode: str
+    timezone_name: str
+    attempt_count: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "item_id",
+            "item_version",
+            "attempt_id",
+            "reservation_id",
+            "run_id",
+            "fencing_token",
+            "attempt_count",
+        ):
+            _int(
+                getattr(self, field_name),
+                field_name=f"prepared.{field_name}",
+                minimum=0 if field_name == "item_version" else 1,
+            )
+        account_id = _text(
+            self.account_id,
+            field_name="prepared.account_id",
+            canonical=True,
+        )
+        if account_id != self.account_id:
+            raise ValueError("prepared.account_id must be canonical")
+        _text(self.vacancy_id, field_name="prepared.vacancy_id")
+        resume_id = _text(
+            self.resume_id,
+            field_name="prepared.resume_id",
+            canonical=True,
+        )
+        if resume_id != self.resume_id:
+            raise ValueError("prepared.resume_id must be canonical")
+        if not isinstance(self.authorization_kind, AuthorizationKind):
+            raise TypeError("prepared.authorization_kind is invalid")
+        _text(self.authorization_ref, field_name="prepared.authorization_ref")
+        _text(self.policy_hash, field_name="prepared.policy_hash")
+        if self.cover_letter_mode not in {"none", "template", "ai"}:
+            raise ValueError("prepared.cover_letter_mode is unsupported")
+        _text(self.timezone_name, field_name="prepared.timezone_name")
+
+
+@dataclass(frozen=True)
+class RetryDecision:
+    target: AutopilotState
+    reason: str
+    next_attempt_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, AutopilotState):
+            raise TypeError("retry target must be AutopilotState")
+        _text(self.reason, field_name="retry reason")
+        if type(self.next_attempt_at) is not str:
+            raise TypeError("next_attempt_at must be text")
+        if self.next_attempt_at:
+            try:
+                parsed = datetime.fromisoformat(self.next_attempt_at)
+            except ValueError as exc:
+                raise ValueError("next_attempt_at must be ISO-8601") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("next_attempt_at must be timezone-aware")
+        if self.target in {
+            AutopilotState.RETRY_WAIT,
+            AutopilotState.RECONCILING,
+        }:
+            if not self.next_attempt_at:
+                raise ValueError("retry/reconciliation requires next_attempt_at")
+        elif self.next_attempt_at:
+            raise ValueError("terminal retry decision cannot have next_attempt_at")
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    item_id: int
+    attempt_id: int | None
+    reservation_id: int | None
+    state: AutopilotState
+    outcome_code: str
+
+    def __post_init__(self) -> None:
+        _int(self.item_id, field_name="execution.item_id", minimum=1)
+        for field_name in ("attempt_id", "reservation_id"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _int(value, field_name=f"execution.{field_name}", minimum=1)
+        if not isinstance(self.state, AutopilotState):
+            raise TypeError("execution.state must be AutopilotState")
+        if self.outcome_code not in STABLE_OUTCOME_CODES:
+            raise ValueError("execution.outcome_code must be stable")
 
 
 def _text(value: Any, *, field_name: str, canonical: bool = False) -> str:

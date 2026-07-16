@@ -7,20 +7,29 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from work_hunter.storage import Storage, redact_for_storage
 
+from .sanitization import sanitize_text
 from .state_machine import assert_transition
 from .types import (
     AIDecision,
+    AuthorizationKind,
     AutopilotState,
+    DeliveryCertainty,
+    DispatchConfigSnapshot,
+    DispatchOutcome,
     FilterDecision,
+    LiteralConfirmation,
+    LiveAuthorization,
     NormalizedVacancy,
+    PreparedDispatch,
     QuotaReservationState,
     RankScore,
     RankingDecision,
+    RetryDecision,
     RetryStage,
     SearchPage,
     SearchRequest,
@@ -248,8 +257,12 @@ class ItemRecord:
     deterministic_score: float | None
     ai_data: dict[str, Any]
     published_at: str
+    application_attempt_count: int
+    reconciliation_count: int
+    next_attempt_at: str
     last_outcome_code: str
     active_attempt_id: int | None
+    challenge_id: int | None
 
     @property
     def account_profile_id(self) -> str:
@@ -385,6 +398,50 @@ class AuthorizationReconciliationRecord:
 class LiveAuthorizationSnapshot:
     grant: GrantRecord
     run: RunRecord
+
+
+@dataclass(frozen=True)
+class ApplicationAttemptRecord:
+    id: int
+    account_id: str
+    run_id: int
+    item_id: int
+    autopilot_attempt_id: int
+    vacancy_id: str
+    resume_id: str
+    status: str
+    reason: str
+    authorization_kind: AuthorizationKind
+    authorization_ref: str
+    policy_hash: str
+    delivery_certainty: DeliveryCertainty | None
+    raw_result: dict[str, Any]
+    created_at: str
+    dispatched_at: str
+    finished_at: str
+
+    @property
+    def raw_result_json(self) -> str:
+        return json.dumps(
+            self.raw_result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+@dataclass(frozen=True)
+class ApplicationGuardRecord:
+    account_id: str
+    source: str
+    source_id: str
+    owner_attempt_id: int | None
+    first_resume_id: str
+    status: str
+    application_id: int | None
+    application_count: int
+    created_at: str
+    updated_at: str
 
 
 def _utc_now() -> str:
@@ -702,6 +759,101 @@ def _ranked_item_sort_key(
 
 def _json_copy(value: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def _sanitize_dispatch_value(
+    value: Any,
+    *,
+    field: str,
+    depth: int = 0,
+) -> Any:
+    if depth > 5:
+        return "redacted"
+    if value is None or type(value) in {bool, int}:
+        return value
+    if type(value) is float:
+        return value if math.isfinite(value) else "redacted"
+    if isinstance(value, str):
+        try:
+            return sanitize_text(
+                value,
+                field=field,
+                maximum=1_000,
+                allow_empty=True,
+                markup="strip",
+                sensitive="redact",
+                overflow="truncate",
+            )
+        except (TypeError, ValueError):
+            return "redacted"
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 100 or not isinstance(key, str):
+                break
+            safe_key = key.strip()[:100]
+            if not safe_key or "\0" in safe_key:
+                continue
+            result[safe_key] = _sanitize_dispatch_value(
+                item,
+                field=f"{field}.{safe_key}",
+                depth=depth + 1,
+            )
+        return redact_for_storage(result)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [
+            _sanitize_dispatch_value(
+                item,
+                field=f"{field}[{index}]",
+                depth=depth + 1,
+            )
+            for index, item in enumerate(value[:100])
+        ]
+    return "redacted"
+
+
+def _dispatch_storage_payload(outcome: DispatchOutcome) -> dict[str, Any]:
+    if type(outcome) is not DispatchOutcome:
+        raise TypeError("outcome must be an exact DispatchOutcome")
+    sanitized = _sanitize_dispatch_value(
+        {
+            "code": outcome.code,
+            "certainty": outcome.certainty.value,
+            "status_code": outcome.status_code,
+            "retry_after_seconds": outcome.retry_after_seconds,
+            "location": outcome.location,
+            "payload": outcome.payload,
+        },
+        field="dispatch",
+    )
+    if not isinstance(sanitized, dict):
+        raise ValueError("sanitized dispatch outcome is not an object")
+    return sanitized
+
+
+def _dispatch_event_metadata(outcome: DispatchOutcome) -> dict[str, Any]:
+    return {
+        "certainty": outcome.certainty.value,
+        "status_code": outcome.status_code,
+        "retry_after_seconds": outcome.retry_after_seconds,
+    }
+
+
+def _remote_negotiation_id(stored_outcome: dict[str, Any]) -> str | None:
+    payload = stored_outcome.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    for key in ("negotiation_id", "id"):
+        value = payload.get(key)
+        if (
+            isinstance(value, str)
+            and value
+            and value != "redacted"
+            and len(value) <= 200
+            and "\0" not in value
+        ):
+            return value
+    return None
 
 
 def _reject_json_constant(value: str) -> None:
@@ -2377,6 +2529,59 @@ class AutopilotRepository:
         ).fetchone()
         return _persisted_integer(row["total"], field="challenge count")
 
+    def count_applications(
+        self,
+        account_id: str,
+        vacancy_id: str,
+        resume_id: str,
+    ) -> int:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        vacancy_id = _required_text(vacancy_id, field="vacancy_id")
+        resume_id = _canonical_identifier(resume_id, field="resume_id")
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM applications AS application
+            JOIN jobs AS job ON job.id = application.job_id
+            WHERE application.account_profile_id = ?
+              AND job.source = 'hh' AND job.source_id = ?
+              AND application.resume_id = ?
+            """,
+            (account_id, vacancy_id, resume_id),
+        ).fetchone()
+        return _persisted_integer(row["total"], field="application count")
+
+    def get_guard(
+        self,
+        account_id: str,
+        source: str,
+        source_id: str,
+    ) -> ApplicationGuardRecord | None:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        source = _canonical_identifier(source, field="source")
+        source_id = _required_text(source_id, field="source_id")
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_application_account_guards
+            WHERE account_profile_id = ? AND source = ? AND source_id = ?
+            """,
+            (account_id, source, source_id),
+        ).fetchone()
+        return self._guard_from_row(row) if row is not None else None
+
+    def get_application_attempt(
+        self,
+        attempt_id: int | None,
+    ) -> ApplicationAttemptRecord | None:
+        if attempt_id is None:
+            return None
+        attempt_id = _integer(attempt_id, field="attempt_id", minimum=1)
+        row = self.conn.execute(
+            "SELECT * FROM hh_application_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()
+        return self._attempt_from_row(row) if row is not None else None
+
     def list_shadow_results(self, run_id: int) -> list[ShadowResultRecord]:
         run_id = _integer(run_id, field="run_id", minimum=1)
         rows = self.conn.execute(
@@ -2729,6 +2934,106 @@ class AutopilotRepository:
                 )
                 generations[account_id] = generation
             return generations
+
+    def create_one_shot_authorization(
+        self,
+        reference_id: str,
+        *,
+        authorization_type: str,
+        account_id: str,
+        targets: Sequence[tuple[str, str]],
+        max_success: int,
+        expires_at: datetime | str,
+        now: datetime | str | None = None,
+    ) -> None:
+        reference_id = _required_text(reference_id, field="reference_id")
+        if authorization_type not in {"manual", "canary"}:
+            raise ValueError("authorization_type must be manual or canary")
+        account_id = _canonical_identifier(account_id, field="account_id")
+        if isinstance(targets, (str, bytes)) or not isinstance(targets, Sequence):
+            raise TypeError("targets must be a sequence")
+        if not targets or len(targets) > 500:
+            raise ValueError("targets must contain 1..500 exact targets")
+        parsed_targets: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, target in enumerate(targets):
+            if not isinstance(target, tuple) or len(target) != 2:
+                raise TypeError(
+                    f"targets[{index}] must be a resume/vacancy tuple"
+                )
+            resume_id = _canonical_identifier(
+                target[0],
+                field=f"targets[{index}].resume_id",
+            )
+            vacancy_id = _required_text(
+                target[1],
+                field=f"targets[{index}].vacancy_id",
+            )
+            identity = (resume_id, vacancy_id)
+            if identity in seen:
+                raise ValueError("targets contains a duplicate exact target")
+            seen.add(identity)
+            parsed_targets.append(identity)
+        max_success = _integer(
+            max_success,
+            field="max_success",
+            minimum=1,
+        )
+        if max_success > len(parsed_targets):
+            raise ValueError("max_success cannot exceed the immutable target count")
+        if authorization_type == "canary" and (
+            max_success != 1 or len(parsed_targets) != 1
+        ):
+            raise ValueError("canary requires exactly one target and one success")
+        instant = _instant(now, field="now")
+        expiry = _instant(expires_at, field="expires_at")
+        if expiry <= instant:
+            raise ValueError("one-shot authorization must expire in the future")
+
+        with self.immediate():
+            existing = self.conn.execute(
+                """
+                SELECT 1 FROM hh_autopilot_one_shot_authorizations
+                WHERE reference_id = ?
+                """,
+                (reference_id,),
+            ).fetchone()
+            if existing is not None:
+                raise StaleWrite("one-shot authorization reference already exists")
+            self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_one_shot_authorizations (
+                    reference_id, authorization_type, account_profile_id,
+                    max_success, consumed_success, active, created_at,
+                    expires_at, finished_at
+                ) VALUES (?, ?, ?, ?, 0, 1, ?, ?, '')
+                """,
+                (
+                    reference_id,
+                    authorization_type,
+                    account_id,
+                    max_success,
+                    instant.isoformat(),
+                    expiry.isoformat(),
+                ),
+            )
+            self.conn.executemany(
+                """
+                INSERT INTO hh_autopilot_one_shot_targets (
+                    authorization_ref, resume_id, vacancy_id, status,
+                    active_attempt_id, updated_at
+                ) VALUES (?, ?, ?, 'pending', NULL, ?)
+                """,
+                [
+                    (
+                        reference_id,
+                        resume_id,
+                        vacancy_id,
+                        instant.isoformat(),
+                    )
+                    for resume_id, vacancy_id in parsed_targets
+                ],
+            )
 
     def active_grant(
         self, account_id: str, scope: str = APPLICATION_SCOPE
@@ -3498,6 +3803,1180 @@ class AutopilotRepository:
         instant = _instant(now, field="now")
         with self.immediate():
             self._assert_fence(account_id, fencing_token, instant)
+
+    def prepare_dispatch(
+        self,
+        *,
+        item_id: int,
+        expected_version: int,
+        authorization: LiteralConfirmation | LiveAuthorization,
+        fencing_token: int,
+        snapshot: DispatchConfigSnapshot,
+        now: datetime | str | None = None,
+    ) -> PreparedDispatch:
+        """Atomically create the single durable boundary for one application POST."""
+        from work_hunter.safety import require_hh_dispatch_authorization
+
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        expected_version = _integer(
+            expected_version,
+            field="expected_version",
+        )
+        fencing_token = _integer(
+            fencing_token,
+            field="fencing_token",
+            minimum=1,
+        )
+        if type(snapshot) is not DispatchConfigSnapshot:
+            raise TypeError("snapshot must be an exact DispatchConfigSnapshot")
+        if type(authorization) not in {LiteralConfirmation, LiveAuthorization}:
+            raise PermissionError("typed HH application authorization required")
+        instant = _instant(now, field="now")
+        timezone_name, local_timezone = _timezone(snapshot.timezone_name)
+        local_date = instant.astimezone(local_timezone).date().isoformat()
+
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            if current.version != expected_version:
+                raise StaleWrite(f"item {item_id} version changed")
+            if current.state is not AutopilotState.READY:
+                raise StaleWrite("dispatch preparation requires a ready item")
+            if snapshot.account_id != current.account_id:
+                raise RepositoryAuthorizationDenied(
+                    "authorization_state_mismatch"
+                )
+            require_hh_dispatch_authorization(
+                authorization,
+                account_id=current.account_id,
+                lease_account_id=current.account_id,
+                fencing_token=fencing_token,
+            )
+            self._assert_fence(current.account_id, fencing_token, instant)
+            self._assert_cooldown_for_update(current.account_id, instant)
+            if self._kill_switch_active_for_update(current.account_id):
+                raise RepositoryAuthorizationDenied("kill_switch_active")
+
+            run = self._run_for_update(current.last_run_id)
+            if (
+                run.account_id != current.account_id
+                or run.status != "running"
+                or run.fencing_token != fencing_token
+            ):
+                raise RepositoryAuthorizationDenied("run_not_active")
+
+            authorization_kind: AuthorizationKind
+            authorization_ref: str
+            policy_hash: str
+            literal_type = ""
+            if type(authorization) is LiveAuthorization:
+                live = authorization
+                if (
+                    not snapshot.enabled
+                    or snapshot.authorization_generation is None
+                ):
+                    raise RepositoryAuthorizationDenied(
+                        "authorization_state_mismatch"
+                    )
+                if snapshot.paused:
+                    raise RepositoryAuthorizationDenied(
+                        "autopilot_disabled_or_paused"
+                    )
+                if not snapshot.within_scheduler_window:
+                    raise RepositoryAuthorizationDenied(
+                        "outside_scheduler_window"
+                    )
+                if snapshot.policy_hash != live.policy_hash:
+                    raise RepositoryAuthorizationDenied("policy_hash_mismatch")
+                grant = self._active_grant_for_update(current.account_id)
+                if (
+                    grant is None
+                    or grant.id != live.grant_id
+                    or grant.generation != snapshot.authorization_generation
+                ):
+                    raise RepositoryAuthorizationDenied(
+                        "authorization_state_mismatch"
+                    )
+                if grant.policy_hash != snapshot.policy_hash:
+                    raise RepositoryAuthorizationDenied("policy_hash_mismatch")
+                if self._pause_active_for_update(current.account_id):
+                    raise RepositoryAuthorizationDenied(
+                        "autopilot_disabled_or_paused"
+                    )
+                if (
+                    live.scope != APPLICATION_SCOPE
+                    or live.run_id != run.id
+                    or live.fencing_token != fencing_token
+                    or run.grant_id != grant.id
+                    or run.policy_hash != grant.policy_hash
+                ):
+                    raise RepositoryAuthorizationDenied(
+                        "authorization_state_mismatch"
+                    )
+                authorization_kind = AuthorizationKind.AUTOPILOT
+                authorization_ref = str(grant.id)
+                policy_hash = grant.policy_hash
+            else:
+                literal = cast(LiteralConfirmation, authorization)
+                row = self.conn.execute(
+                    """
+                    SELECT * FROM hh_autopilot_one_shot_authorizations
+                    WHERE reference_id = ?
+                    """,
+                    (literal.reference_id,),
+                ).fetchone()
+                if row is None:
+                    raise RepositoryAuthorizationDenied(
+                        "literal_authorization_inactive"
+                    )
+                if (
+                    str(row["account_profile_id"]) != current.account_id
+                    or _persisted_integer(
+                        row["active"],
+                        field="one-shot active",
+                    )
+                    != 1
+                ):
+                    raise RepositoryAuthorizationDenied(
+                        "literal_authorization_inactive"
+                    )
+                expiry = _instant(
+                    str(row["expires_at"]),
+                    field="one-shot expires_at",
+                )
+                consumed = _persisted_integer(
+                    row["consumed_success"],
+                    field="one-shot consumed_success",
+                )
+                maximum = _persisted_integer(
+                    row["max_success"],
+                    field="one-shot max_success",
+                    minimum=1,
+                )
+                if expiry <= instant or consumed >= maximum:
+                    raise RepositoryAuthorizationDenied(
+                        "literal_authorization_inactive"
+                    )
+                literal_type = _persisted_text(
+                    row["authorization_type"],
+                    field="one-shot authorization_type",
+                )
+                expected_trigger = (
+                    "canary" if literal_type == "canary" else "manual"
+                )
+                if run.trigger != expected_trigger:
+                    raise RepositoryAuthorizationDenied(
+                        "literal_authorization_inactive"
+                    )
+                target = self.conn.execute(
+                    """
+                    SELECT status, active_attempt_id
+                    FROM hh_autopilot_one_shot_targets
+                    WHERE authorization_ref = ? AND resume_id = ?
+                      AND vacancy_id = ?
+                    """,
+                    (
+                        literal.reference_id,
+                        current.resume_id,
+                        current.vacancy_id,
+                    ),
+                ).fetchone()
+                if target is None:
+                    raise RepositoryAuthorizationDenied(
+                        "literal_target_mismatch"
+                    )
+                if str(target["status"]) != "pending":
+                    raise RepositoryAuthorizationDenied(
+                        "literal_target_inactive"
+                    )
+                if target["active_attempt_id"] is not None:
+                    raise StaleWrite("literal target already owns an attempt")
+                authorization_kind = AuthorizationKind.LITERAL_CONFIRMATION
+                authorization_ref = literal.reference_id
+                policy_hash = run.policy_hash
+
+            job = self.conn.execute(
+                """
+                SELECT id FROM jobs
+                WHERE source = 'hh' AND source_id = ?
+                """,
+                (current.vacancy_id,),
+            ).fetchone()
+            if job is not None:
+                duplicate = self.conn.execute(
+                    """
+                    SELECT 1 FROM applications
+                    WHERE account_profile_id = ? AND job_id = ?
+                      AND resume_id = ?
+                    """,
+                    (
+                        current.account_id,
+                        _persisted_integer(
+                            job["id"],
+                            field="job id",
+                            minimum=1,
+                        ),
+                        current.resume_id,
+                    ),
+                ).fetchone()
+                if duplicate is not None:
+                    raise StaleWrite("exact application already exists")
+
+            guard_row = self.conn.execute(
+                """
+                SELECT * FROM hh_application_account_guards
+                WHERE account_profile_id = ? AND source = 'hh'
+                  AND source_id = ?
+                """,
+                (current.account_id, current.vacancy_id),
+            ).fetchone()
+            existing_guard = (
+                None if guard_row is None else self._guard_from_row(guard_row)
+            )
+            if existing_guard is not None:
+                if existing_guard.status == "active":
+                    raise StaleWrite("account-vacancy guard is active")
+                if snapshot.resume_policy == "best_resume_only":
+                    raise StaleWrite("account-vacancy guard is terminal")
+
+            cursor = self.conn.execute(
+                """
+                INSERT INTO hh_application_attempts (
+                    run_id, campaign_item_id, vacancy_id, resume_id, status,
+                    reason, letter, raw_result_json, created_at,
+                    account_profile_id, autopilot_run_id, autopilot_item_id,
+                    autopilot_attempt_id, authorization_kind,
+                    authorization_ref, policy_hash, delivery_certainty,
+                    dispatched_at, finished_at
+                ) VALUES (
+                    NULL, NULL, ?, ?, 'applying', '', '', '{}', ?,
+                    ?, ?, ?, NULL, ?, ?, ?, '', ?, ''
+                )
+                """,
+                (
+                    current.vacancy_id,
+                    current.resume_id,
+                    instant.isoformat(),
+                    current.account_id,
+                    run.id,
+                    current.id,
+                    authorization_kind.value,
+                    authorization_ref,
+                    policy_hash,
+                    instant.isoformat(),
+                ),
+            )
+            attempt_id = _required_lastrowid(cursor)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_application_attempts
+                SET autopilot_attempt_id = ?
+                WHERE id = ? AND autopilot_attempt_id IS NULL
+                """,
+                (attempt_id, attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("attempt compatibility identity update failed")
+
+            if existing_guard is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO hh_application_account_guards (
+                        account_profile_id, source, source_id,
+                        owner_attempt_id, first_resume_id, status,
+                        application_id, application_count, created_at,
+                        updated_at
+                    ) VALUES (?, 'hh', ?, ?, ?, 'active', NULL, 0, ?, ?)
+                    """,
+                    (
+                        current.account_id,
+                        current.vacancy_id,
+                        attempt_id,
+                        current.resume_id,
+                        instant.isoformat(),
+                        instant.isoformat(),
+                    ),
+                )
+            else:
+                cursor = self.conn.execute(
+                    """
+                    UPDATE hh_application_account_guards
+                    SET owner_attempt_id = ?, status = 'active',
+                        updated_at = ?
+                    WHERE account_profile_id = ? AND source = 'hh'
+                      AND source_id = ? AND status != 'active'
+                    """,
+                    (
+                        attempt_id,
+                        instant.isoformat(),
+                        current.account_id,
+                        current.vacancy_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleWrite("account-vacancy guard changed")
+
+            reservation = self._reserve_quota_for_update(
+                account_id=current.account_id,
+                run_id=run.id,
+                attempt_id=attempt_id,
+                timezone_name=timezone_name,
+                local_date=local_date,
+                daily_limit=snapshot.daily_limit,
+                run_limit=snapshot.run_limit,
+                fencing_token=fencing_token,
+                instant=instant,
+            )
+            if type(authorization) is LiteralConfirmation:
+                cursor = self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_one_shot_targets
+                    SET status = 'active', active_attempt_id = ?,
+                        updated_at = ?
+                    WHERE authorization_ref = ? AND resume_id = ?
+                      AND vacancy_id = ? AND status = 'pending'
+                      AND active_attempt_id IS NULL
+                    """,
+                    (
+                        attempt_id,
+                        instant.isoformat(),
+                        authorization_ref,
+                        current.resume_id,
+                        current.vacancy_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleWrite("literal target changed")
+
+            assert_transition(current.state, AutopilotState.APPLYING)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'applying', retry_stage = 'application',
+                    version = version + 1,
+                    application_attempt_count = application_attempt_count + 1,
+                    active_attempt_id = ?, challenge_id = NULL,
+                    next_attempt_at = '', last_outcome_code = 'dispatch_prepared',
+                    updated_at = ?
+                WHERE id = ? AND version = ? AND state = 'ready'
+                """,
+                (
+                    attempt_id,
+                    instant.isoformat(),
+                    current.id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("dispatch item compare-and-swap failed")
+            self._insert_event(
+                item_id=current.id,
+                run_id=run.id,
+                previous=AutopilotState.READY,
+                target=AutopilotState.APPLYING,
+                reason="dispatch_prepared",
+                metadata={
+                    "attempt_id": attempt_id,
+                    "reservation_id": reservation.id,
+                },
+                created_at=instant,
+            )
+            prepared_item = self._item_for_update(current.id)
+            return PreparedDispatch(
+                item_id=current.id,
+                item_version=prepared_item.version,
+                attempt_id=attempt_id,
+                reservation_id=reservation.id,
+                run_id=run.id,
+                account_id=current.account_id,
+                vacancy_id=current.vacancy_id,
+                resume_id=current.resume_id,
+                authorization_kind=authorization_kind,
+                authorization_ref=authorization_ref,
+                policy_hash=policy_hash,
+                fencing_token=fencing_token,
+                cover_letter_mode=snapshot.cover_letter_mode,
+                timezone_name=timezone_name,
+                attempt_count=prepared_item.application_attempt_count,
+            )
+
+    def finalize_applied(
+        self,
+        prepared: PreparedDispatch,
+        outcome: DispatchOutcome,
+        *,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        if type(prepared) is not PreparedDispatch:
+            raise TypeError("prepared must be an exact PreparedDispatch")
+        if type(outcome) is not DispatchOutcome:
+            raise TypeError("outcome must be an exact DispatchOutcome")
+        if (
+            outcome.code != "applied"
+            or outcome.certainty is not DeliveryCertainty.DEFINITE_RESPONSE
+        ):
+            raise ValueError("finalize_applied requires a definite applied outcome")
+        instant = _instant(now, field="now")
+        stored_outcome = _dispatch_storage_payload(outcome)
+        outcome_json = _json_dumps(stored_outcome, field="dispatch outcome")
+
+        with self.immediate():
+            current = self._validate_prepared_for_update(
+                prepared,
+                instant=instant,
+            )
+            job_id = self._ensure_hh_job_for_update(current, instant=instant)
+            cursor = self.conn.execute(
+                """
+                INSERT INTO applications (
+                    account_profile_id, job_id, status, notes, applied_at,
+                    updated_at, source, source_id, resume_id, resume_hash,
+                    plan_id, transport, sent_at, result_json, error,
+                    autopilot_run_id, autopilot_item_id, autopilot_attempt_id
+                ) VALUES (
+                    ?, ?, 'applied', '', ?, ?, 'hh', ?, ?, '', NULL,
+                    'hh_autopilot', ?, ?, '', ?, ?, ?
+                )
+                """,
+                (
+                    prepared.account_id,
+                    job_id,
+                    instant.isoformat(),
+                    instant.isoformat(),
+                    prepared.vacancy_id,
+                    prepared.resume_id,
+                    instant.isoformat(),
+                    outcome_json,
+                    prepared.run_id,
+                    prepared.item_id,
+                    prepared.attempt_id,
+                ),
+            )
+            application_id = _required_lastrowid(cursor)
+            self._finish_attempt_for_update(
+                prepared,
+                outcome,
+                stored_outcome=stored_outcome,
+                status="applied",
+                instant=instant,
+            )
+            remote_id = _remote_negotiation_id(stored_outcome)
+            self._change_reservation_state_for_update(
+                prepared.reservation_id,
+                prepared.fencing_token,
+                target=QuotaReservationState.CONSUMED,
+                remote_negotiation_id=remote_id,
+                instant=instant,
+            )
+            assert_transition(current.state, AutopilotState.APPLIED)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'applied', version = version + 1,
+                    next_attempt_at = '', challenge_id = NULL,
+                    last_outcome_code = 'applied', updated_at = ?
+                WHERE id = ? AND version = ?
+                  AND active_attempt_id = ?
+                  AND state IN ('applying','reconciling')
+                """,
+                (
+                    instant.isoformat(),
+                    prepared.item_id,
+                    prepared.item_version,
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("applied item compare-and-swap failed")
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_application_account_guards
+                SET status = 'applied', application_id = ?,
+                    application_count = application_count + 1,
+                    updated_at = ?
+                WHERE account_profile_id = ? AND source = 'hh'
+                  AND source_id = ? AND status = 'active'
+                  AND owner_attempt_id = ?
+                """,
+                (
+                    application_id,
+                    instant.isoformat(),
+                    prepared.account_id,
+                    prepared.vacancy_id,
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("application guard finalization failed")
+            self._increment_success_counter_for_update(
+                prepared.run_id,
+                instant=instant,
+            )
+            self._finish_literal_target_for_update(
+                prepared,
+                succeeded=True,
+                instant=instant,
+            )
+            self._insert_event(
+                item_id=prepared.item_id,
+                run_id=prepared.run_id,
+                previous=current.state,
+                target=AutopilotState.APPLIED,
+                reason="applied",
+                metadata=_dispatch_event_metadata(outcome),
+                created_at=instant,
+            )
+            return self._item_for_update(prepared.item_id)
+
+    def record_possibly_sent(
+        self,
+        prepared: PreparedDispatch,
+        outcome: DispatchOutcome,
+        decision: RetryDecision,
+        *,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        if type(prepared) is not PreparedDispatch:
+            raise TypeError("prepared must be an exact PreparedDispatch")
+        if type(outcome) is not DispatchOutcome:
+            raise TypeError("outcome must be an exact DispatchOutcome")
+        if type(decision) is not RetryDecision:
+            raise TypeError("decision must be an exact RetryDecision")
+        if decision.target is not AutopilotState.RECONCILING:
+            raise ValueError("ambiguous dispatch must reconcile")
+        if outcome.certainty is not DeliveryCertainty.POSSIBLY_SENT and (
+            outcome.code not in {"duplicate", "ambiguous_remote_result"}
+        ):
+            raise ValueError("record_possibly_sent requires an ambiguous outcome")
+        instant = _instant(now, field="now")
+        stored_outcome = _dispatch_storage_payload(outcome)
+
+        with self.immediate():
+            current = self._validate_prepared_for_update(
+                prepared,
+                instant=instant,
+            )
+            self._finish_attempt_for_update(
+                prepared,
+                outcome,
+                stored_outcome=stored_outcome,
+                status="reconciling",
+                instant=instant,
+                terminal=False,
+            )
+            self._change_reservation_state_for_update(
+                prepared.reservation_id,
+                prepared.fencing_token,
+                target=QuotaReservationState.HELD,
+                remote_negotiation_id=None,
+                instant=instant,
+            )
+            assert_transition(current.state, AutopilotState.RECONCILING)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'reconciling', retry_stage = 'reconciliation',
+                    version = version + 1, next_attempt_at = ?,
+                    last_outcome_code = ?, updated_at = ?
+                WHERE id = ? AND version = ? AND active_attempt_id = ?
+                  AND state = 'applying'
+                """,
+                (
+                    decision.next_attempt_at,
+                    outcome.code,
+                    instant.isoformat(),
+                    prepared.item_id,
+                    prepared.item_version,
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("reconciling item compare-and-swap failed")
+            self._insert_event(
+                item_id=prepared.item_id,
+                run_id=prepared.run_id,
+                previous=current.state,
+                target=AutopilotState.RECONCILING,
+                reason=outcome.code,
+                metadata=_dispatch_event_metadata(outcome),
+                created_at=instant,
+            )
+            return self._item_for_update(prepared.item_id)
+
+    def finalize_definite_failure(
+        self,
+        prepared: PreparedDispatch,
+        outcome: DispatchOutcome,
+        decision: RetryDecision,
+        *,
+        challenge_expiry_hours: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        if type(prepared) is not PreparedDispatch:
+            raise TypeError("prepared must be an exact PreparedDispatch")
+        if type(outcome) is not DispatchOutcome:
+            raise TypeError("outcome must be an exact DispatchOutcome")
+        if type(decision) is not RetryDecision:
+            raise TypeError("decision must be an exact RetryDecision")
+        if outcome.certainty is DeliveryCertainty.POSSIBLY_SENT:
+            raise ValueError("possibly-sent outcomes cannot use definite finalization")
+        if decision.target not in {
+            AutopilotState.RETRY_WAIT,
+            AutopilotState.SKIPPED,
+            AutopilotState.DEAD,
+            AutopilotState.MANUAL_CHALLENGE,
+        }:
+            raise ValueError("unsupported definite failure target")
+        challenge_expiry_hours = _integer(
+            challenge_expiry_hours,
+            field="challenge_expiry_hours",
+            minimum=1,
+        )
+        instant = _instant(now, field="now")
+        stored_outcome = _dispatch_storage_payload(outcome)
+
+        with self.immediate():
+            current = self._validate_prepared_for_update(
+                prepared,
+                instant=instant,
+            )
+            self._finish_attempt_for_update(
+                prepared,
+                outcome,
+                stored_outcome=stored_outcome,
+                status=decision.target.value,
+                instant=instant,
+            )
+            self._change_reservation_state_for_update(
+                prepared.reservation_id,
+                prepared.fencing_token,
+                target=QuotaReservationState.RELEASED,
+                remote_negotiation_id=None,
+                instant=instant,
+            )
+            cursor = self.conn.execute(
+                """
+                DELETE FROM hh_application_account_guards
+                WHERE account_profile_id = ? AND source = 'hh'
+                  AND source_id = ? AND status = 'active'
+                  AND owner_attempt_id = ?
+                """,
+                (
+                    prepared.account_id,
+                    prepared.vacancy_id,
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("failure guard release failed")
+
+            challenge_id: int | None = None
+            if decision.target is AutopilotState.MANUAL_CHALLENGE:
+                challenge_type = (
+                    "manual_auth"
+                    if outcome.code == "auth_expired"
+                    else outcome.code
+                )
+                scope = "account" if challenge_type == "manual_auth" else "item"
+                expiry = (
+                    ""
+                    if scope == "account"
+                    else (
+                        instant + timedelta(hours=challenge_expiry_hours)
+                    ).isoformat()
+                )
+                cursor = self.conn.execute(
+                    """
+                    INSERT INTO hh_autopilot_challenges (
+                        scope, challenge_type, account_profile_id, item_id,
+                        reservation_id, sanitized_url, screenshot_path,
+                        status, expires_at, metadata_json, created_at
+                    ) VALUES (?, ?, ?, ?, NULL, ?, '', 'open', ?, ?, ?)
+                    """,
+                    (
+                        scope,
+                        challenge_type,
+                        prepared.account_id,
+                        prepared.item_id if scope == "item" else None,
+                        stored_outcome.get("location", ""),
+                        expiry,
+                        _json_dumps(
+                            _dispatch_event_metadata(outcome),
+                            field="challenge metadata",
+                        ),
+                        instant.isoformat(),
+                    ),
+                )
+                challenge_id = _required_lastrowid(cursor)
+
+            if outcome.code in {"rate_limited", "hh_daily_limit"}:
+                self._set_account_cooldown_for_update(
+                    account_id=prepared.account_id,
+                    blocked_until=_instant(
+                        decision.next_attempt_at,
+                        field="cooldown next_attempt_at",
+                    ),
+                    reason=outcome.code,
+                    fencing_token=prepared.fencing_token,
+                    hh_reset_json=_json_dumps(
+                        {
+                            "retry_after_seconds": outcome.retry_after_seconds,
+                        },
+                        field="hh_reset",
+                    ),
+                    instant=instant,
+                )
+
+            assert_transition(current.state, decision.target)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = ?, retry_stage = 'application',
+                    version = version + 1, next_attempt_at = ?,
+                    challenge_id = ?, last_outcome_code = ?, updated_at = ?
+                WHERE id = ? AND version = ? AND active_attempt_id = ?
+                  AND state = 'applying'
+                """,
+                (
+                    decision.target.value,
+                    decision.next_attempt_at,
+                    challenge_id,
+                    decision.reason,
+                    instant.isoformat(),
+                    prepared.item_id,
+                    prepared.item_version,
+                    prepared.attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("failure item compare-and-swap failed")
+            self._finish_literal_target_for_update(
+                prepared,
+                succeeded=False,
+                terminal=decision.target
+                in {AutopilotState.SKIPPED, AutopilotState.DEAD},
+                instant=instant,
+            )
+            self._insert_event(
+                item_id=prepared.item_id,
+                run_id=prepared.run_id,
+                previous=current.state,
+                target=decision.target,
+                reason=decision.reason,
+                metadata=_dispatch_event_metadata(outcome),
+                created_at=instant,
+            )
+            return self._item_for_update(prepared.item_id)
+
+    def record_pre_dispatch_failure(
+        self,
+        *,
+        item_id: int,
+        expected_version: int,
+        authorization: LiteralConfirmation | LiveAuthorization,
+        fencing_token: int,
+        outcome: DispatchOutcome,
+        decision: RetryDecision,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        """Persist a cover-letter/preflight failure without claiming a POST."""
+        from work_hunter.safety import require_hh_dispatch_authorization
+
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        expected_version = _integer(
+            expected_version,
+            field="expected_version",
+        )
+        fencing_token = _integer(
+            fencing_token,
+            field="fencing_token",
+            minimum=1,
+        )
+        if (
+            type(outcome) is not DispatchOutcome
+            or outcome.certainty is not DeliveryCertainty.DEFINITELY_NOT_SENT
+        ):
+            raise ValueError("pre-dispatch failure must be definitely not sent")
+        if (
+            type(decision) is not RetryDecision
+            or decision.target is not AutopilotState.RETRY_WAIT
+        ):
+            raise ValueError("pre-dispatch failure must be a persisted retry")
+        instant = _instant(now, field="now")
+        stored_outcome = _dispatch_storage_payload(outcome)
+
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            if (
+                current.version != expected_version
+                or current.state is not AutopilotState.READY
+            ):
+                raise StaleWrite("pre-dispatch item changed")
+            require_hh_dispatch_authorization(
+                authorization,
+                account_id=current.account_id,
+                lease_account_id=current.account_id,
+                fencing_token=fencing_token,
+            )
+            self._assert_fence(current.account_id, fencing_token, instant)
+            run = self._run_for_update(current.last_run_id)
+            if type(authorization) is LiveAuthorization:
+                live = cast(LiveAuthorization, authorization)
+                authorization_kind = AuthorizationKind.AUTOPILOT
+                authorization_ref = str(live.grant_id)
+            else:
+                literal = cast(LiteralConfirmation, authorization)
+                authorization_kind = AuthorizationKind.LITERAL_CONFIRMATION
+                authorization_ref = literal.reference_id
+            cursor = self.conn.execute(
+                """
+                INSERT INTO hh_application_attempts (
+                    run_id, campaign_item_id, vacancy_id, resume_id, status,
+                    reason, letter, raw_result_json, created_at,
+                    account_profile_id, autopilot_run_id, autopilot_item_id,
+                    autopilot_attempt_id, authorization_kind,
+                    authorization_ref, policy_hash, delivery_certainty,
+                    dispatched_at, finished_at
+                ) VALUES (
+                    NULL, NULL, ?, ?, 'retry_wait', ?, '', ?, ?,
+                    ?, ?, ?, NULL, ?, ?, ?, ?, '', ?
+                )
+                """,
+                (
+                    current.vacancy_id,
+                    current.resume_id,
+                    outcome.code,
+                    _json_dumps(stored_outcome, field="pre-dispatch outcome"),
+                    instant.isoformat(),
+                    current.account_id,
+                    run.id,
+                    current.id,
+                    authorization_kind.value,
+                    authorization_ref,
+                    run.policy_hash,
+                    outcome.certainty.value,
+                    instant.isoformat(),
+                ),
+            )
+            attempt_id = _required_lastrowid(cursor)
+            self.conn.execute(
+                """
+                UPDATE hh_application_attempts
+                SET autopilot_attempt_id = ?
+                WHERE id = ?
+                """,
+                (attempt_id, attempt_id),
+            )
+            assert_transition(
+                AutopilotState.READY,
+                AutopilotState.APPLYING,
+            )
+            assert_transition(
+                AutopilotState.APPLYING,
+                AutopilotState.RETRY_WAIT,
+            )
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'retry_wait', retry_stage = 'application',
+                    version = version + 1, active_attempt_id = ?,
+                    next_attempt_at = ?, last_outcome_code = ?, updated_at = ?
+                WHERE id = ? AND version = ? AND state = 'ready'
+                """,
+                (
+                    attempt_id,
+                    decision.next_attempt_at,
+                    outcome.code,
+                    instant.isoformat(),
+                    current.id,
+                    current.version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("pre-dispatch failure item changed")
+            self._insert_event(
+                item_id=current.id,
+                run_id=run.id,
+                previous=AutopilotState.READY,
+                target=AutopilotState.APPLYING,
+                reason="pre_dispatch_started",
+                metadata={"attempt_id": attempt_id},
+                created_at=instant,
+            )
+            self._insert_event(
+                item_id=current.id,
+                run_id=run.id,
+                previous=AutopilotState.APPLYING,
+                target=AutopilotState.RETRY_WAIT,
+                reason=outcome.code,
+                metadata=_dispatch_event_metadata(outcome),
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
+
+    def _validate_prepared_for_update(
+        self,
+        prepared: PreparedDispatch,
+        *,
+        instant: datetime,
+    ) -> ItemRecord:
+        self._assert_fence(
+            prepared.account_id,
+            prepared.fencing_token,
+            instant,
+        )
+        current = self._item_for_update(prepared.item_id)
+        if (
+            current.account_id != prepared.account_id
+            or current.vacancy_id != prepared.vacancy_id
+            or current.resume_id != prepared.resume_id
+            or current.version != prepared.item_version
+            or current.active_attempt_id != prepared.attempt_id
+            or current.state
+            not in {AutopilotState.APPLYING, AutopilotState.RECONCILING}
+        ):
+            raise StaleWrite("prepared item provenance changed")
+        attempt = self.get_application_attempt(prepared.attempt_id)
+        if attempt is None or (
+            attempt.account_id != prepared.account_id
+            or attempt.run_id != prepared.run_id
+            or attempt.item_id != prepared.item_id
+            or attempt.autopilot_attempt_id != prepared.attempt_id
+            or attempt.vacancy_id != prepared.vacancy_id
+            or attempt.resume_id != prepared.resume_id
+            or attempt.authorization_kind is not prepared.authorization_kind
+            or attempt.authorization_ref != prepared.authorization_ref
+            or attempt.policy_hash != prepared.policy_hash
+            or attempt.status not in {"applying", "reconciling"}
+        ):
+            raise StaleWrite("prepared attempt provenance changed")
+        reservation = self._reservation_for_update(prepared.reservation_id)
+        if (
+            reservation.attempt_id != prepared.attempt_id
+            or reservation.run_id != prepared.run_id
+            or reservation.account_id != prepared.account_id
+            or reservation.fencing_token != prepared.fencing_token
+            or reservation.state
+            not in {QuotaReservationState.RESERVED, QuotaReservationState.HELD}
+        ):
+            raise StaleWrite("prepared reservation provenance changed")
+        guard = self.get_guard(
+            prepared.account_id,
+            "hh",
+            prepared.vacancy_id,
+        )
+        if (
+            guard is None
+            or guard.status != "active"
+            or guard.owner_attempt_id != prepared.attempt_id
+        ):
+            raise StaleWrite("prepared guard provenance changed")
+        return current
+
+    def _finish_attempt_for_update(
+        self,
+        prepared: PreparedDispatch,
+        outcome: DispatchOutcome,
+        *,
+        stored_outcome: dict[str, Any],
+        status: str,
+        instant: datetime,
+        terminal: bool = True,
+    ) -> None:
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_application_attempts
+            SET status = ?, reason = ?, raw_result_json = ?,
+                delivery_certainty = ?, finished_at = ?
+            WHERE id = ? AND autopilot_attempt_id = ?
+              AND status IN ('applying','reconciling')
+              AND delivery_certainty = ''
+            """,
+            (
+                status,
+                outcome.code,
+                _json_dumps(stored_outcome, field="dispatch outcome"),
+                outcome.certainty.value,
+                instant.isoformat() if terminal else "",
+                prepared.attempt_id,
+                prepared.attempt_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite("attempt finalization compare-and-swap failed")
+
+    def _ensure_hh_job_for_update(
+        self,
+        item: ItemRecord,
+        *,
+        instant: datetime,
+    ) -> int:
+        row = self.conn.execute(
+            "SELECT id FROM jobs WHERE source = 'hh' AND source_id = ?",
+            (item.vacancy_id,),
+        ).fetchone()
+        if row is not None:
+            return _persisted_integer(row["id"], field="job id", minimum=1)
+        result = self.conn.execute(
+            """
+            SELECT normalized_json
+            FROM hh_autopilot_search_results
+            WHERE account_profile_id = ? AND vacancy_id = ?
+              AND resume_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (item.account_id, item.vacancy_id, item.resume_id),
+        ).fetchone()
+        if result is None:
+            raise StaleWrite("canonical HH vacancy is unavailable for application")
+        normalized = _normalized_json_loads(
+            result["normalized_json"],
+            vacancy_id=item.vacancy_id,
+        )
+        job = normalized["job"]
+        cursor = self.conn.execute(
+            """
+            INSERT INTO jobs (
+                source, source_id, url, title, company, salary_text,
+                salary_from, salary_to, currency, location, remote,
+                description, published_at, fetched_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job["source"],
+                job["source_id"],
+                job["url"],
+                job["title"],
+                job["company"],
+                job["salary_text"],
+                job["salary_from"],
+                job["salary_to"],
+                job["currency"],
+                job["location"],
+                None if job["remote"] is None else int(job["remote"]),
+                job["description"],
+                job["published_at"],
+                job["fetched_at"],
+                job["status"],
+            ),
+        )
+        del instant
+        return _required_lastrowid(cursor)
+
+    def _increment_success_counter_for_update(
+        self,
+        run_id: int,
+        *,
+        instant: datetime,
+    ) -> None:
+        row = self.conn.execute(
+            "SELECT counters_json FROM hh_autopilot_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite("application run disappeared")
+        counters = _json_loads(row["counters_json"], field="run counters")
+        successful = counters.get("successful", 0)
+        if type(successful) is not int or successful < 0:
+            raise StaleWrite("run successful counter is malformed")
+        counters["successful"] = successful + 1
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_runs
+            SET counters_json = ?
+            WHERE id = ? AND counters_json = ?
+            """,
+            (
+                _json_dumps(counters, field="run counters"),
+                run_id,
+                row["counters_json"],
+            ),
+        )
+        del instant
+        if cursor.rowcount != 1:
+            raise StaleWrite("run successful counter changed")
+
+    def _finish_literal_target_for_update(
+        self,
+        prepared: PreparedDispatch,
+        *,
+        succeeded: bool,
+        instant: datetime,
+        terminal: bool = False,
+    ) -> None:
+        if prepared.authorization_kind is not AuthorizationKind.LITERAL_CONFIRMATION:
+            return
+        target_status = "succeeded" if succeeded else ("closed" if terminal else "pending")
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_one_shot_targets
+            SET status = ?, active_attempt_id = NULL, updated_at = ?
+            WHERE authorization_ref = ? AND resume_id = ?
+              AND vacancy_id = ? AND status = 'active'
+              AND active_attempt_id = ?
+            """,
+            (
+                target_status,
+                instant.isoformat(),
+                prepared.authorization_ref,
+                prepared.resume_id,
+                prepared.vacancy_id,
+                prepared.attempt_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite("literal target finalization failed")
+        if succeeded:
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_one_shot_authorizations
+                SET consumed_success = consumed_success + 1
+                WHERE reference_id = ? AND active = 1
+                  AND consumed_success < max_success
+                """,
+                (prepared.authorization_ref,),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("literal success cap changed")
+        row = self.conn.execute(
+            """
+            SELECT max_success, consumed_success
+            FROM hh_autopilot_one_shot_authorizations
+            WHERE reference_id = ?
+            """,
+            (prepared.authorization_ref,),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite("literal authorization disappeared")
+        unfinished = self.conn.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM hh_autopilot_one_shot_targets
+            WHERE authorization_ref = ? AND status IN ('pending','active')
+            """,
+            (prepared.authorization_ref,),
+        ).fetchone()
+        cap_reached = _persisted_integer(
+            row["consumed_success"],
+            field="literal consumed_success",
+        ) >= _persisted_integer(
+            row["max_success"],
+            field="literal max_success",
+            minimum=1,
+        )
+        no_targets = _persisted_integer(
+            unfinished["total"],
+            field="literal unfinished target count",
+        ) == 0
+        if cap_reached or no_targets:
+            self.conn.execute(
+                """
+                UPDATE hh_autopilot_one_shot_authorizations
+                SET active = 0, finished_at = ?
+                WHERE reference_id = ? AND active = 1
+                """,
+                (instant.isoformat(), prepared.authorization_ref),
+            )
 
     def reserve_quota(
         self,
@@ -5129,6 +6608,19 @@ class AutopilotRepository:
                 field="item published_at",
                 maximum=128,
             ),
+            application_attempt_count=_persisted_integer(
+                row["application_attempt_count"],
+                field="item application_attempt_count",
+            ),
+            reconciliation_count=_persisted_integer(
+                row["reconciliation_count"],
+                field="item reconciliation_count",
+            ),
+            next_attempt_at=_persisted_optional_text(
+                row["next_attempt_at"],
+                field="item next_attempt_at",
+                maximum=128,
+            ),
             last_outcome_code=last_outcome_code,
             active_attempt_id=(
                 None
@@ -5138,6 +6630,164 @@ class AutopilotRepository:
                     field="item active_attempt_id",
                     minimum=1,
                 )
+            ),
+            challenge_id=(
+                None
+                if row["challenge_id"] is None
+                else _persisted_integer(
+                    row["challenge_id"],
+                    field="item challenge_id",
+                    minimum=1,
+                )
+            ),
+        )
+
+    @staticmethod
+    def _attempt_from_row(row: sqlite3.Row) -> ApplicationAttemptRecord:
+        certainty_value = _persisted_optional_text(
+            row["delivery_certainty"],
+            field="attempt delivery_certainty",
+            maximum=64,
+        )
+        certainty: DeliveryCertainty | None
+        if certainty_value:
+            try:
+                certainty = DeliveryCertainty(certainty_value)
+            except ValueError as exc:
+                raise StaleWrite("attempt delivery certainty is invalid") from exc
+        else:
+            certainty = None
+        try:
+            authorization_kind = AuthorizationKind(
+                _persisted_text(
+                    row["authorization_kind"],
+                    field="attempt authorization_kind",
+                )
+            )
+        except ValueError as exc:
+            raise StaleWrite("attempt authorization kind is invalid") from exc
+        return ApplicationAttemptRecord(
+            id=_persisted_integer(row["id"], field="attempt id", minimum=1),
+            account_id=_persisted_text(
+                row["account_profile_id"],
+                field="attempt account_id",
+                canonical=True,
+            ),
+            run_id=_persisted_integer(
+                row["autopilot_run_id"],
+                field="attempt run_id",
+                minimum=1,
+            ),
+            item_id=_persisted_integer(
+                row["autopilot_item_id"],
+                field="attempt item_id",
+                minimum=1,
+            ),
+            autopilot_attempt_id=_persisted_integer(
+                row["autopilot_attempt_id"],
+                field="attempt compatibility id",
+                minimum=1,
+            ),
+            vacancy_id=_persisted_text(
+                row["vacancy_id"],
+                field="attempt vacancy_id",
+            ),
+            resume_id=_persisted_text(
+                row["resume_id"],
+                field="attempt resume_id",
+                canonical=True,
+            ),
+            status=_persisted_text(row["status"], field="attempt status"),
+            reason=_persisted_optional_text(
+                row["reason"],
+                field="attempt reason",
+                maximum=128,
+            ),
+            authorization_kind=authorization_kind,
+            authorization_ref=_persisted_text(
+                row["authorization_ref"],
+                field="attempt authorization_ref",
+            ),
+            policy_hash=_persisted_text(
+                row["policy_hash"],
+                field="attempt policy_hash",
+            ),
+            delivery_certainty=certainty,
+            raw_result=_json_loads(
+                row["raw_result_json"],
+                field="attempt raw_result_json",
+            ),
+            created_at=_persisted_text(
+                row["created_at"],
+                field="attempt created_at",
+            ),
+            dispatched_at=_persisted_optional_text(
+                row["dispatched_at"],
+                field="attempt dispatched_at",
+                maximum=128,
+            ),
+            finished_at=_persisted_optional_text(
+                row["finished_at"],
+                field="attempt finished_at",
+                maximum=128,
+            ),
+        )
+
+    @staticmethod
+    def _guard_from_row(row: sqlite3.Row) -> ApplicationGuardRecord:
+        status = _persisted_text(row["status"], field="guard status")
+        if status not in {"active", "applied", "external_applied"}:
+            raise StaleWrite("guard status is invalid")
+        return ApplicationGuardRecord(
+            account_id=_persisted_text(
+                row["account_profile_id"],
+                field="guard account_id",
+                canonical=True,
+            ),
+            source=_persisted_text(
+                row["source"],
+                field="guard source",
+                canonical=True,
+            ),
+            source_id=_persisted_text(
+                row["source_id"],
+                field="guard source_id",
+            ),
+            owner_attempt_id=(
+                None
+                if row["owner_attempt_id"] is None
+                else _persisted_integer(
+                    row["owner_attempt_id"],
+                    field="guard owner_attempt_id",
+                    minimum=1,
+                )
+            ),
+            first_resume_id=_persisted_text(
+                row["first_resume_id"],
+                field="guard first_resume_id",
+                canonical=True,
+            ),
+            status=status,
+            application_id=(
+                None
+                if row["application_id"] is None
+                else _persisted_integer(
+                    row["application_id"],
+                    field="guard application_id",
+                    minimum=1,
+                )
+            ),
+            application_count=_persisted_integer(
+                row["application_count"],
+                field="guard application_count",
+            ),
+            created_at=_persisted_text(
+                row["created_at"],
+                field="guard created_at",
+            ),
+            updated_at=_persisted_text(
+                row["updated_at"],
+                field="guard updated_at",
             ),
         )
 
@@ -5348,6 +6998,8 @@ class LeaseKeeper:
 
 __all__ = [
     "AccountStateRecord",
+    "ApplicationAttemptRecord",
+    "ApplicationGuardRecord",
     "AuthorizationReconciliationRecord",
     "AutopilotRepository",
     "ChallengeRecord",

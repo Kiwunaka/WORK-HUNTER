@@ -20,7 +20,7 @@ from .errors import (
 )
 from .identity import HHIdentity
 from .user_agent import build_android_user_agent
-from work_hunter.hh_autopilot.types import SearchPage
+from work_hunter.hh_autopilot.types import DeliveryCertainty, SearchPage
 
 
 class HHApiSession:
@@ -49,7 +49,7 @@ class HHApiSession:
     def request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         response = self.request(method, path, **kwargs)
         success = 200 <= response.status_code < 300
-        payload = _response_json(response, strict=success)
+        payload = _response_json(response, strict=success, method=method)
         if not success:
             raise _error_from_response(response.status_code, payload)
         return payload
@@ -107,7 +107,7 @@ class HHApiSession:
         except requests.RequestException as exc:
             raise _network_error("POST", "/token", exc) from exc
         success = 200 <= response.status_code < 300
-        payload = _response_json(response, strict=success)
+        payload = _response_json(response, strict=success, method="POST")
         if not success:
             raise _error_from_response(response.status_code, payload)
         self.identity.update_from_token_response(payload)
@@ -154,15 +154,30 @@ class HHApiSession:
         data = self.request_json("GET", f"/vacancies/{vacancy_id}/suitable_resumes")
         return list(data.get("items") or [])
 
-    def apply(self, vacancy_id: str, resume_id: str, message: str):
-        return self.request(
+    def apply(
+        self,
+        vacancy_id: str,
+        resume_id: str,
+        message: str,
+        *,
+        timeout: int | None = None,
+    ):
+        kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        # An application attempt is the remote mutation boundary.  A 401 must be
+        # returned to the guarded executor; replaying this POST behind its back
+        # would send two wire requests for one immutable attempt/reservation.
+        return self._request(
             "POST",
             "/negotiations",
+            retry_on_auth=False,
             data={
                 "resume_id": resume_id,
                 "vacancy_id": vacancy_id,
                 "message": message or "",
             },
+            **kwargs,
         )
 
     def list_negotiations(self, status: str = "active") -> list[dict[str, Any]]:
@@ -212,29 +227,57 @@ def _network_error(
     exc: requests.RequestException,
 ) -> HHTransportError:
     safe_path = urllib.parse.urlsplit(path).path or "/"
+    is_application_post = (
+        method.upper() == "POST" and safe_path.rstrip("/") == "/negotiations"
+    )
+    certainty = (
+        DeliveryCertainty.DEFINITELY_NOT_SENT
+        if not is_application_post or isinstance(exc, requests.ConnectTimeout)
+        else DeliveryCertainty.POSSIBLY_SENT
+    )
     return HHNetworkError(
         f"{method.upper()} {safe_path} failed: {type(exc).__name__}",
         code="network_error",
         payload={"method": method.upper(), "path": safe_path},
+        delivery_certainty=certainty,
     )
 
 
-def _parse_error(response: Any, exc: ValueError) -> HHTransportError:
+def _parse_error(
+    response: Any,
+    exc: ValueError,
+    *,
+    method: str,
+) -> HHTransportError:
+    # JSON parsing through request_json is a read/preflight classification from
+    # the application executor's perspective.  The application POST returns its
+    # raw response and is parsed by HHApplyClient with POSSIBLY_SENT certainty.
+    is_post = False
     return HHParseError(
         f"HH API response contained invalid JSON: {type(exc).__name__}",
         status_code=response.status_code,
-        code="parse_error",
+        code="post_dispatch_parse_error" if is_post else "read_parse_error",
+        delivery_certainty=(
+            DeliveryCertainty.POSSIBLY_SENT
+            if is_post
+            else DeliveryCertainty.DEFINITELY_NOT_SENT
+        ),
     )
 
 
-def _response_json(response: Any, *, strict: bool) -> dict[str, Any]:
+def _response_json(
+    response: Any,
+    *,
+    strict: bool,
+    method: str,
+) -> dict[str, Any]:
     try:
         payload = response.json()
     except ValueError as exc:
         content = getattr(response, "content", None)
         text = getattr(response, "text", None) if content is None else None
         if strict and bool(content if content is not None else text):
-            raise _parse_error(response, exc) from exc
+            raise _parse_error(response, exc, method=method) from exc
         return {}
     return payload if isinstance(payload, dict) else {}
 

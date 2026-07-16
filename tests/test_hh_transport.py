@@ -22,8 +22,8 @@ from work_hunter.hh_transport import (
     extract_xsrf_token,
 )
 from work_hunter.hh_transport.backends import DictConfigBackend, JsonCookieBackend
-from work_hunter.hh_transport.errors import HHParseError
-from work_hunter.hh_autopilot.types import SearchPage
+from work_hunter.hh_transport.errors import HHNetworkError, HHParseError
+from work_hunter.hh_autopilot.types import DeliveryCertainty, SearchPage
 from work_hunter.sources.hh import HHApplyClient
 
 
@@ -412,7 +412,11 @@ def test_api_session_wraps_nonempty_invalid_json_as_parse_error(monkeypatch):
     with pytest.raises(HHTransportError) as error:
         HHApiSession({"access_token": "token"}).request_json("GET", "/vacancies")
 
-    assert error.value.code == "parse_error"
+    assert error.value.code == "read_parse_error"
+    assert (
+        error.value.delivery_certainty
+        is DeliveryCertainty.DEFINITELY_NOT_SENT
+    )
     assert error.value.status_code == 200
     assert str(error.value) == "HH API response contained invalid JSON: JSONDecodeError"
     assert "secret" not in str(error.value)
@@ -434,6 +438,399 @@ def test_api_session_accepts_empty_no_content_response(monkeypatch):
     )
 
     assert HHApiSession({"access_token": "token"}).request_json("GET", "/empty") == {}
+
+
+def test_post_connect_timeout_is_proven_not_sent(monkeypatch):
+    session = HHApiSession({"access_token": "token"})
+    monkeypatch.setattr(
+        session.http,
+        "request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(requests.ConnectTimeout()),
+    )
+
+    with pytest.raises(HHNetworkError) as raised:
+        session.apply("v-1", "r-1", "")
+
+    assert (
+        raised.value.delivery_certainty
+        is DeliveryCertainty.DEFINITELY_NOT_SENT
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [requests.ReadTimeout(), requests.ConnectionError()],
+)
+def test_post_unknown_or_late_network_failure_is_possibly_sent(
+    monkeypatch, error
+):
+    session = HHApiSession({"access_token": "token"})
+    monkeypatch.setattr(
+        session.http,
+        "request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(HHNetworkError) as raised:
+        session.apply("v-1", "r-1", "")
+
+    assert raised.value.delivery_certainty is DeliveryCertainty.POSSIBLY_SENT
+
+
+def test_read_network_failure_is_proven_not_sent(monkeypatch):
+    session = HHApiSession({"access_token": "token"})
+    monkeypatch.setattr(
+        session.http,
+        "request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            requests.ConnectionError()
+        ),
+    )
+
+    with pytest.raises(HHNetworkError) as raised:
+        session.get_vacancy("v-1")
+
+    assert (
+        raised.value.delivery_certainty
+        is DeliveryCertainty.DEFINITELY_NOT_SENT
+    )
+
+
+def test_application_401_is_not_hidden_by_an_internal_post_replay(monkeypatch):
+    class Response:
+        status_code = 401
+        headers: dict[str, str] = {}
+        content = b"{}"
+
+        @staticmethod
+        def json():
+            return {"error": "invalid_token"}
+
+    session = HHApiSession(
+        {
+            "access_token": "expired-token",
+            "refresh_token": "refresh-token",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+        }
+    )
+    post_calls: list[str] = []
+    refresh_calls: list[bool] = []
+
+    def request(*args, **kwargs):
+        post_calls.append(str(args[0]))
+        return Response()
+
+    monkeypatch.setattr(session.http, "request", request)
+    monkeypatch.setattr(
+        session,
+        "refresh_token",
+        lambda: refresh_calls.append(True) or {},
+    )
+
+    response = session.apply("v-1", "r-1", "")
+
+    assert response.status_code == 401
+    assert post_calls == ["POST"]
+    assert refresh_calls == []
+
+
+def test_token_refresh_timeout_is_not_application_delivery_uncertainty(
+    monkeypatch,
+):
+    session = HHApiSession(
+        {
+            "refresh_token": "refresh-token",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+        }
+    )
+    monkeypatch.setattr(
+        requests,
+        "request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(requests.ReadTimeout()),
+    )
+
+    with pytest.raises(HHNetworkError) as raised:
+        session.refresh_token()
+
+    assert (
+        raised.value.delivery_certainty
+        is DeliveryCertainty.DEFINITELY_NOT_SENT
+    )
+
+
+class _DispatchResponse:
+    def __init__(
+        self,
+        status_code,
+        payload=None,
+        *,
+        location="",
+        retry_after="",
+        raw_content=None,
+        json_error=None,
+    ):
+        self.status_code = status_code
+        self._payload = payload
+        self._json_error = json_error
+        self.headers = {}
+        if location:
+            self.headers["Location"] = location
+        if retry_after:
+            self.headers["Retry-After"] = retry_after
+        if raw_content is None:
+            raw_content = b"" if payload is None else b"{}"
+        self.content = raw_content
+        self.text = raw_content.decode("utf-8", errors="replace")
+
+    def json(self):
+        if self._json_error is not None:
+            raise self._json_error
+        if self._payload is None:
+            raise json.JSONDecodeError("empty", "", 0)
+        return self._payload
+
+
+def test_malformed_successful_post_response_is_possibly_sent(monkeypatch):
+    client = HHApplyClient({"access_token": "token"})
+    response = _DispatchResponse(
+        201,
+        raw_content=b"not-json",
+        json_error=json.JSONDecodeError("invalid", "not-json", 0),
+    )
+    monkeypatch.setattr(client.session, "apply", lambda *args, **kwargs: response)
+
+    outcome = client.apply_outcome("v-1", "r-1", "")
+
+    assert outcome.code == "post_dispatch_parse_error"
+    assert outcome.certainty is DeliveryCertainty.POSSIBLY_SENT
+    assert outcome.status_code == 201
+    assert outcome.payload == {}
+
+
+@pytest.mark.parametrize(
+    ("response", "code", "certainty", "retry_after"),
+    [
+        (
+            _DispatchResponse(201, {"id": "n-1"}),
+            "applied",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(201, None, raw_content=b""),
+            "applied",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(
+                303,
+                None,
+                location="https://hh.ru/applicant/vacancy_response?vacancyId=1",
+            ),
+            "form_required",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(
+                303,
+                None,
+                location="https://hh.ru/account/captcha?token=secret",
+            ),
+            "manual_captcha",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(
+                303,
+                None,
+                location="https://hh.ru/applicant/vacancy_response/test/1",
+            ),
+            "manual_assessment",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(
+                400,
+                {"errors": [{"type": "bad_argument", "value": "already_applied"}]},
+            ),
+            "duplicate",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(
+                400,
+                {"errors": [{"type": "not_found", "value": "vacancy_closed"}]},
+            ),
+            "vacancy_closed",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(
+                400,
+                {"errors": [{"type": "bad_argument", "value": "message"}]},
+            ),
+            "invalid_request",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(401, {"error": "invalid_token"}),
+            "auth_expired",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(403, {"error": "access_denied"}),
+            "forbidden",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(
+                429,
+                {"error": "too_many_requests"},
+                retry_after="120",
+            ),
+            "rate_limited",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            120,
+        ),
+        (
+            _DispatchResponse(
+                403,
+                {
+                    "errors": [
+                        {
+                            "type": "limit_exceeded",
+                            "value": "negotiations_limit_exceeded",
+                        }
+                    ]
+                },
+            ),
+            "hh_daily_limit",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+        (
+            _DispatchResponse(503, {"error": "unavailable"}),
+            "server_error",
+            DeliveryCertainty.DEFINITE_RESPONSE,
+            None,
+        ),
+    ],
+)
+def test_apply_outcome_maps_every_supported_response(
+    monkeypatch, response, code, certainty, retry_after
+):
+    client = HHApplyClient({"access_token": "token"})
+    monkeypatch.setattr(
+        client.session,
+        "apply",
+        lambda *args, **kwargs: response,
+    )
+
+    outcome = client.apply_outcome("v-1", "r-1", "")
+
+    assert outcome.code == code
+    assert outcome.certainty is certainty
+    assert outcome.retry_after_seconds == retry_after
+    assert "secret" not in outcome.location
+    assert "secret" not in json.dumps(outcome.payload)
+
+
+def test_apply_outcome_maps_typed_transport_errors_without_string_matching(
+    monkeypatch,
+):
+    client = HHApplyClient({"access_token": "token"})
+    error = HHNetworkError(
+        "late failure",
+        code="network_error",
+        delivery_certainty=DeliveryCertainty.POSSIBLY_SENT,
+    )
+    monkeypatch.setattr(
+        client.session,
+        "apply",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    outcome = client.apply_outcome("v-1", "r-1", "")
+
+    assert outcome.code == "post_dispatch_network_error"
+    assert outcome.certainty is DeliveryCertainty.POSSIBLY_SENT
+
+
+@pytest.mark.parametrize("status_code", [200, 202, 204])
+def test_unknown_noncontract_success_status_fails_closed(
+    monkeypatch, status_code
+):
+    client = HHApplyClient({"access_token": "token"})
+    monkeypatch.setattr(
+        client.session,
+        "apply",
+        lambda *args, **kwargs: _DispatchResponse(
+            status_code,
+            None,
+            raw_content=b"",
+        ),
+    )
+
+    outcome = client.apply_outcome("v-1", "r-1", "")
+
+    assert outcome.code == "post_dispatch_parse_error"
+    assert outcome.certainty is DeliveryCertainty.POSSIBLY_SENT
+
+
+def test_error_classification_uses_exact_typed_fields_not_substrings(
+    monkeypatch,
+):
+    client = HHApplyClient({"access_token": "token"})
+    monkeypatch.setattr(
+        client.session,
+        "apply",
+        lambda *args, **kwargs: _DispatchResponse(
+            400,
+            {
+                "errors": [
+                    {
+                        "type": "bad_argument",
+                        "value": "not_already_applied",
+                        "description": "captcha is explained in documentation",
+                    }
+                ]
+            },
+        ),
+    )
+
+    outcome = client.apply_outcome("v-1", "r-1", "")
+
+    assert outcome.code == "invalid_request"
+    assert outcome.certainty is DeliveryCertainty.DEFINITE_RESPONSE
+
+
+def test_legacy_apply_shape_is_preserved_by_typed_adapter(monkeypatch):
+    client = HHApplyClient({"access_token": "token"})
+    monkeypatch.setattr(
+        client.session,
+        "apply",
+        lambda *args, **kwargs: _DispatchResponse(201, {"id": "n-1"}),
+    )
+
+    result = client.apply("v-1", "r-1", "")
+
+    assert result == {
+        "status": "created",
+        "status_code": 201,
+        "location": "",
+        "raw_result": {"id": "n-1"},
+    }
 
 
 def test_extract_xsrf_token_prefers_cookie_then_html():

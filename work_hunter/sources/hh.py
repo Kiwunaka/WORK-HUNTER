@@ -7,12 +7,23 @@ import re
 import shutil
 import subprocess
 import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from ..hh_transport import HHApiSession
 from ..hh_transport.backends import ConfigBackend
-from ..hh_transport.errors import HHNetworkError, HHParseError
-from ..hh_autopilot.types import SearchPage
+from ..hh_transport.errors import (
+    HHNetworkError,
+    HHParseError,
+    HHTransportError,
+)
+from ..hh_autopilot.sanitization import sanitize_text
+from ..hh_autopilot.types import (
+    DeliveryCertainty,
+    DispatchOutcome,
+    SearchPage,
+)
 from ..models import Job
 from .common import USER_AGENT, absolute_url, clean_text, fetch_url
 
@@ -413,6 +424,32 @@ class HHApplyClient:
             "raw_result": raw,
         }
 
+    def apply_outcome(
+        self,
+        vacancy_id: str,
+        resume_id: str,
+        message: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> DispatchOutcome:
+        try:
+            response = self.session.apply(
+                vacancy_id,
+                resume_id,
+                message,
+                timeout=timeout_seconds,
+            )
+            raw = _response_json_for_dispatch(response)
+        except HHTransportError as exc:
+            return DispatchOutcome(
+                code=_dispatch_error_code(exc),
+                certainty=exc.delivery_certainty,
+                status_code=exc.status_code,
+                retry_after_seconds=_retry_after_seconds(exc.payload),
+                payload=_sanitized_dispatch_payload(exc.payload),
+            )
+        return _dispatch_outcome_from_response(response, raw)
+
     def submit_vacancy_test(
         self,
         vacancy_id: str,
@@ -464,6 +501,307 @@ def _response_json(response: Any) -> dict[str, Any]:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _response_json_for_dispatch(response: Any) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        content = getattr(response, "content", None)
+        text = getattr(response, "text", None) if content is None else None
+        if bool(content if content is not None else text):
+            raise HHParseError(
+                "HH application response contained invalid JSON",
+                status_code=getattr(response, "status_code", None),
+                code="post_dispatch_parse_error",
+                delivery_certainty=DeliveryCertainty.POSSIBLY_SENT,
+            ) from exc
+        return {}
+    if not isinstance(data, dict):
+        raise HHParseError(
+            "HH application response must be a JSON object",
+            status_code=getattr(response, "status_code", None),
+            code="post_dispatch_parse_error",
+            delivery_certainty=DeliveryCertainty.POSSIBLY_SENT,
+        )
+    return data
+
+
+def _dispatch_error_code(exc: HHTransportError) -> str:
+    if exc.code in {
+        "post_dispatch_parse_error",
+        "read_parse_error",
+        "auth_expired",
+        "rate_limited",
+        "hh_daily_limit",
+        "server_error",
+        "forbidden",
+        "invalid_request",
+    }:
+        return exc.code
+    if exc.status_code == 401:
+        return "auth_expired"
+    if exc.status_code == 403:
+        return "forbidden"
+    if exc.status_code == 429:
+        return "rate_limited"
+    if exc.status_code is not None and exc.status_code >= 500:
+        return "server_error"
+    if exc.code == "network_error":
+        return (
+            "post_dispatch_network_error"
+            if exc.delivery_certainty is DeliveryCertainty.POSSIBLY_SENT
+            else "pre_dispatch_network_error"
+        )
+    return "internal_error"
+
+
+def _dispatch_outcome_from_response(
+    response: Any,
+    raw: dict[str, Any],
+) -> DispatchOutcome:
+    status_code = int(response.status_code)
+    raw_location = str(
+        getattr(response, "headers", {}).get("Location", "") or ""
+    )
+    location = _sanitize_dispatch_location(raw_location)
+    payload = _sanitized_dispatch_payload(raw)
+    error_tokens = _dispatch_error_tokens(raw)
+    location_kind = _dispatch_location_kind(raw_location)
+    retry_after = _retry_after_header(
+        str(getattr(response, "headers", {}).get("Retry-After", "") or "")
+    )
+
+    if location_kind == "captcha" or error_tokens.intersection(
+        {"captcha", "captcha_required"}
+    ):
+        code = "manual_captcha"
+    elif location_kind == "assessment" or error_tokens.intersection(
+        {
+            "assessment",
+            "assessment_required",
+            "knowledge_test",
+            "test_required",
+            "vacancy_test",
+        }
+    ):
+        code = "manual_assessment"
+    elif error_tokens.intersection(
+        {
+            "negotiations_limit_exceeded",
+            "vacancy_response_limit",
+            "daily_limit",
+            "response_limit_exceeded",
+        }
+    ):
+        code = "hh_daily_limit"
+    elif error_tokens.intersection(
+        {
+            "already_applied",
+            "already_responded",
+            "negotiation_already_exists",
+            "vacancy_response_already",
+        }
+    ):
+        code = "duplicate"
+    elif error_tokens.intersection(
+        {
+            "vacancy_closed",
+            "vacancy_archived",
+            "vacancy_not_found",
+            "archived_vacancy",
+        }
+    ):
+        code = "vacancy_closed"
+    elif status_code == 303 or location_kind == "form":
+        code = "form_required"
+    elif status_code == 201:
+        code = "applied"
+    elif 200 <= status_code < 300:
+        return DispatchOutcome(
+            code="post_dispatch_parse_error",
+            certainty=DeliveryCertainty.POSSIBLY_SENT,
+            status_code=status_code,
+            retry_after_seconds=retry_after,
+            location=location,
+            payload=payload,
+        )
+    elif status_code == 401:
+        code = "auth_expired"
+    elif status_code == 429:
+        code = "rate_limited"
+    elif status_code >= 500:
+        code = "server_error"
+    elif status_code == 403:
+        code = "forbidden"
+    elif status_code == 400:
+        code = "invalid_request"
+    elif 300 <= status_code < 400:
+        code = "form_required"
+    else:
+        code = "invalid_request"
+    return DispatchOutcome(
+        code=code,
+        certainty=DeliveryCertainty.DEFINITE_RESPONSE,
+        status_code=status_code,
+        retry_after_seconds=retry_after,
+        location=location,
+        payload=payload,
+    )
+
+
+def _dispatch_error_tokens(payload: dict[str, Any]) -> frozenset[str]:
+    tokens: set[str] = set()
+    top_error = payload.get("error")
+    if isinstance(top_error, str) and top_error.strip():
+        tokens.add(top_error.strip().casefold())
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        for error in errors[:20]:
+            if not isinstance(error, dict):
+                continue
+            for key in ("type", "value"):
+                value = error.get(key)
+                if isinstance(value, str) and value.strip():
+                    tokens.add(value.strip().casefold())
+    return frozenset(tokens)
+
+
+def _dispatch_location_kind(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(value.strip())
+    except ValueError:
+        return ""
+    path = parsed.path.casefold()
+    segments = tuple(
+        urllib.parse.unquote(segment).casefold()
+        for segment in path.split("/")
+        if segment
+    )
+    if "captcha" in segments:
+        return "captcha"
+    if any(
+        segment in {"test", "assessment", "knowledge-test"}
+        for segment in segments
+    ):
+        return "assessment"
+    if (
+        segments[:2] == ("applicant", "vacancy_response")
+        or segments[:2] == ("applicant", "vacancy-response")
+    ):
+        return "form"
+    return ""
+
+
+def _retry_after_header(value: str) -> int | None:
+    value = value.strip()
+    if not value:
+        return None
+    if value.isdecimal():
+        return min(int(value), 86_400)
+    try:
+        target = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    seconds = int(
+        max(
+            0,
+            (target.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+        )
+    )
+    return min(seconds, 86_400)
+
+
+def _retry_after_seconds(payload: dict[str, Any]) -> int | None:
+    for key in ("retry_after_seconds", "retry_after"):
+        value = payload.get(key)
+        if type(value) is int and 0 <= value <= 86_400:
+            return value
+        if isinstance(value, str) and value.isdecimal():
+            return min(int(value), 86_400)
+    return None
+
+
+def _sanitize_dispatch_location(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme not in {"http", "https"}:
+            return ""
+        hostname = parsed.hostname or ""
+        if not (
+            hostname == "hh.ru"
+            or hostname.endswith(".hh.ru")
+            or hostname.endswith(".hh.kz")
+        ):
+            return ""
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        value = urllib.parse.urlunsplit(
+            (parsed.scheme, netloc, parsed.path or "/", "", "")
+        )
+    else:
+        value = urllib.parse.urlunsplit(("", "", parsed.path or "/", "", ""))
+    return sanitize_text(
+        value,
+        field="dispatch.location",
+        maximum=2_000,
+        allow_empty=True,
+        markup="reject",
+        sensitive="reject",
+        overflow="truncate",
+    )
+
+
+_DISPATCH_PAYLOAD_KEYS = frozenset(
+    {
+        "description",
+        "error",
+        "errors",
+        "id",
+        "negotiation_id",
+        "type",
+        "value",
+    }
+)
+
+
+def _sanitized_dispatch_payload(payload: Any, *, depth: int = 0) -> dict[str, Any]:
+    if not isinstance(payload, dict) or depth > 3:
+        return {}
+    result: dict[str, Any] = {}
+    for raw_key, raw_value in payload.items():
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.strip().casefold()
+        if key not in _DISPATCH_PAYLOAD_KEYS:
+            continue
+        if isinstance(raw_value, dict):
+            result[key] = _sanitized_dispatch_payload(raw_value, depth=depth + 1)
+        elif isinstance(raw_value, list):
+            result[key] = [
+                _sanitized_dispatch_payload(item, depth=depth + 1)
+                for item in raw_value[:20]
+                if isinstance(item, dict)
+            ]
+        elif type(raw_value) in {int, bool} or raw_value is None:
+            result[key] = raw_value
+        elif isinstance(raw_value, str):
+            result[key] = sanitize_text(
+                raw_value,
+                field=f"dispatch.payload.{key}",
+                maximum=500,
+                allow_empty=True,
+                markup="strip",
+                sensitive="redact",
+                overflow="truncate",
+            )
+    return result
 
 
 def _hh_error_code(payload: dict[str, Any]) -> str:
