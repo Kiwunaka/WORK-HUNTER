@@ -5,10 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from work_hunter.config import _update_autopilot_authorization_projection
+from work_hunter.config import (
+    _update_autopilot_authorization_projection,
+    locked_current_config_snapshot,
+)
 
 from .config import (
     AccountSettings,
+    AutopilotConfigError,
     AutopilotSettings,
     PolicyMaterial,
     parse_autopilot_settings,
@@ -89,6 +93,23 @@ def _required_text(value: Any, *, field: str) -> str:
     return normalized
 
 
+def _config_snapshots_equal(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(
+            _config_snapshots_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _config_snapshots_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return bool(left == right)
+
+
 class HHAutopilotAuthorizer:
     def __init__(
         self,
@@ -134,36 +155,67 @@ class HHAutopilotAuthorizer:
         except KillSwitchActive as exc:
             raise AuthorizationDenied("kill_switch_active") from exc
         try:
-            projected = self._write_projection(
-                config, generations, enabled=True
-            )
-            fresh_settings = parse_autopilot_settings(projected)
-            for account_id, expected_hash in hashes.items():
-                fresh_account = self._find_account(fresh_settings, account_id)
-                if (
-                    not fresh_account.enabled
-                    or fresh_account.authorization_generation
-                    != generations[account_id]
-                ):
-                    raise AuthorizationDenied("authorization_state_mismatch")
-                if (
-                    self._policy_hash(
-                        projected,
-                        fresh_settings,
-                        fresh_account.profile_id,
-                    )
-                    != expected_hash
-                ):
-                    raise AuthorizationDenied("policy_hash_mismatch")
+            self._write_projection(config, generations, enabled=True)
+            config_path = self._require_config_path()
             try:
-                self.repository.validate_exact_active_grants(
-                    {
-                        account_id: (generations[account_id], expected_hash)
-                        for account_id, expected_hash in hashes.items()
-                    }
-                )
-            except RepositoryAuthorizationDenied as exc:
-                raise AuthorizationDenied(exc.code) from exc
+                with locked_current_config_snapshot(config_path) as current:
+                    if current is None:
+                        raise AuthorizationDenied(
+                            "config_projection_unavailable"
+                        )
+                    try:
+                        current_settings = parse_autopilot_settings(current)
+                    except AutopilotConfigError as exc:
+                        raise AuthorizationDenied(
+                            "config_projection_unavailable"
+                        ) from exc
+                    for account_id, expected_hash in hashes.items():
+                        current_account = self._find_account(
+                            current_settings,
+                            account_id,
+                        )
+                        if (
+                            not current_account.enabled
+                            or current_account.authorization_generation
+                            != generations[account_id]
+                        ):
+                            raise AuthorizationDenied(
+                                "authorization_state_mismatch"
+                            )
+                        if (
+                            self._policy_hash(
+                                current,
+                                current_settings,
+                                current_account.profile_id,
+                            )
+                            != expected_hash
+                        ):
+                            raise AuthorizationDenied("policy_hash_mismatch")
+                    self._require_stable_current_snapshot(
+                        config_path,
+                        current,
+                    )
+                    try:
+                        self.repository.validate_exact_active_grants(
+                            {
+                                account_id: (
+                                    generations[account_id],
+                                    expected_hash,
+                                )
+                                for account_id, expected_hash in hashes.items()
+                            }
+                        )
+                    except RepositoryAuthorizationDenied as exc:
+                        raise AuthorizationDenied(exc.code) from exc
+                    self._require_stable_current_snapshot(
+                        config_path,
+                        current,
+                    )
+                    authoritative_config = current
+            except AuthorizationDenied:
+                raise
+            except (OSError, UnicodeError, ValueError, TypeError, AttributeError) as exc:
+                raise AuthorizationDenied("config_projection_unavailable") from exc
         except BaseException:
             self.repository.revoke_exact_generations(
                 generations,
@@ -172,7 +224,7 @@ class HHAutopilotAuthorizer:
             )
             raise
         return EnableResult(
-            config=projected,
+            config=authoritative_config,
             generations=dict(generations),
             policy_hashes=dict(hashes),
         )
@@ -249,25 +301,69 @@ class HHAutopilotAuthorizer:
         canonical_account = _canonical_account_id(account_id)
         run_id = _positive_integer(run_id, field="run_id")
         fencing_token = _fencing_token(fencing_token)
-        settings = parse_autopilot_settings(config)
-        account = self._find_account(settings, canonical_account)
-        if account.authorization_generation is None:
+        config_path = self._require_config_path()
+        caller_config = copy.deepcopy(config)
+        caller_settings = parse_autopilot_settings(caller_config)
+        caller_account = self._find_account(caller_settings, canonical_account)
+        if caller_account.authorization_generation is None:
             raise AuthorizationDenied("authorization_state_mismatch")
-        if not account.enabled or account.paused:
+        if not caller_account.enabled or caller_account.paused:
             raise AuthorizationDenied("autopilot_disabled_or_paused")
-        current_hash = self._policy_hash(
-            config, settings, account.profile_id
+        caller_hash = self._policy_hash(
+            caller_config,
+            caller_settings,
+            caller_account.profile_id,
         )
         try:
-            snapshot = self.repository.validate_live_authorization_snapshot(
-                canonical_account,
-                generation=account.authorization_generation,
-                policy_hash=current_hash,
-                run_id=run_id,
-                fencing_token=fencing_token,
-            )
-        except RepositoryAuthorizationDenied as exc:
-            raise AuthorizationDenied(exc.code) from exc
+            with locked_current_config_snapshot(config_path) as current:
+                if current is None:
+                    raise AuthorizationDenied("config_projection_unavailable")
+                try:
+                    current_settings = parse_autopilot_settings(current)
+                except AutopilotConfigError as exc:
+                    raise AuthorizationDenied(
+                        "config_projection_unavailable"
+                    ) from exc
+                current_account = self._find_account(
+                    current_settings,
+                    canonical_account,
+                )
+                if (
+                    current_account.authorization_generation
+                    != caller_account.authorization_generation
+                ):
+                    raise AuthorizationDenied("authorization_state_mismatch")
+                if not current_account.enabled or current_account.paused:
+                    raise AuthorizationDenied("autopilot_disabled_or_paused")
+                current_hash = self._policy_hash(
+                    current,
+                    current_settings,
+                    current_account.profile_id,
+                )
+                if caller_hash != current_hash:
+                    raise AuthorizationDenied("policy_hash_mismatch")
+                self._require_stable_current_snapshot(
+                    config_path,
+                    current,
+                )
+                try:
+                    snapshot = self.repository.validate_live_authorization_snapshot(
+                        canonical_account,
+                        generation=current_account.authorization_generation,
+                        policy_hash=current_hash,
+                        run_id=run_id,
+                        fencing_token=fencing_token,
+                    )
+                except RepositoryAuthorizationDenied as exc:
+                    raise AuthorizationDenied(exc.code) from exc
+                self._require_stable_current_snapshot(
+                    config_path,
+                    current,
+                )
+        except AuthorizationDenied:
+            raise
+        except (OSError, UnicodeError, ValueError, TypeError, AttributeError) as exc:
+            raise AuthorizationDenied("config_projection_unavailable") from exc
         return LiveAuthorization(
             grant_id=snapshot.grant.id,
             scope="applications",
@@ -439,6 +535,23 @@ class HHAutopilotAuthorizer:
             config,
             projections,
         )
+
+    def _require_config_path(self) -> Path:
+        if self.config_path is None:
+            raise AuthorizationDenied("config_projection_path_required")
+        return self.config_path
+
+    @staticmethod
+    def _require_stable_current_snapshot(
+        config_path: Path,
+        expected: dict[str, Any],
+    ) -> None:
+        with locked_current_config_snapshot(config_path) as confirmed:
+            if confirmed is None or not _config_snapshots_equal(
+                expected,
+                confirmed,
+            ):
+                raise AuthorizationDenied("config_projection_unavailable")
 
     def _control_selection(
         self,

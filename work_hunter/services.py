@@ -1037,15 +1037,18 @@ class WorkHunter:
                         storage,
                         config_snapshot,
                     )
-                profile_ids = _effective_hh_auth_profile_ids(
-                    self.config,
-                    root=self.root,
-                )
-                if len(profile_ids) == 1:
-                    try:
-                        storage.reassign_legacy_application_account(profile_ids[0])
-                    except sqlite3.IntegrityError:
-                        pass
+                    if config_snapshot is not None:
+                        profile_ids = _effective_hh_auth_profile_ids(
+                            config_snapshot,
+                            root=self.root,
+                        )
+                        if len(profile_ids) == 1:
+                            try:
+                                storage.reassign_legacy_application_account(
+                                    profile_ids[0]
+                                )
+                            except sqlite3.IntegrityError:
+                                pass
             except BaseException:
                 storage.close()
                 raise

@@ -739,6 +739,30 @@ def test_single_unambiguous_legacy_hh_profile_is_reassigned(
     assert app.storage.list_applications()[0].account_profile_id == "work"
 
 
+def test_lazy_stale_startup_uses_current_identities_before_legacy_reassignment(
+    legacy_db: Path,
+) -> None:
+    root = legacy_db.parent.parent
+    initial = default_config()
+    initial["hh_account_profiles"] = {
+        "work": {"access_token": "work-secret"}
+    }
+    save_config(config_path(root), initial)
+    stale_instance = WorkHunter(root)
+    writing_instance = WorkHunter(root)
+    writing_instance.config["hh_account_profiles"]["personal"] = {
+        "access_token": "personal-secret"
+    }
+    writing_instance.save_config(writing_instance.config)
+
+    storage = stale_instance.storage
+    try:
+        assert len(storage.list_legacy_application_identities()) == 1
+        assert storage.list_applications()[0].account_profile_id == "legacy"
+    finally:
+        storage.close()
+
+
 def test_startup_reassignment_uses_canonical_raw_profile_key(
     app_factory: Callable[..., WorkHunter],
     legacy_db: Path,

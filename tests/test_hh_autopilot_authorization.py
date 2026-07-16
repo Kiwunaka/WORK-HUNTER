@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from work_hunter.config import config_path, database_path, default_config
+from work_hunter.config import (
+    config_path,
+    database_path,
+    default_config,
+    save_config,
+)
 from work_hunter.hh_autopilot.authorization import (
     AuthorizationDenied,
     HHAutopilotAuthorizer,
@@ -211,6 +216,78 @@ def test_policy_change_invalidates_existing_generation(
         )
 
 
+def test_persisted_policy_change_rejects_stale_live_authorization_config(
+    authorizer, enabled_result, config_file
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    persisted = copy.deepcopy(enabled_result.config)
+    persisted["sources"]["hh"]["autopilot"]["limits"][
+        "daily_success"
+    ] = 51
+    save_config(config_file, persisted)
+
+    with pytest.raises(AuthorizationDenied, match="policy_hash_mismatch"):
+        authorizer.issue_live_authorization(
+            "default",
+            enabled_result.config,
+            run_id=run.id,
+            fencing_token=11,
+        )
+
+
+def test_live_authorization_requires_persisted_config_path(
+    authorizer, enabled_result
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    resolver_calls = 0
+
+    def counted_material(config_snapshot, account_id):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return _material(config_snapshot, account_id)
+
+    without_path = HHAutopilotAuthorizer(
+        authorizer.repository,
+        policy_material_resolver=counted_material,
+    )
+
+    with pytest.raises(
+        AuthorizationDenied, match="config_projection_path_required"
+    ):
+        without_path.issue_live_authorization(
+            "default",
+            enabled_result.config,
+            run_id=run.id,
+            fencing_token=11,
+        )
+    assert resolver_calls == 0
+
+
+@pytest.mark.parametrize("scenario", ["missing", "corrupt", "semantic"])
+def test_live_authorization_fails_closed_without_valid_current_snapshot(
+    authorizer, enabled_result, config_file, scenario
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    if scenario == "missing":
+        config_file.unlink()
+    elif scenario == "corrupt":
+        config_file.write_text('{"broken":', encoding="utf-8")
+    else:
+        malformed = copy.deepcopy(enabled_result.config)
+        malformed["sources"]["hh"]["autopilot"]["accounts"] = "broken"
+        config_file.write_text(json.dumps(malformed), encoding="utf-8")
+
+    with pytest.raises(
+        AuthorizationDenied, match="config_projection_unavailable"
+    ):
+        authorizer.issue_live_authorization(
+            "default",
+            enabled_result.config,
+            run_id=run.id,
+            fencing_token=11,
+        )
+
+
 def test_generation_change_invalidates_existing_grant(
     authorizer, enabled_result
 ) -> None:
@@ -324,19 +401,21 @@ def test_enable_cannot_race_an_account_kill_and_leave_a_dormant_grant(
 
 
 def test_enable_revalidates_policy_from_fresh_projection_before_success(
-    authorizer, valid_config, monkeypatch
+    authorizer, valid_config, config_file, monkeypatch
 ) -> None:
     real_write = authorizer._write_projection
 
-    def return_concurrently_changed_policy(*args, **kwargs):
+    def persist_concurrently_changed_policy(*args, **kwargs):
         projected = real_write(*args, **kwargs)
-        projected["sources"]["hh"]["autopilot"]["limits"][
+        changed = copy.deepcopy(projected)
+        changed["sources"]["hh"]["autopilot"]["limits"][
             "daily_success"
         ] = 51
+        save_config(config_file, changed)
         return projected
 
     monkeypatch.setattr(
-        authorizer, "_write_projection", return_concurrently_changed_policy
+        authorizer, "_write_projection", persist_concurrently_changed_policy
     )
 
     with pytest.raises(AuthorizationDenied, match="policy_hash_mismatch"):
@@ -516,6 +595,360 @@ def test_enable_final_validation_rechecks_account_a_after_account_b_resolver(
     assert active_default is not None
     assert active_default.generation == 2
     assert repository.active_grant("second", "applications") is None
+
+
+def test_enable_rejects_policy_saved_after_projection_before_current_snapshot(
+    authorizer, valid_config, config_file, monkeypatch
+) -> None:
+    projection_written = threading.Event()
+    writer_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    real_write = authorizer._write_projection
+
+    def wait_for_policy_writer(*args, **kwargs):
+        projected = real_write(*args, **kwargs)
+        projection_written.set()
+        assert writer_finished.wait(timeout=5)
+        return projected
+
+    def save_changed_policy() -> None:
+        try:
+            assert projection_written.wait(timeout=5)
+            changed = copy.deepcopy(valid_config)
+            changed["sources"]["hh"]["autopilot"]["limits"][
+                "daily_success"
+            ] = 51
+            save_config(config_file, changed)
+        except BaseException as exc:
+            writer_errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    monkeypatch.setattr(authorizer, "_write_projection", wait_for_policy_writer)
+    writer = threading.Thread(target=save_changed_policy)
+    writer.start()
+    try:
+        with pytest.raises(AuthorizationDenied, match="policy_hash_mismatch"):
+            authorizer.enable(
+                ["default"],
+                valid_config,
+                confirm=True,
+                actor="cli",
+                source="test",
+            )
+    finally:
+        writer_finished.set()
+        writer.join(timeout=5)
+
+    assert writer.is_alive() is False
+    assert writer_errors == []
+    assert authorizer.repository.active_grant("default", "applications") is None
+    persisted = json.loads(config_file.read_text(encoding="utf-8"))
+    assert persisted["sources"]["hh"]["autopilot"]["limits"][
+        "daily_success"
+    ] == 51
+
+
+def test_enable_returns_exact_current_snapshot_after_non_policy_save(
+    authorizer, valid_config, config_file, monkeypatch
+) -> None:
+    projection_written = threading.Event()
+    writer_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    real_write = authorizer._write_projection
+
+    def wait_for_config_writer(*args, **kwargs):
+        projected = real_write(*args, **kwargs)
+        projection_written.set()
+        assert writer_finished.wait(timeout=5)
+        return projected
+
+    def save_non_policy_change() -> None:
+        try:
+            assert projection_written.wait(timeout=5)
+            changed = copy.deepcopy(valid_config)
+            changed["research"]["max_results"] = 321
+            save_config(config_file, changed)
+        except BaseException as exc:
+            writer_errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    monkeypatch.setattr(authorizer, "_write_projection", wait_for_config_writer)
+    writer = threading.Thread(target=save_non_policy_change)
+    writer.start()
+    try:
+        enabled = authorizer.enable(
+            ["default"],
+            valid_config,
+            confirm=True,
+            actor="cli",
+            source="test",
+        )
+    finally:
+        writer_finished.set()
+        writer.join(timeout=5)
+
+    assert writer.is_alive() is False
+    assert writer_errors == []
+    persisted = json.loads(config_file.read_text(encoding="utf-8"))
+    assert enabled.config == persisted
+    assert enabled.config["research"]["max_results"] == 321
+
+
+def test_policy_writer_blocks_during_enable_snapshot_and_stale_live_auth_denies(
+    authorizer, valid_config, config_file
+) -> None:
+    resolver_calls = 0
+    current_resolver_entered = threading.Event()
+    writer_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    writer_committed_during_resolver: list[bool] = []
+
+    def blocking_material(config_snapshot, account_id):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls == 2:
+            current_resolver_entered.set()
+            writer_committed_during_resolver.append(
+                writer_finished.wait(timeout=1)
+            )
+        return _material(config_snapshot, account_id)
+
+    def save_changed_policy() -> None:
+        try:
+            assert current_resolver_entered.wait(timeout=5)
+            changed = copy.deepcopy(valid_config)
+            changed["sources"]["hh"]["autopilot"]["limits"][
+                "daily_success"
+            ] = 51
+            save_config(config_file, changed)
+        except BaseException as exc:
+            writer_errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    authorizer.policy_material_resolver = blocking_material
+    writer = threading.Thread(target=save_changed_policy)
+    writer.start()
+    try:
+        enabled = authorizer.enable(
+            ["default"],
+            valid_config,
+            confirm=True,
+            actor="cli",
+            source="test",
+        )
+    finally:
+        writer_finished.wait(timeout=5)
+        writer.join(timeout=5)
+
+    assert writer.is_alive() is False
+    assert writer_errors == []
+    assert writer_committed_during_resolver == [False]
+    grant = authorizer.repository.active_grant("default", "applications")
+    assert grant is not None
+    run = authorizer.repository.create_run(
+        "default",
+        trigger="manual",
+        policy_hash=enabled.policy_hashes["default"],
+        grant_id=grant.id,
+        fencing_token=11,
+    )
+    with pytest.raises(AuthorizationDenied, match="policy_hash_mismatch"):
+        authorizer.issue_live_authorization(
+            "default",
+            enabled.config,
+            run_id=run.id,
+            fencing_token=11,
+        )
+
+
+def test_policy_writer_blocks_during_live_authorization_snapshot(
+    authorizer, enabled_result, config_file, monkeypatch
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    snapshot_entered = threading.Event()
+    writer_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    writer_committed_during_snapshot: list[bool] = []
+    real_validate = authorizer.repository.validate_live_authorization_snapshot
+
+    def blocking_validate(*args, **kwargs):
+        snapshot_entered.set()
+        writer_committed_during_snapshot.append(
+            writer_finished.wait(timeout=1)
+        )
+        return real_validate(*args, **kwargs)
+
+    def save_changed_policy() -> None:
+        try:
+            assert snapshot_entered.wait(timeout=5)
+            changed = copy.deepcopy(enabled_result.config)
+            changed["sources"]["hh"]["autopilot"]["limits"][
+                "daily_success"
+            ] = 51
+            save_config(config_file, changed)
+        except BaseException as exc:
+            writer_errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    monkeypatch.setattr(
+        authorizer.repository,
+        "validate_live_authorization_snapshot",
+        blocking_validate,
+    )
+    writer = threading.Thread(target=save_changed_policy)
+    writer.start()
+    try:
+        authorization = authorizer.issue_live_authorization(
+            "default",
+            enabled_result.config,
+            run_id=run.id,
+            fencing_token=11,
+        )
+    finally:
+        writer_finished.wait(timeout=5)
+        writer.join(timeout=5)
+
+    assert isinstance(authorization, LiveAuthorization)
+    assert writer.is_alive() is False
+    assert writer_errors == []
+    assert writer_committed_during_snapshot == [False]
+
+
+def test_enable_rejects_reentrant_policy_save_from_current_resolver(
+    authorizer, valid_config, config_file
+) -> None:
+    resolver_calls = 0
+
+    def mutating_material(config_snapshot, account_id):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls == 2:
+            changed = copy.deepcopy(config_snapshot)
+            changed["sources"]["hh"]["autopilot"]["limits"][
+                "daily_success"
+            ] = 51
+            save_config(config_file, changed)
+        return _material(config_snapshot, account_id)
+
+    authorizer.policy_material_resolver = mutating_material
+
+    with pytest.raises(
+        AuthorizationDenied, match="config_projection_unavailable"
+    ):
+        authorizer.enable(
+            ["default"],
+            valid_config,
+            confirm=True,
+            actor="cli",
+            source="test",
+        )
+
+    assert authorizer.repository.active_grant("default", "applications") is None
+
+
+def test_live_authorization_rejects_reentrant_policy_save_from_current_resolver(
+    authorizer, enabled_result, config_file
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    resolver_calls = 0
+
+    def mutating_material(config_snapshot, account_id):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        if resolver_calls == 2:
+            changed = copy.deepcopy(config_snapshot)
+            changed["sources"]["hh"]["autopilot"]["limits"][
+                "daily_success"
+            ] = 51
+            save_config(config_file, changed)
+        return _material(config_snapshot, account_id)
+
+    authorizer.policy_material_resolver = mutating_material
+
+    with pytest.raises(
+        AuthorizationDenied, match="config_projection_unavailable"
+    ):
+        authorizer.issue_live_authorization(
+            "default",
+            enabled_result.config,
+            run_id=run.id,
+            fencing_token=11,
+        )
+
+
+def test_enable_rejects_reentrant_policy_save_from_repository_snapshot(
+    authorizer, valid_config, config_file
+) -> None:
+    policy_saved = False
+
+    def save_policy_during_grant_read(statement: str) -> None:
+        nonlocal policy_saved
+        normalized = " ".join(statement.split()).casefold()
+        if policy_saved or "select * from hh_autopilot_grants" not in normalized:
+            return
+        policy_saved = True
+        changed = copy.deepcopy(valid_config)
+        changed["sources"]["hh"]["autopilot"]["limits"][  # type: ignore[index]
+            "daily_success"
+        ] = 51
+        save_config(config_file, changed)
+
+    authorizer.repository.conn.set_trace_callback(save_policy_during_grant_read)
+    try:
+        with pytest.raises(
+            AuthorizationDenied, match="config_projection_unavailable"
+        ):
+            authorizer.enable(
+                ["default"],
+                valid_config,
+                confirm=True,
+                actor="cli",
+                source="test",
+            )
+    finally:
+        authorizer.repository.conn.set_trace_callback(None)
+
+    assert policy_saved is True
+    assert authorizer.repository.active_grant("default", "applications") is None
+
+
+def test_live_authorization_rejects_reentrant_policy_save_from_repository_snapshot(
+    authorizer, enabled_result, config_file
+) -> None:
+    run = _running_authorized_run(authorizer, enabled_result)
+    policy_saved = False
+
+    def save_policy_during_grant_read(statement: str) -> None:
+        nonlocal policy_saved
+        normalized = " ".join(statement.split()).casefold()
+        if policy_saved or "select * from hh_autopilot_grants" not in normalized:
+            return
+        policy_saved = True
+        changed = copy.deepcopy(enabled_result.config)
+        changed["sources"]["hh"]["autopilot"]["limits"][  # type: ignore[index]
+            "daily_success"
+        ] = 51
+        save_config(config_file, changed)
+
+    authorizer.repository.conn.set_trace_callback(save_policy_during_grant_read)
+    try:
+        with pytest.raises(
+            AuthorizationDenied, match="config_projection_unavailable"
+        ):
+            authorizer.issue_live_authorization(
+                "default",
+                enabled_result.config,
+                run_id=run.id,
+                fencing_token=11,
+            )
+    finally:
+        authorizer.repository.conn.set_trace_callback(None)
+
+    assert policy_saved is True
 
 
 def test_missing_file_enable_sanitizes_unselected_fallback_projections(
