@@ -4478,3 +4478,97 @@ def test_signed_zero_ranking_round_trips_canonically_through_sqlite(repo) -> Non
     assert math.copysign(1.0, ranked.deterministic_score) == 1.0
     assert math.copysign(1.0, float(row["deterministic_score"])) == 1.0
     assert "-0.0" not in row["ai_json"]
+
+
+def test_generic_transition_omission_cannot_borrow_a_newer_lease(repo) -> None:
+    old_lease = repo.acquire_lease(
+        "default",
+        "old-owner",
+        ttl_seconds=1,
+        now=LEASE_START,
+    )
+    run = repo.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="hash",
+        fencing_token=old_lease.fencing_token,
+    )
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    new_lease = repo.acquire_lease(
+        "default",
+        "new-owner",
+        ttl_seconds=3600,
+        now=LEASE_START + timedelta(seconds=2),
+    )
+    assert new_lease is not None
+    before = (repo.get_item(item.id), repo.list_events(item.id))
+
+    with pytest.raises(LostLease):
+        repo.transition_item(
+            item.id,
+            item.version,
+            AutopilotState.SKIPPED,
+            "internal_error",
+            fencing_token=new_lease.fencing_token,
+        )
+
+    assert (repo.get_item(item.id), repo.list_events(item.id)) == before
+
+
+def test_generic_transition_omission_rejects_a_completed_effective_run(
+    repo,
+) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    repo.finish_run(run.id, status="completed")
+    before = (repo.get_item(item.id), repo.list_events(item.id))
+
+    with pytest.raises(StaleWrite, match="running"):
+        repo.transition_item(
+            item.id,
+            item.version,
+            AutopilotState.SKIPPED,
+            "internal_error",
+        )
+
+    assert (repo.get_item(item.id), repo.list_events(item.id)) == before
+
+
+def test_generic_transition_persists_the_effective_unfenced_manual_run(
+    repo,
+) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+
+    changed = repo.transition_item(
+        item.id,
+        item.version,
+        AutopilotState.SKIPPED,
+        "internal_error",
+    )
+
+    assert changed.last_run_id == run.id
+    assert repo.list_events(item.id)[-1]["run_id"] == run.id
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    ["schedule", "retry", "recovery", "canary"],
+)
+def test_generic_transition_rejects_unfenced_live_runs(
+    repo,
+    trigger: str,
+) -> None:
+    run = repo.create_run("default", trigger=trigger, policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    before = (repo.get_item(item.id), repo.list_events(item.id))
+
+    with pytest.raises(LostLease, match="fence"):
+        repo.transition_item(
+            item.id,
+            item.version,
+            AutopilotState.SKIPPED,
+            "internal_error",
+        )
+
+    assert (repo.get_item(item.id), repo.list_events(item.id)) == before

@@ -2414,32 +2414,26 @@ class AutopilotRepository:
         }
         if not allow_stage_owned and (current.state, target) in stage_owned_edges:
             raise ValueError("transition is stage-owned by the ranking pipeline")
-        if run_id is not None:
-            self._assert_active_owned_run_for_update(
-                current,
-                run_id=run_id,
-                fencing_token=fencing_token,
-                instant=fence_instant,
-                operation="item transition",
-            )
-        elif fencing_token is not None:
-            self._assert_fence(
-                current.account_id,
-                fencing_token,
-                fence_instant,
-            )
+        effective_run_id = current.last_run_id if run_id is None else run_id
+        self._assert_active_owned_run_for_update(
+            current,
+            run_id=effective_run_id,
+            fencing_token=fencing_token,
+            instant=fence_instant,
+            operation="item transition",
+        )
         assert_transition(current.state, target)
         cursor = self.conn.execute(
             """
             UPDATE hh_autopilot_items
             SET state = ?, version = version + 1,
-                last_run_id = COALESCE(?, last_run_id),
+                last_run_id = ?,
                 last_outcome_code = ?, updated_at = ?
             WHERE id = ? AND version = ?
             """,
             (
                 target.value,
-                run_id,
+                effective_run_id,
                 reason,
                 fence_instant.isoformat(),
                 item_id,
@@ -2450,7 +2444,7 @@ class AutopilotRepository:
             raise StaleWrite(f"item {item_id} compare-and-swap failed")
         self._insert_event(
             item_id=item_id,
-            run_id=run_id,
+            run_id=effective_run_id,
             previous=current.state,
             target=target,
             reason=reason,
@@ -4673,6 +4667,10 @@ class AutopilotRepository:
         if item.last_run_id != run_id:
             raise ValueError(f"{operation} requires the same run as the item")
         if run.fencing_token == 0:
+            if run.trigger != "manual":
+                raise LostLease(
+                    f"{operation} requires a persisted run fence"
+                )
             if fencing_token is not None:
                 raise LostLease(
                     f"{operation} cannot add a fence to an unfenced run"

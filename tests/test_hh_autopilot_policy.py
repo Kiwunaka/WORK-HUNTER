@@ -818,3 +818,76 @@ def test_hard_filter_validates_salary_range_even_when_floor_is_disabled() -> Non
 
     assert decision.reason == "missing_required_data"
     assert decision.evidence["field"] == "vacancy.salary"
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "Bearer\u200babc123",
+        "access_token\u200b=abc123",
+        "Bearer&#x200b;abc123",
+        "Ｂｅａｒｅｒ　abc123",
+        "access_token%3Dabc123",
+        "access_token%253Dabc123",
+        "%3Cscript%3Esecret%3C/script%3E",
+        "＜script＞secret＜/script＞",
+        "иван@example.ru",
+        "john@пример.рф",
+        "Москва, ул. Тверская, д. 12",
+        "Pennsylvania Ave 1600",
+        "socks5://username@localhost:8080",
+        "http://user%3Apass@localhost",
+        "http://user%253Apass@localhost",
+        "Python\u200bEngineer",
+        "Python\u202eEngineer",
+        "Python\u0007Engineer",
+    ],
+)
+def test_filter_decision_rejects_unicode_obfuscated_sensitive_text(
+    unsafe: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        FilterDecision(
+            False,
+            "hard_filter:excluded_keywords",
+            {"matched": (unsafe,)},
+        )
+
+
+@pytest.mark.parametrize(
+    "phone",
+    [
+        "+7 (999) 123-45-67",
+        "+1 212 555 0123",
+        "212-555-0123",
+    ],
+)
+def test_filter_decision_keeps_detecting_real_phone_numbers(
+    phone: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        FilterDecision(
+            False,
+            "hard_filter:excluded_keywords",
+            {"matched": (phone,)},
+        )
+
+
+def test_filter_decision_preserves_dates_and_ordinary_unicode() -> None:
+    decision = FilterDecision(
+        False,
+        "hard_filter:excluded_keywords",
+        {
+            "matched": (
+                "2019-01-01 - 2025-12-31",
+                "Разработчик Python — 東京",
+                "100% remote",
+            )
+        },
+    )
+
+    assert decision.evidence["matched"] == (
+        "2019-01-01 - 2025-12-31",
+        "Разработчик Python — 東京",
+        "100% remote",
+    )

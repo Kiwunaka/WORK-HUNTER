@@ -35,6 +35,26 @@ COMPONENTS = (
     "area",
     "industry",
 )
+UNICODE_UNSAFE_TEXT = (
+    "Bearer\u200babc123",
+    "access_token\u200b=abc123",
+    "Bearer&#x200b;abc123",
+    "Ｂｅａｒｅｒ　abc123",
+    "access_token%3Dabc123",
+    "access_token%253Dabc123",
+    "%3Cscript%3Esecret%3C/script%3E",
+    "＜script＞secret＜/script＞",
+    "иван@example.ru",
+    "john@пример.рф",
+    "Москва, ул. Тверская, д. 12",
+    "Pennsylvania Ave 1600",
+    "socks5://username@localhost:8080",
+    "http://user%3Apass@localhost",
+    "http://user%253Apass@localhost",
+    "Python\u200bEngineer",
+    "Python\u202eEngineer",
+    "Python\u0007Engineer",
+)
 
 
 def _weights(**changes: float) -> dict[str, float]:
@@ -1464,3 +1484,73 @@ def test_redacted_prompt_sentinel_cannot_ground_ai_output() -> None:
 
     assert decision.available is False
     assert decision.reason == "ai_unavailable"
+
+
+@pytest.mark.parametrize("unsafe", UNICODE_UNSAFE_TEXT)
+def test_ai_decision_rejects_unicode_obfuscated_sensitive_text(
+    unsafe: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        AIDecision(
+            available=True,
+            suitable=True,
+            confidence=0.9,
+            evidence=(unsafe,),
+            reasons=(),
+        )
+
+
+@pytest.mark.parametrize("unsafe", UNICODE_UNSAFE_TEXT)
+def test_structured_ai_never_sends_unicode_obfuscated_sensitive_text(
+    unsafe: str,
+) -> None:
+    calls: list[Any] = []
+    vacancy, resume, candidate = _facts()
+    vacancy["description"] = unsafe
+    decision = StructuredAIRanker(
+        {"model": "test"},
+        structured_call=lambda *args, **kwargs: calls.append((args, kwargs)),
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert decision.available is False
+    assert decision.reason == "ai_unavailable"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "phone",
+    [
+        "+7 (999) 123-45-67",
+        "+1 212 555 0123",
+        "212-555-0123",
+    ],
+)
+def test_ai_decision_keeps_detecting_real_phone_numbers(phone: str) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        AIDecision(
+            available=True,
+            suitable=True,
+            confidence=0.9,
+            evidence=(phone,),
+            reasons=(),
+        )
+
+
+def test_ai_decision_preserves_dates_and_ordinary_unicode() -> None:
+    decision = AIDecision(
+        available=True,
+        suitable=True,
+        confidence=0.9,
+        evidence=(
+            "2019-01-01 - 2025-12-31",
+            "Разработчик Python — 東京",
+            "100% remote",
+        ),
+        reasons=(),
+    )
+
+    assert decision.evidence == (
+        "2019-01-01 - 2025-12-31",
+        "Разработчик Python — 東京",
+        "100% remote",
+    )
