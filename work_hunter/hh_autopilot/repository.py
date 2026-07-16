@@ -5134,6 +5134,11 @@ class AutopilotRepository:
         )
         instant = _instant(now, field="now")
         stored_outcome = _dispatch_storage_payload(outcome)
+        challenge_url = ""
+        if decision.target is AutopilotState.MANUAL_CHALLENGE:
+            from .challenges import sanitize_hh_url
+
+            challenge_url = sanitize_hh_url(str(stored_outcome.get("location", "")))
 
         with self.immediate():
             current = self._validate_prepared_for_update(
@@ -5197,8 +5202,8 @@ class AutopilotRepository:
                         scope,
                         challenge_type,
                         prepared.account_id,
-                        prepared.item_id if scope == "item" else None,
-                        stored_outcome.get("location", ""),
+                        prepared.item_id,
+                        challenge_url,
                         expiry,
                         _json_dumps(
                             _dispatch_event_metadata(outcome),
@@ -6276,6 +6281,338 @@ class AutopilotRepository:
             "SELECT * FROM hh_autopilot_challenges WHERE id = ?", (challenge_id,)
         ).fetchone()
         return self._challenge_from_row(row) if row is not None else None
+
+    def dispatch_reservation(self, item_id: int) -> QuotaReservationRecord | None:
+        """Return the reservation attached to an item's latest dispatch attempt."""
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        item = self.get_item(item_id)
+        if item is None or item.active_attempt_id is None:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_quota_reservations
+            WHERE attempt_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (item.active_attempt_id,),
+        ).fetchone()
+        return self._reservation_from_row(row) if row is not None else None
+
+    def open_manual_challenge(
+        self,
+        item_id: int,
+        *,
+        expected_version: int,
+        challenge_type: str,
+        sanitized_url: str,
+        fencing_token: int,
+        expiry_hours: int = 24,
+        metadata: dict[str, Any] | None = None,
+        now: datetime | str | None = None,
+    ) -> ChallengeRecord:
+        """Atomically stop a dispatch and hand a CAPTCHA/task/auth step to the user."""
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        expected_version = _integer(expected_version, field="expected_version")
+        challenge_type = _required_text(challenge_type, field="challenge_type")
+        if challenge_type not in {
+            "manual_captcha",
+            "manual_assessment",
+            "manual_auth",
+        }:
+            raise ValueError("unsupported manual challenge type")
+        sanitized_url = _optional_text(
+            sanitized_url,
+            field="sanitized_url",
+            maximum=2_000,
+        )
+        if "?" in sanitized_url or "#" in sanitized_url:
+            raise ValueError("challenge URL must not contain query or fragment data")
+        fencing_token = _integer(
+            fencing_token,
+            field="fencing_token",
+            minimum=1,
+        )
+        expiry_hours = _integer(expiry_hours, field="expiry_hours", minimum=1)
+        metadata_json = _json_dumps(metadata, field="challenge metadata")
+        instant = _instant(now, field="now")
+        scope = "account" if challenge_type == "manual_auth" else "item"
+
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            self._assert_fence(current.account_id, fencing_token, instant)
+            existing_row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_challenges
+                WHERE challenge_type = ? AND account_profile_id = ?
+                  AND item_id = ? AND status IN ('open','in_progress')
+                ORDER BY id ASC LIMIT 1
+                """,
+                (challenge_type, current.account_id, current.id),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._challenge_from_row(existing_row)
+                if current.challenge_id != existing.id:
+                    raise StaleWrite("open challenge is not linked to the item")
+                return existing
+            if current.version != expected_version:
+                raise StaleWrite(f"item {item_id} version changed")
+            if current.state not in {
+                AutopilotState.APPLYING,
+                AutopilotState.RECONCILING,
+            }:
+                raise StaleWrite("manual challenge requires an active dispatch stage")
+            if current.active_attempt_id is None:
+                raise StaleWrite("manual challenge has no active attempt")
+            reservation_row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_quota_reservations
+                WHERE attempt_id = ? ORDER BY id DESC LIMIT 1
+                """,
+                (current.active_attempt_id,),
+            ).fetchone()
+            if reservation_row is None:
+                raise StaleWrite("manual challenge has no dispatch reservation")
+            reservation = self._reservation_from_row(reservation_row)
+            keep_held = (
+                challenge_type == "manual_auth"
+                and current.state is AutopilotState.RECONCILING
+                and reservation.state is QuotaReservationState.HELD
+            )
+            if not keep_held and reservation.state in {
+                QuotaReservationState.RESERVED,
+                QuotaReservationState.HELD,
+            }:
+                reservation = self._change_reservation_state_for_update(
+                    reservation.id,
+                    fencing_token,
+                    target=QuotaReservationState.RELEASED,
+                    remote_negotiation_id=None,
+                    instant=instant,
+                )
+                self.conn.execute(
+                    """
+                    DELETE FROM hh_application_account_guards
+                    WHERE account_profile_id = ? AND source = 'hh'
+                      AND source_id = ? AND status = 'active'
+                      AND owner_attempt_id = ?
+                    """,
+                    (current.account_id, current.vacancy_id, current.active_attempt_id),
+                )
+                self.conn.execute(
+                    """
+                    UPDATE hh_application_attempts
+                    SET status = ?, reason = ?, finished_at = ?
+                    WHERE id = ? AND status IN ('applying','reconciling')
+                    """,
+                    (
+                        AutopilotState.MANUAL_CHALLENGE.value,
+                        challenge_type,
+                        instant.isoformat(),
+                        current.active_attempt_id,
+                    ),
+                )
+
+            expires_at = (
+                ""
+                if scope == "account"
+                else (instant + timedelta(hours=expiry_hours)).isoformat()
+            )
+            cursor = self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_challenges (
+                    scope, challenge_type, account_profile_id, item_id,
+                    reservation_id, sanitized_url, screenshot_path,
+                    status, expires_at, metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, '', 'open', ?, ?, ?)
+                """,
+                (
+                    scope,
+                    challenge_type,
+                    current.account_id,
+                    current.id,
+                    reservation.id,
+                    sanitized_url,
+                    expires_at,
+                    metadata_json,
+                    instant.isoformat(),
+                ),
+            )
+            challenge_id = _required_lastrowid(cursor)
+            assert_transition(current.state, AutopilotState.MANUAL_CHALLENGE)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = 'manual_challenge', version = version + 1,
+                    challenge_id = ?, next_attempt_at = '',
+                    last_outcome_code = ?, updated_at = ?
+                WHERE id = ? AND version = ? AND state = ?
+                """,
+                (
+                    challenge_id,
+                    challenge_type,
+                    instant.isoformat(),
+                    current.id,
+                    current.version,
+                    current.state.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("manual challenge item compare-and-swap failed")
+            self._insert_event(
+                item_id=current.id,
+                run_id=current.last_run_id,
+                previous=current.state,
+                target=AutopilotState.MANUAL_CHALLENGE,
+                reason=challenge_type,
+                metadata={"challenge_id": challenge_id},
+                created_at=instant,
+            )
+            return self._challenge_for_update(challenge_id)
+
+    def resolve_manual_challenge(
+        self,
+        challenge_id: int,
+        *,
+        action: str,
+        actor: str,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        challenge_id = _integer(challenge_id, field="challenge_id", minimum=1)
+        action = _required_text(action, field="action").casefold()
+        if action in {"skip", "skipped"}:
+            action = "dismiss"
+        if action not in {"completed", "dismiss", "expire"}:
+            raise ValueError("unsupported manual challenge resolution action")
+        actor = _required_text(actor, field="actor")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+
+        with self.immediate():
+            challenge = self._challenge_for_update(challenge_id)
+            self._assert_fence(challenge.account_id, fencing_token, instant)
+            if challenge.challenge_type not in {
+                "manual_captcha",
+                "manual_assessment",
+                "manual_auth",
+            }:
+                raise ValueError("challenge is not a manual browser challenge")
+            closed_status = {
+                "completed": "resolved",
+                "dismiss": "dismissed",
+                "expire": "expired",
+            }[action]
+            linked_rows = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_items
+                WHERE challenge_id = ? ORDER BY id ASC
+                """,
+                (challenge.id,),
+            ).fetchall()
+            linked = [self._item_from_row(row) for row in linked_rows]
+            if challenge.status == closed_status and challenge.resolution_action == action:
+                if challenge.item_id is None:
+                    raise StaleWrite("resolved account challenge has no primary item")
+                return self._item_for_update(challenge.item_id)
+            if challenge.status not in {"open", "in_progress"}:
+                raise StaleWrite("manual challenge is already closed")
+            if not linked:
+                raise StaleWrite("manual challenge has no linked items")
+            if action == "expire":
+                if not challenge.expires_at or _instant(
+                    challenge.expires_at,
+                    field="challenge expires_at",
+                ) > instant:
+                    raise ValueError("manual challenge has not expired")
+
+            primary_id = challenge.item_id or linked[0].id
+            for current in linked:
+                if current.state is not AutopilotState.MANUAL_CHALLENGE:
+                    raise StaleWrite("manual challenge item changed")
+                if action == "completed":
+                    target = (
+                        AutopilotState.RECONCILING
+                        if current.retry_stage is RetryStage.RECONCILIATION
+                        else AutopilotState.READY
+                    )
+                    reason = f"{challenge.challenge_type}_completed"
+                else:
+                    target = AutopilotState.SKIPPED
+                    reason = (
+                        "challenge_expired"
+                        if action == "expire"
+                        else "challenge_dismissed"
+                    )
+                    if current.active_attempt_id is not None:
+                        reservation_row = self.conn.execute(
+                            """
+                            SELECT * FROM hh_autopilot_quota_reservations
+                            WHERE attempt_id = ? ORDER BY id DESC LIMIT 1
+                            """,
+                            (current.active_attempt_id,),
+                        ).fetchone()
+                        if reservation_row is not None:
+                            reservation = self._reservation_from_row(reservation_row)
+                            if reservation.state in {
+                                QuotaReservationState.RESERVED,
+                                QuotaReservationState.HELD,
+                            }:
+                                self._change_reservation_state_for_update(
+                                    reservation.id,
+                                    fencing_token,
+                                    target=QuotaReservationState.RELEASED,
+                                    remote_negotiation_id=None,
+                                    instant=instant,
+                                )
+                assert_transition(current.state, target)
+                cursor = self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_items
+                    SET state = ?, version = version + 1, challenge_id = NULL,
+                        next_attempt_at = ?, last_outcome_code = ?, updated_at = ?
+                    WHERE id = ? AND version = ? AND state = 'manual_challenge'
+                      AND challenge_id = ?
+                    """,
+                    (
+                        target.value,
+                        instant.isoformat()
+                        if target is AutopilotState.RECONCILING
+                        else "",
+                        reason,
+                        instant.isoformat(),
+                        current.id,
+                        current.version,
+                        challenge.id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleWrite("manual challenge resolution changed")
+                self._insert_event(
+                    item_id=current.id,
+                    run_id=current.last_run_id,
+                    previous=current.state,
+                    target=target,
+                    reason=reason,
+                    metadata={"challenge_id": challenge.id, "actor": actor},
+                    created_at=instant,
+                )
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_challenges
+                SET status = ?, resolution_at = ?, resolution_actor = ?,
+                    resolution_action = ?
+                WHERE id = ? AND status IN ('open','in_progress')
+                """,
+                (
+                    closed_status,
+                    instant.isoformat(),
+                    actor,
+                    action,
+                    challenge.id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("manual challenge close changed")
+            return self._item_for_update(primary_id)
 
     def expire_challenge(
         self,

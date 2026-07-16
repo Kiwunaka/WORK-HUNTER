@@ -79,6 +79,8 @@ class HHChallengeHandler:
         metadata = {
             "challenge_mode": self.challenge_mode,
             "requires_approval": self.challenge_mode in {"manual", "ai"},
+            "resolution": "manual_browser",
+            "automatic_solver": False,
         }
         if self.challenge_mode == "off":
             metadata["disabled"] = True

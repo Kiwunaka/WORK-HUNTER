@@ -1,4 +1,5 @@
 from .api_session import HHApiSession, HHApiTransport
+from .authorize import HHBrowserAuthorizer
 from .browser_session import HHBrowserSession, extract_xsrf_token
 from .challenges import ChallengeKind, ChallengeOutcome, HHChallengeHandler
 from .cookiejar import HHOnlyCookieJar, is_hh_domain
@@ -14,6 +15,7 @@ __all__ = [
     "HHApiTransport",
     "HHAuthError",
     "HHBrowserSession",
+    "HHBrowserAuthorizer",
     "HHChallengeHandler",
     "HHForbiddenError",
     "HHIdentity",
