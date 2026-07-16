@@ -1670,6 +1670,7 @@ class AutopilotRepository:
             if (
                 run.account_id != account_id
                 or run.trigger != "shadow"
+                or run.grant_id is not None
                 or run.status != "running"
                 or run.fencing_token != fencing_token
             ):
@@ -3804,16 +3805,20 @@ class AutopilotRepository:
             raise LostLease("search cycle owner fencing token changed")
         if origin_mode == "shadow":
             if (
-                owner.id != cycle.origin_run_id
+                cycle.claim_version != 0
+                or owner.id != cycle.origin_run_id
                 or owner.trigger != "shadow"
                 or owner.grant_id is not None
             ):
                 raise StaleWrite("shadow search owner provenance changed")
         else:
+            if cycle.claim_version == 0:
+                if owner.id != cycle.origin_run_id:
+                    raise StaleWrite("unclaimed live search owner changed")
+            elif owner.trigger != "recovery":
+                raise StaleWrite("claimed live search owner trigger changed")
             if owner.trigger == "shadow":
                 raise StaleWrite("live search owner became shadow")
-            if owner.id != cycle.origin_run_id and owner.trigger != "recovery":
-                raise StaleWrite("recovered live search owner trigger changed")
             self._assert_historical_search_grant_for_update(owner, cycle=cycle)
         return owner
 

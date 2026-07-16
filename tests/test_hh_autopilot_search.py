@@ -2669,3 +2669,227 @@ def test_normalized_collections_validate_all_entries_but_store_first_100_unique(
         "duplicate",
         *(f"relation-{index}" for index in range(99)),
     )
+
+
+@pytest.mark.parametrize("operation", ["commit", "provider"])
+def test_recovery_origin_self_claim_requires_recovery_trigger_after_claim(
+    repo: AutopilotRepository,
+    operation: str,
+) -> None:
+    recovery = _context(repo, trigger="recovery", owner="recovery-origin")
+    cycle = repo.create_search_cycle(
+        "default", recovery.run.id, "hash", recovery.lease.fencing_token
+    )
+    checkpoint = repo.ensure_search_checkpoint(
+        cycle.id, "r-1", "preset:existing"
+    )
+    repo.interrupt_search_cycle(cycle.id, recovery.lease.fencing_token)
+    claimed = repo.claim_search_cycle(
+        cycle.id,
+        expected_claim_version=0,
+        new_run_id=recovery.run.id,
+        policy_hash="hash",
+        fencing_token=recovery.lease.fencing_token,
+    )
+    assert claimed is not None
+    assert claimed.claim_version == 1
+    repo.conn.execute(
+        "UPDATE hh_autopilot_runs SET trigger = 'manual' WHERE id = ?",
+        (recovery.run.id,),
+    )
+    repo.conn.commit()
+    transport = FakePages(
+        [SearchPage([_vacancy("tampered")], 0, 1, 1, 1)]
+    )
+    before = (
+        repo.get_search_cycle(cycle.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    )
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        if operation == "commit":
+            repo.commit_search_page(
+                checkpoint.id,
+                expected_next_page=0,
+                page=SearchPage([_vacancy("tampered")], 0, 1, 1, 1),
+                normalized=[normalize_vacancy(_vacancy("tampered"))],
+                fencing_token=recovery.lease.fencing_token,
+                mode="live",
+                owner_run_id=recovery.run.id,
+                expected_claim_version=1,
+                policy_hash="hash",
+                terminal=True,
+                absolute_distinct_cap=1,
+            )
+        else:
+            HHSearchProvider(transport, repo).collect(
+                _request(
+                    recovery,
+                    query_key="preset:existing",
+                    per_page=1,
+                    remaining_budget=1,
+                )
+            )
+
+    assert transport.requested == []
+    assert (
+        repo.get_search_cycle(cycle.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    ) == before
+
+
+def test_valid_recovery_origin_can_self_claim_and_continue(
+    repo: AutopilotRepository,
+) -> None:
+    recovery = _context(repo, trigger="recovery", owner="recovery-origin")
+    cycle = repo.create_search_cycle(
+        "default", recovery.run.id, "hash", recovery.lease.fencing_token
+    )
+    repo.interrupt_search_cycle(cycle.id, recovery.lease.fencing_token)
+
+    claimed = repo.claim_search_cycle(
+        cycle.id,
+        expected_claim_version=0,
+        new_run_id=recovery.run.id,
+        policy_hash="hash",
+        fencing_token=recovery.lease.fencing_token,
+    )
+
+    assert claimed is not None
+    assert claimed.owner_run_id == recovery.run.id
+    assert claimed.claim_version == 1
+    result = HHSearchProvider(
+        FakePages([SearchPage([_vacancy("valid-self-claim")], 0, 1, 1, 1)]),
+        repo,
+    ).collect(_request(recovery, per_page=1, remaining_budget=1))
+    assert [vacancy.id for vacancy in result.vacancies] == ["valid-self-claim"]
+
+
+@pytest.mark.parametrize("operation", ["checkpoint", "provider"])
+def test_zero_claim_live_cycle_rejects_forged_recovery_owner(
+    repo: AutopilotRepository,
+    operation: str,
+) -> None:
+    first = _context(repo)
+    cycle = repo.create_search_cycle(
+        "default", first.run.id, "hash", first.lease.fencing_token
+    )
+    repo.ensure_search_checkpoint(cycle.id, "r-1", "preset:existing")
+    recovery = _recovery_context(repo, first)
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_search_cycles
+        SET owner_run_id = ?, fencing_token = ?
+        WHERE id = ?
+        """,
+        (recovery.run.id, recovery.lease.fencing_token, cycle.id),
+    )
+    repo.conn.commit()
+    transport = FakePages(
+        [SearchPage([_vacancy("forged-owner")], 0, 1, 1, 1)]
+    )
+    before = (
+        repo.get_search_cycle(cycle.id),
+        repo.get_run(first.run.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    )
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        if operation == "checkpoint":
+            repo.ensure_search_checkpoint(cycle.id, "r-1", "preset:forged")
+        else:
+            HHSearchProvider(transport, repo).collect(
+                _request(
+                    recovery,
+                    query_key="preset:existing",
+                    per_page=1,
+                    remaining_budget=1,
+                )
+            )
+
+    assert transport.requested == []
+    assert (
+        repo.get_search_cycle(cycle.id),
+        repo.get_run(first.run.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.count_search_results(cycle_id=cycle.id),
+        repo.count_items(),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    ) == before
+
+
+@pytest.mark.parametrize("operation", ["checkpoint", "status"])
+def test_shadow_cycle_rejects_impossible_claim_version_before_mutation(
+    repo: AutopilotRepository,
+    operation: str,
+) -> None:
+    shadow = _context(repo, trigger="shadow")
+    cycle = repo.create_search_cycle(
+        "default",
+        shadow.run.id,
+        "hash",
+        shadow.lease.fencing_token,
+        mode="shadow",
+    )
+    repo.conn.execute(
+        "UPDATE hh_autopilot_search_cycles SET claim_version = 1 WHERE id = ?",
+        (cycle.id,),
+    )
+    repo.conn.commit()
+    before = (
+        repo.get_search_cycle(cycle.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    )
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        if operation == "checkpoint":
+            repo.ensure_search_checkpoint(cycle.id, "r-1", "preset:impossible")
+        else:
+            repo.interrupt_search_cycle(cycle.id, shadow.lease.fencing_token)
+
+    assert (
+        repo.get_search_cycle(cycle.id),
+        tuple(repo.list_search_checkpoints(cycle.id)),
+        repo.conn.execute("SELECT COUNT(*) FROM hh_autopilot_events").fetchone()[0],
+    ) == before
+
+
+def test_save_shadow_result_rejects_granted_shadow_run_without_mutation(
+    repo: AutopilotRepository,
+) -> None:
+    shadow = _context(repo, trigger="shadow")
+    repo.create_grants([("default", "hash", "operator", "tamper")])
+    grant = repo.active_grant("default")
+    assert grant is not None
+    repo.conn.execute(
+        "UPDATE hh_autopilot_runs SET grant_id = ? WHERE id = ?",
+        (grant.id, shadow.run.id),
+    )
+    repo.conn.commit()
+    before_run = repo.get_run(shadow.run.id)
+
+    with pytest.raises((StaleWrite, RepositoryAuthorizationDenied)):
+        repo.save_shadow_result(
+            shadow.run.id,
+            "default",
+            "shadow-granted",
+            "r-1",
+            filter_data={"eligible": True},
+            deterministic_score=75,
+            ai_data=None,
+            would_apply=True,
+            fencing_token=shadow.lease.fencing_token,
+        )
+
+    assert repo.get_run(shadow.run.id) == before_run
+    assert repo.count_shadow_results(shadow.run.id) == 0
