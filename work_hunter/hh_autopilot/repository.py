@@ -5,13 +5,14 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Mapping
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Iterable, Iterator, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from work_hunter.storage import Storage, redact_for_storage
 
 from .state_machine import assert_transition
-from .types import AutopilotState, RetryStage
+from .types import AutopilotState, QuotaReservationState, RetryStage
 
 
 RUN_TRIGGERS = frozenset(
@@ -29,12 +30,19 @@ RUN_STATUSES = frozenset(
     }
 )
 INITIAL_RUN_STATUSES = frozenset({"created", "running"})
-TERMINAL_RUN_STATUSES = frozenset(
-    {"completed", "failed", "interrupted", "cancelled"}
-)
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "interrupted", "cancelled"})
 APPLICATION_SCOPE = "applications"
 CONTROL_SCOPE_TYPES = frozenset({"global", "account"})
 GLOBAL_CONTROL_SCOPE_ID = "global"
+ACTIVE_QUOTA_STATES = (
+    QuotaReservationState.RESERVED.value,
+    QuotaReservationState.HELD.value,
+    QuotaReservationState.CONSUMED.value,
+)
+UNRESOLVED_QUOTA_STATES = (
+    QuotaReservationState.RESERVED.value,
+    QuotaReservationState.HELD.value,
+)
 
 
 class StaleWrite(RuntimeError):
@@ -47,6 +55,71 @@ class LostLease(RuntimeError):
 
 class KillSwitchActive(RuntimeError):
     pass
+
+
+class CooldownActive(RuntimeError):
+    __slots__ = ("_account_id", "_reason", "_until")
+
+    def __init__(self, account_id: str, reason: str, until: str):
+        self._account_id = account_id
+        self._reason = reason
+        self._until = until
+        super().__init__(f"account {account_id} is in cooldown until {until}: {reason}")
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+    @property
+    def until(self) -> str:
+        return self._until
+
+
+class QuotaExceeded(RuntimeError):
+    __slots__ = ("_account_id", "_dimension", "_limit")
+
+    def __init__(self, account_id: str, dimension: str, limit: int):
+        self._account_id = account_id
+        self._dimension = dimension
+        self._limit = limit
+        super().__init__(
+            f"{dimension} quota limit {limit} exceeded for account {account_id}"
+        )
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def dimension(self) -> str:
+        return self._dimension
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+
+class TimezoneChangeUnsafe(RuntimeError):
+    __slots__ = ("_account_id", "_reason")
+
+    def __init__(self, account_id: str, reason: str):
+        self._account_id = account_id
+        self._reason = reason
+        super().__init__(
+            f"timezone change is unsafe for account {account_id}: {reason}"
+        )
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def reason(self) -> str:
+        return self._reason
 
 
 class RepositoryAuthorizationDenied(RuntimeError):
@@ -104,6 +177,26 @@ class LeaseRecord:
     fencing_token: int
     expires_at: str
     updated_at: str
+
+    @property
+    def account_profile_id(self) -> str:
+        return self.account_id
+
+
+@dataclass(frozen=True)
+class QuotaReservationRecord:
+    id: int
+    attempt_id: int | None
+    run_id: int | None
+    source: str
+    remote_negotiation_id: str | None
+    account_id: str
+    timezone: str
+    local_date: str
+    state: QuotaReservationState
+    fencing_token: int
+    created_at: str
+    resolved_at: str
 
     @property
     def account_profile_id(self) -> str:
@@ -247,7 +340,9 @@ def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
     return lastrowid
 
 
-def _enum_value(value: Any, enum_type: type[AutopilotState] | type[RetryStage], *, field: str):
+def _enum_value(
+    value: Any, enum_type: type[AutopilotState] | type[RetryStage], *, field: str
+):
     if not isinstance(value, enum_type):
         raise TypeError(f"{field} must be {enum_type.__name__}")
     return value
@@ -298,6 +393,49 @@ def _timestamp(value: datetime | str, *, field: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def _instant(
+    value: datetime | str | None,
+    *,
+    field: str,
+) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    return datetime.fromisoformat(_timestamp(value, field=field))
+
+
+def _timezone(value: Any) -> tuple[str, ZoneInfo]:
+    name = _required_text(value, field="timezone_name")
+    try:
+        return name, ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"unknown IANA timezone: {name}") from exc
+
+
+def _lease_input(value: Any) -> tuple[str, str, int]:
+    if not isinstance(value, LeaseRecord):
+        raise TypeError("lease must be a LeaseRecord")
+    _instant(value.expires_at, field="lease.expires_at")
+    _instant(value.updated_at, field="lease.updated_at")
+    return (
+        _canonical_identifier(value.account_id, field="lease.account_id"),
+        _required_text(value.owner_token, field="lease.owner_token"),
+        _integer(value.fencing_token, field="lease.fencing_token", minimum=1),
+    )
+
+
+def _stored_lease_expiry(value: Any, *, account_id: str) -> datetime:
+    try:
+        return _instant(str(value), field="lease expiry")
+    except (TypeError, ValueError) as exc:
+        raise LostLease(f"account {account_id} lease expiry is invalid") from exc
+
+
+def _stored_fencing_token(value: Any, *, account_id: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise LostLease(f"account {account_id} lease fencing token is invalid")
+    return value
+
+
 def _scope(value: Any) -> str:
     value = _required_text(value, field="scope")
     if value != APPLICATION_SCOPE:
@@ -338,7 +476,9 @@ def _authorization_projections(
         raise TypeError("projections must be a mapping")
     projections: dict[str, tuple[bool, int | None]] = {}
     for raw_account_id, raw_projection in values.items():
-        account_id = _canonical_identifier(raw_account_id, field="projection account_id")
+        account_id = _canonical_identifier(
+            raw_account_id, field="projection account_id"
+        )
         if account_id in projections:
             raise ValueError("projections contains a duplicate account identifier")
         if not isinstance(raw_projection, tuple) or len(raw_projection) != 2:
@@ -493,10 +633,14 @@ class AutopilotRepository:
         else:
             counters_json = None
         fencing_token = _optional_integer(fencing_token, field="fencing_token")
+        fence_instant = (
+            _instant(None, field="now") if fencing_token is not None else None
+        )
         with self.immediate():
             current = self._run_for_update(run_id)
             if fencing_token is not None:
-                self._assert_fence(current.account_id, fencing_token)
+                assert fence_instant is not None
+                self._assert_fence(current.account_id, fencing_token, fence_instant)
             self.conn.execute(
                 """
                 UPDATE hh_autopilot_runs
@@ -522,14 +666,9 @@ class AutopilotRepository:
         resume_id = _canonical_identifier(resume_id, field="resume_id")
         query_key = _required_text(query_key, field="query_key")
         idempotency_key = hashlib.sha256(
-            (
-                account_id
-                + "\0"
-                + resume_id
-                + "\0"
-                + vacancy_id
-                + "\0apply"
-            ).encode("utf-8")
+            (account_id + "\0" + resume_id + "\0" + vacancy_id + "\0apply").encode(
+                "utf-8"
+            )
         ).hexdigest()
         now = _utc_now()
         with self.immediate():
@@ -608,45 +747,72 @@ class AutopilotRepository:
         if run_id == 0:
             raise ValueError("run_id must be at least 1")
         fencing_token = _optional_integer(fencing_token, field="fencing_token")
+        fence_instant = _instant(None, field="now")
+        sanitized_metadata = _json_loads(metadata_json, field="metadata")
         with self.immediate():
-            current = self._item_for_update(item_id)
-            if current.version != expected_version:
-                raise StaleWrite(f"item {item_id} version changed")
-            if fencing_token is not None:
-                self._assert_fence(current.account_id, fencing_token)
-            if run_id is not None:
-                run = self._run_for_update(run_id)
-                if run.account_id != current.account_id:
-                    raise ValueError("transition run and item accounts must match")
-            assert_transition(current.state, target)
-            cursor = self.conn.execute(
-                """
-                UPDATE hh_autopilot_items
-                SET state = ?, version = version + 1,
-                    last_run_id = COALESCE(?, last_run_id),
-                    last_outcome_code = ?, updated_at = ?
-                WHERE id = ? AND version = ?
-                """,
-                (
-                    target.value,
-                    run_id,
-                    reason,
-                    _utc_now(),
-                    item_id,
-                    expected_version,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise StaleWrite(f"item {item_id} compare-and-swap failed")
-            self._insert_event(
-                item_id=item_id,
+            return self._transition_item_for_update(
+                item_id,
+                expected_version,
+                target,
+                reason,
+                sanitized_metadata,
                 run_id=run_id,
-                previous=current.state,
-                target=target,
-                reason=reason,
-                metadata=_json_loads(metadata_json, field="metadata"),
+                fencing_token=fencing_token,
+                fence_instant=fence_instant,
             )
-            return self._item_for_update(item_id)
+
+    def _transition_item_for_update(
+        self,
+        item_id: int,
+        expected_version: int,
+        target: AutopilotState,
+        reason: str,
+        metadata: dict[str, Any],
+        *,
+        run_id: int | None,
+        fencing_token: int | None,
+        fence_instant: datetime,
+    ) -> ItemRecord:
+        """Apply a prevalidated item transition inside the caller's transaction."""
+        current = self._item_for_update(item_id)
+        if current.version != expected_version:
+            raise StaleWrite(f"item {item_id} version changed")
+        if fencing_token is not None:
+            self._assert_fence(current.account_id, fencing_token, fence_instant)
+        if run_id is not None:
+            run = self._run_for_update(run_id)
+            if run.account_id != current.account_id:
+                raise ValueError("transition run and item accounts must match")
+        assert_transition(current.state, target)
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_items
+            SET state = ?, version = version + 1,
+                last_run_id = COALESCE(?, last_run_id),
+                last_outcome_code = ?, updated_at = ?
+            WHERE id = ? AND version = ?
+            """,
+            (
+                target.value,
+                run_id,
+                reason,
+                fence_instant.isoformat(),
+                item_id,
+                expected_version,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite(f"item {item_id} compare-and-swap failed")
+        self._insert_event(
+            item_id=item_id,
+            run_id=run_id,
+            previous=current.state,
+            target=target,
+            reason=reason,
+            metadata=metadata,
+            created_at=fence_instant,
+        )
+        return self._item_for_update(item_id)
 
     def append_event(
         self,
@@ -664,10 +830,14 @@ class AutopilotRepository:
         if run_id == 0:
             raise ValueError("run_id must be at least 1")
         fencing_token = _optional_integer(fencing_token, field="fencing_token")
+        fence_instant = (
+            _instant(None, field="now") if fencing_token is not None else None
+        )
         with self.immediate():
             current = self._item_for_update(item_id)
             if fencing_token is not None:
-                self._assert_fence(current.account_id, fencing_token)
+                assert fence_instant is not None
+                self._assert_fence(current.account_id, fencing_token, fence_instant)
             if run_id is not None:
                 run = self._run_for_update(run_id)
                 if run.account_id != current.account_id:
@@ -735,6 +905,76 @@ class AutopilotRepository:
         ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
+    def recover_stale_applying(
+        self,
+        account_id: str,
+        fencing_token: int,
+        *,
+        run_id: int | None = None,
+        now: datetime | str | None = None,
+    ) -> list[ItemRecord]:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        run_id = _optional_integer(run_id, field="run_id")
+        if run_id == 0:
+            raise ValueError("run_id must be at least 1")
+        instant = _instant(now, field="now")
+
+        with self.immediate():
+            self._assert_fence(account_id, fencing_token, instant)
+            if run_id is not None:
+                run = self._run_for_update(run_id)
+                if run.account_id != account_id:
+                    raise ValueError("recovery run account does not match")
+                if run.fencing_token != fencing_token:
+                    raise LostLease(f"recovery run {run_id} fencing token is stale")
+            rows = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_items
+                WHERE account_profile_id = ? AND state = 'applying'
+                ORDER BY id ASC
+                """,
+                (account_id,),
+            ).fetchall()
+            recovered_ids: list[int] = []
+            for row in rows:
+                current = self._item_from_row(row)
+                assert_transition(
+                    current.state,
+                    AutopilotState.RECONCILING,
+                )
+                cursor = self.conn.execute(
+                    """
+                    UPDATE hh_autopilot_items
+                    SET state = 'reconciling', version = version + 1,
+                        last_run_id = COALESCE(?, last_run_id),
+                        last_outcome_code = 'stale_applying_recovered',
+                        updated_at = ?
+                    WHERE id = ? AND version = ? AND state = 'applying'
+                    """,
+                    (
+                        run_id,
+                        instant.isoformat(),
+                        current.id,
+                        current.version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleWrite(
+                        f"item {current.id} recovery compare-and-swap failed"
+                    )
+                self._insert_event(
+                    item_id=current.id,
+                    run_id=run_id,
+                    previous=AutopilotState.APPLYING,
+                    target=AutopilotState.RECONCILING,
+                    reason="stale_applying_recovered",
+                    metadata={"fence": fencing_token},
+                    created_at=instant,
+                )
+                recovered_ids.append(current.id)
+            return [self._item_for_update(item_id) for item_id in recovered_ids]
+
     def create_grants(
         self,
         requests: list[tuple[str, str, str, str]],
@@ -758,9 +998,7 @@ class AutopilotRepository:
             validated.append(
                 (
                     account_id,
-                    _required_text(
-                        request[1], field=f"requests[{index}].policy_hash"
-                    ),
+                    _required_text(request[1], field=f"requests[{index}].policy_hash"),
                     _required_text(request[2], field=f"requests[{index}].actor"),
                     _required_text(request[3], field=f"requests[{index}].source"),
                 )
@@ -836,9 +1074,7 @@ class AutopilotRepository:
         ).fetchone()
         return self._grant_from_row(row) if row is not None else None
 
-    def list_active_grants(
-        self, scope: str = APPLICATION_SCOPE
-    ) -> list[GrantRecord]:
+    def list_active_grants(self, scope: str = APPLICATION_SCOPE) -> list[GrantRecord]:
         scope = _scope(scope)
         rows = self.conn.execute(
             """
@@ -862,9 +1098,7 @@ class AutopilotRepository:
             for account_id, (generation, policy_hash) in validated.items():
                 grant = self._active_grant_for_update(account_id)
                 if grant is None or grant.generation != generation:
-                    raise RepositoryAuthorizationDenied(
-                        "authorization_state_mismatch"
-                    )
+                    raise RepositoryAuthorizationDenied("authorization_state_mismatch")
                 if grant.policy_hash != policy_hash:
                     raise RepositoryAuthorizationDenied("policy_hash_mismatch")
 
@@ -920,9 +1154,7 @@ class AutopilotRepository:
                 ORDER BY account_profile_id ASC
                 """
             ).fetchall()
-            running_accounts = {
-                str(row["account_profile_id"]) for row in running_rows
-            }
+            running_accounts = {str(row["account_profile_id"]) for row in running_rows}
 
             mismatches: dict[str, str] = {}
             blocked: set[str] = set()
@@ -950,7 +1182,11 @@ class AutopilotRepository:
                 account_id for account_id in grants if account_id in blocked
             )
             stopped_accounts = tuple(
-                sorted(account_id for account_id in running_accounts if account_id in blocked)
+                sorted(
+                    account_id
+                    for account_id in running_accounts
+                    if account_id in blocked
+                )
             )
             if revoked_accounts:
                 placeholders = ",".join("?" for _ in revoked_accounts)
@@ -1106,9 +1342,7 @@ class AutopilotRepository:
             raise KeyError(f"run {run_id} does not exist")
         return str(row["status"]) == "stop_requested"
 
-    def get_account_state(
-        self, account_id: str
-    ) -> AccountStateRecord | None:
+    def get_account_state(self, account_id: str) -> AccountStateRecord | None:
         account_id = _canonical_identifier(account_id, field="account_id")
         row = self.conn.execute(
             """
@@ -1118,6 +1352,121 @@ class AutopilotRepository:
             (account_id,),
         ).fetchone()
         return self._account_state_from_row(row) if row is not None else None
+
+    def set_account_cooldown(
+        self,
+        account_id: str,
+        blocked_until: datetime | str,
+        reason: str,
+        fencing_token: int,
+        *,
+        hh_reset: dict[str, Any] | None = None,
+        now: datetime | str | None = None,
+    ) -> AccountStateRecord:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        blocked_until_instant = _instant(
+            blocked_until,
+            field="blocked_until",
+        )
+        reason = _required_text(reason, field="reason")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        hh_reset_json = _json_dumps(hh_reset, field="hh_reset")
+        instant = _instant(now, field="now")
+
+        with self.immediate():
+            return self._set_account_cooldown_for_update(
+                account_id=account_id,
+                blocked_until=blocked_until_instant,
+                reason=reason,
+                fencing_token=fencing_token,
+                hh_reset_json=hh_reset_json,
+                instant=instant,
+            )
+
+    def _set_account_cooldown_for_update(
+        self,
+        *,
+        account_id: str,
+        blocked_until: datetime,
+        reason: str,
+        fencing_token: int,
+        hh_reset_json: str,
+        instant: datetime,
+    ) -> AccountStateRecord:
+        """Set a prevalidated cooldown in the caller's transaction."""
+        self._assert_fence(account_id, fencing_token, instant)
+        self.conn.execute(
+            """
+            INSERT INTO hh_autopilot_account_state (
+                account_profile_id, blocked_until, block_reason,
+                hh_reset_json, version, updated_at
+            ) VALUES (?, ?, ?, ?, 0, ?)
+            ON CONFLICT(account_profile_id) DO UPDATE SET
+                blocked_until = excluded.blocked_until,
+                block_reason = excluded.block_reason,
+                hh_reset_json = excluded.hh_reset_json,
+                version = hh_autopilot_account_state.version + 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                account_id,
+                blocked_until.isoformat(),
+                reason,
+                hh_reset_json,
+                instant.isoformat(),
+            ),
+        )
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_account_state
+            WHERE account_profile_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite("account cooldown disappeared")
+        return self._account_state_from_row(row)
+
+    def assert_dispatch_available(
+        self,
+        account_id: str,
+        fencing_token: int,
+        *,
+        now: datetime | str | None = None,
+    ) -> None:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        with self.immediate():
+            self._assert_fence(account_id, fencing_token, instant)
+            self._assert_cooldown_for_update(account_id, instant)
+
+    def assert_timezone_change_safe(self, account_id: str) -> None:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        with self.immediate():
+            grant = self.conn.execute(
+                """
+                SELECT 1 FROM hh_autopilot_grants
+                WHERE account_profile_id = ? AND scope = ? AND active = 1
+                LIMIT 1
+                """,
+                (account_id, APPLICATION_SCOPE),
+            ).fetchone()
+            if grant is not None:
+                raise TimezoneChangeUnsafe(account_id, "active_grant")
+            unresolved = self.conn.execute(
+                """
+                SELECT 1 FROM hh_autopilot_quota_reservations
+                WHERE account_profile_id = ? AND state IN ('reserved', 'held')
+                LIMIT 1
+                """,
+                (account_id,),
+            ).fetchone()
+            if unresolved is not None:
+                raise TimezoneChangeUnsafe(
+                    account_id,
+                    "unresolved_reservation",
+                )
 
     def get_control(self, scope_type: str, scope_id: str) -> ControlRecord | None:
         scope_type, scope_id = _control_identity(scope_type, scope_id)
@@ -1294,9 +1643,7 @@ class AutopilotRepository:
             ),
         )
 
-    def _control_for_update(
-        self, scope_type: str, scope_id: str
-    ) -> ControlRecord:
+    def _control_for_update(self, scope_type: str, scope_id: str) -> ControlRecord:
         row = self.conn.execute(
             """
             SELECT * FROM hh_autopilot_controls
@@ -1307,6 +1654,506 @@ class AutopilotRepository:
         if row is None:
             raise StaleWrite("control row disappeared")
         return self._control_from_row(row)
+
+    def acquire_lease(
+        self,
+        account_id: str,
+        owner_token: str,
+        *,
+        ttl_seconds: int,
+        now: datetime | str | None = None,
+    ) -> LeaseRecord | None:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        owner_token = _required_text(owner_token, field="owner_token")
+        ttl_seconds = _integer(ttl_seconds, field="ttl_seconds", minimum=1)
+        instant = _instant(now, field="now")
+        requested_expiry = instant + timedelta(seconds=ttl_seconds)
+
+        with self.immediate():
+            row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_leases
+                WHERE account_profile_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            if row is None:
+                fencing_token = 1
+                expires_at = requested_expiry
+            else:
+                current_expiry = _stored_lease_expiry(
+                    row["expires_at"], account_id=account_id
+                )
+                current_token = _stored_fencing_token(
+                    row["fencing_token"], account_id=account_id
+                )
+                if current_expiry > instant:
+                    if str(row["owner_token"]) != owner_token:
+                        return None
+                    fencing_token = current_token
+                    expires_at = max(current_expiry, requested_expiry)
+                else:
+                    fencing_token = current_token + 1
+                    expires_at = requested_expiry
+
+            timestamp = instant.isoformat()
+            self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_leases (
+                    account_profile_id, owner_token, fencing_token,
+                    expires_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_profile_id) DO UPDATE SET
+                    owner_token = excluded.owner_token,
+                    fencing_token = excluded.fencing_token,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    account_id,
+                    owner_token,
+                    fencing_token,
+                    expires_at.isoformat(),
+                    timestamp,
+                ),
+            )
+            return self._lease_for_update(account_id)
+
+    def renew_lease(
+        self,
+        lease: LeaseRecord,
+        *,
+        ttl_seconds: int,
+        now: datetime | str | None = None,
+    ) -> LeaseRecord:
+        account_id, owner_token, fencing_token = _lease_input(lease)
+        ttl_seconds = _integer(ttl_seconds, field="ttl_seconds", minimum=1)
+        instant = _instant(now, field="now")
+        requested_expiry = instant + timedelta(seconds=ttl_seconds)
+
+        with self.immediate():
+            row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_leases
+                WHERE account_profile_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            if row is None:
+                raise LostLease(f"account {account_id} lease was lost")
+            current_expiry = _stored_lease_expiry(
+                row["expires_at"], account_id=account_id
+            )
+            current_token = _stored_fencing_token(
+                row["fencing_token"], account_id=account_id
+            )
+            if (
+                str(row["owner_token"]) != owner_token
+                or current_token != fencing_token
+                or current_expiry <= instant
+            ):
+                raise LostLease(f"account {account_id} lease was lost")
+            expires_at = max(current_expiry, requested_expiry)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_leases
+                SET expires_at = ?, updated_at = ?
+                WHERE account_profile_id = ? AND owner_token = ?
+                  AND fencing_token = ?
+                """,
+                (
+                    expires_at.isoformat(),
+                    instant.isoformat(),
+                    account_id,
+                    owner_token,
+                    fencing_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LostLease(f"account {account_id} lease was lost")
+            return self._lease_for_update(account_id)
+
+    def release_lease(self, lease: LeaseRecord) -> bool:
+        account_id, owner_token, fencing_token = _lease_input(lease)
+        with self.immediate():
+            cursor = self.conn.execute(
+                """
+                DELETE FROM hh_autopilot_leases
+                WHERE account_profile_id = ? AND owner_token = ?
+                  AND fencing_token = ?
+                """,
+                (account_id, owner_token, fencing_token),
+            )
+            return cursor.rowcount == 1
+
+    def assert_fence(
+        self,
+        account_id: str,
+        fencing_token: int,
+        *,
+        now: datetime | str | None = None,
+    ) -> None:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        with self.immediate():
+            self._assert_fence(account_id, fencing_token, instant)
+
+    def reserve_quota(
+        self,
+        account_id: str,
+        run_id: int,
+        attempt_id: int,
+        timezone_name: str,
+        daily_limit: int,
+        run_limit: int,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> QuotaReservationRecord:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        attempt_id = _integer(attempt_id, field="attempt_id", minimum=1)
+        timezone_name, local_timezone = _timezone(timezone_name)
+        daily_limit = _integer(daily_limit, field="daily_limit", minimum=1)
+        run_limit = _integer(run_limit, field="run_limit", minimum=1)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        local_date = instant.astimezone(local_timezone).date().isoformat()
+
+        with self.immediate():
+            return self._reserve_quota_for_update(
+                account_id=account_id,
+                run_id=run_id,
+                attempt_id=attempt_id,
+                timezone_name=timezone_name,
+                local_date=local_date,
+                daily_limit=daily_limit,
+                run_limit=run_limit,
+                fencing_token=fencing_token,
+                instant=instant,
+            )
+
+    def _reserve_quota_for_update(
+        self,
+        *,
+        account_id: str,
+        run_id: int,
+        attempt_id: int,
+        timezone_name: str,
+        local_date: str,
+        daily_limit: int,
+        run_limit: int,
+        fencing_token: int,
+        instant: datetime,
+    ) -> QuotaReservationRecord:
+        """Reserve quota from prevalidated values in the caller's transaction."""
+        self._assert_fence(account_id, fencing_token, instant)
+        self._assert_cooldown_for_update(account_id, instant)
+        run = self._run_for_update(run_id)
+        if run.account_id != account_id:
+            raise ValueError("run account does not match reservation account")
+        if run.fencing_token != fencing_token:
+            raise LostLease(f"run {run_id} fencing token is stale")
+        if run.status != "running":
+            raise StaleWrite(f"run {run_id} is not running")
+
+        attempt = self.conn.execute(
+            """
+            SELECT account_profile_id, autopilot_run_id, autopilot_item_id
+            FROM hh_application_attempts
+            WHERE id = ?
+            """,
+            (attempt_id,),
+        ).fetchone()
+        if attempt is None:
+            raise StaleWrite(f"attempt {attempt_id} does not exist")
+        if str(attempt["account_profile_id"]) != account_id:
+            raise ValueError("attempt account does not match reservation account")
+        if (
+            attempt["autopilot_run_id"] is None
+            or int(attempt["autopilot_run_id"]) != run_id
+        ):
+            raise ValueError("attempt run does not match reservation run")
+        if attempt["autopilot_item_id"] is None:
+            raise ValueError("attempt item is required for dispatch reservation")
+        item_row = self.conn.execute(
+            """
+            SELECT account_profile_id, last_run_id
+            FROM hh_autopilot_items
+            WHERE id = ?
+            """,
+            (int(attempt["autopilot_item_id"]),),
+        ).fetchone()
+        if item_row is None:
+            raise StaleWrite("attempt item does not exist")
+        if str(item_row["account_profile_id"]) != account_id:
+            raise ValueError("attempt item account does not match reservation")
+        if int(item_row["last_run_id"]) != run_id:
+            raise ValueError("attempt item run does not match reservation")
+
+        existing_row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_quota_reservations
+            WHERE attempt_id = ?
+            """,
+            (attempt_id,),
+        ).fetchone()
+        if existing_row is not None:
+            existing = self._reservation_from_row(existing_row)
+            exact = (
+                existing.source == "dispatch"
+                and existing.account_id == account_id
+                and existing.run_id == run_id
+                and existing.timezone == timezone_name
+                and existing.local_date == local_date
+                and existing.fencing_token == fencing_token
+                and existing.state.value in ACTIVE_QUOTA_STATES
+            )
+            if exact:
+                return existing
+            raise StaleWrite(f"attempt {attempt_id} has a contradictory reservation")
+
+        daily_count = int(
+            self.conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM hh_autopilot_quota_reservations
+                WHERE account_profile_id = ? AND local_date = ?
+                  AND state IN ('reserved', 'held', 'consumed')
+                """,
+                (account_id, local_date),
+            ).fetchone()[0]
+        )
+        if daily_count >= daily_limit:
+            raise QuotaExceeded(account_id, "daily", daily_limit)
+        run_count = int(
+            self.conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM hh_autopilot_quota_reservations
+                WHERE run_id = ?
+                  AND state IN ('reserved', 'held', 'consumed')
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        )
+        if run_count >= run_limit:
+            raise QuotaExceeded(account_id, "run", run_limit)
+
+        cursor = self.conn.execute(
+            """
+            INSERT INTO hh_autopilot_quota_reservations (
+                attempt_id, run_id, source, account_profile_id, timezone,
+                local_date, state, fencing_token, created_at
+            ) VALUES (?, ?, 'dispatch', ?, ?, ?, 'reserved', ?, ?)
+            """,
+            (
+                attempt_id,
+                run_id,
+                account_id,
+                timezone_name,
+                local_date,
+                fencing_token,
+                instant.isoformat(),
+            ),
+        )
+        return self._reservation_for_update(_required_lastrowid(cursor))
+
+    def hold_reservation(
+        self,
+        reservation_id: int,
+        fencing_token: int,
+        *,
+        now: datetime | str | None = None,
+    ) -> QuotaReservationRecord:
+        return self._change_reservation_state(
+            reservation_id,
+            fencing_token,
+            target=QuotaReservationState.HELD,
+            now=now,
+        )
+
+    def consume_reservation(
+        self,
+        reservation_id: int,
+        fencing_token: int,
+        *,
+        remote_negotiation_id: str | None = None,
+        now: datetime | str | None = None,
+    ) -> QuotaReservationRecord:
+        if remote_negotiation_id is not None:
+            remote_negotiation_id = _required_text(
+                remote_negotiation_id,
+                field="remote_negotiation_id",
+            )
+        return self._change_reservation_state(
+            reservation_id,
+            fencing_token,
+            target=QuotaReservationState.CONSUMED,
+            remote_negotiation_id=remote_negotiation_id,
+            now=now,
+        )
+
+    def release_reservation(
+        self,
+        reservation_id: int,
+        fencing_token: int,
+        *,
+        now: datetime | str | None = None,
+    ) -> QuotaReservationRecord:
+        return self._change_reservation_state(
+            reservation_id,
+            fencing_token,
+            target=QuotaReservationState.RELEASED,
+            now=now,
+        )
+
+    def sync_external_quota(
+        self,
+        account_id: str,
+        remote_negotiation_id: str,
+        timezone_name: str,
+        fencing_token: int,
+        *,
+        occurred_at: datetime | str | None = None,
+        now: datetime | str | None = None,
+    ) -> QuotaReservationRecord:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        remote_negotiation_id = _required_text(
+            remote_negotiation_id,
+            field="remote_negotiation_id",
+        )
+        timezone_name, local_timezone = _timezone(timezone_name)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        instant = _instant(now, field="now")
+        occurred = (
+            instant
+            if occurred_at is None
+            else _instant(occurred_at, field="occurred_at")
+        )
+        local_date = occurred.astimezone(local_timezone).date().isoformat()
+
+        with self.immediate():
+            self._assert_fence(account_id, fencing_token, instant)
+            row = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_quota_reservations
+                WHERE remote_negotiation_id = ?
+                """,
+                (remote_negotiation_id,),
+            ).fetchone()
+            if row is not None:
+                existing = self._reservation_from_row(row)
+                if (
+                    existing.account_id != account_id
+                    or existing.state is not QuotaReservationState.CONSUMED
+                ):
+                    raise StaleWrite("remote negotiation has a contradictory quota row")
+                if existing.source == "external_sync" and (
+                    existing.timezone != timezone_name
+                    or existing.local_date != local_date
+                ):
+                    raise StaleWrite(
+                        "remote negotiation replay changed timezone or local date"
+                    )
+                return existing
+
+            cursor = self.conn.execute(
+                """
+                INSERT INTO hh_autopilot_quota_reservations (
+                    attempt_id, run_id, source, remote_negotiation_id,
+                    account_profile_id, timezone, local_date, state,
+                    fencing_token, created_at, resolved_at
+                ) VALUES (NULL, NULL, 'external_sync', ?, ?, ?, ?,
+                          'consumed', ?, ?, ?)
+                """,
+                (
+                    remote_negotiation_id,
+                    account_id,
+                    timezone_name,
+                    local_date,
+                    fencing_token,
+                    occurred.isoformat(),
+                    occurred.isoformat(),
+                ),
+            )
+            return self._reservation_for_update(_required_lastrowid(cursor))
+
+    def get_reservation(
+        self,
+        reservation_id: int,
+    ) -> QuotaReservationRecord | None:
+        reservation_id = _integer(reservation_id, field="reservation_id", minimum=1)
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_quota_reservations
+            WHERE id = ?
+            """,
+            (reservation_id,),
+        ).fetchone()
+        return self._reservation_from_row(row) if row is not None else None
+
+    def active_reservation_for_attempt(
+        self,
+        attempt_id: int,
+    ) -> QuotaReservationRecord | None:
+        attempt_id = _integer(attempt_id, field="attempt_id", minimum=1)
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_quota_reservations
+            WHERE attempt_id = ?
+              AND state IN ('reserved', 'held', 'consumed')
+            """,
+            (attempt_id,),
+        ).fetchone()
+        return self._reservation_from_row(row) if row is not None else None
+
+    def list_active_reservations(
+        self,
+        account_id: str,
+        *,
+        local_date: str | None = None,
+        run_id: int | None = None,
+    ) -> list[QuotaReservationRecord]:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        if local_date is not None:
+            local_date = _required_text(local_date, field="local_date")
+        run_id = _optional_integer(run_id, field="run_id")
+        if run_id == 0:
+            raise ValueError("run_id must be at least 1")
+        clauses = [
+            "account_profile_id = ?",
+            "state IN ('reserved', 'held', 'consumed')",
+        ]
+        parameters: list[Any] = [account_id]
+        if local_date is not None:
+            clauses.append("local_date = ?")
+            parameters.append(local_date)
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            parameters.append(run_id)
+        rows = self.conn.execute(
+            "SELECT * FROM hh_autopilot_quota_reservations WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY id ASC",
+            tuple(parameters),
+        ).fetchall()
+        return [self._reservation_from_row(row) for row in rows]
+
+    def count_active_reservations(
+        self,
+        account_id: str,
+        *,
+        local_date: str | None = None,
+        run_id: int | None = None,
+    ) -> int:
+        return len(
+            self.list_active_reservations(
+                account_id,
+                local_date=local_date,
+                run_id=run_id,
+            )
+        )
 
     def get_lease(self, account_id: str) -> LeaseRecord | None:
         account_id = _canonical_identifier(account_id, field="account_id")
@@ -1323,7 +2170,183 @@ class AutopilotRepository:
         ).fetchone()
         return self._challenge_from_row(row) if row is not None else None
 
-    def _assert_fence(self, account_id: str, fencing_token: int) -> None:
+    def _change_reservation_state(
+        self,
+        reservation_id: int,
+        fencing_token: int,
+        *,
+        target: QuotaReservationState,
+        remote_negotiation_id: str | None = None,
+        now: datetime | str | None,
+    ) -> QuotaReservationRecord:
+        reservation_id = _integer(reservation_id, field="reservation_id", minimum=1)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        if not isinstance(target, QuotaReservationState):
+            raise TypeError("target must be QuotaReservationState")
+        if remote_negotiation_id is not None:
+            remote_negotiation_id = _required_text(
+                remote_negotiation_id,
+                field="remote_negotiation_id",
+            )
+        instant = _instant(now, field="now")
+
+        with self.immediate():
+            return self._change_reservation_state_for_update(
+                reservation_id,
+                fencing_token,
+                target=target,
+                remote_negotiation_id=remote_negotiation_id,
+                instant=instant,
+            )
+
+    def _change_reservation_state_for_update(
+        self,
+        reservation_id: int,
+        fencing_token: int,
+        *,
+        target: QuotaReservationState,
+        remote_negotiation_id: str | None,
+        instant: datetime,
+    ) -> QuotaReservationRecord:
+        """Apply a prevalidated reservation CAS in the caller's transaction."""
+        current = self._reservation_for_update(reservation_id)
+        self._assert_fence(
+            current.account_id,
+            fencing_token,
+            instant,
+        )
+        if current.fencing_token != fencing_token:
+            raise StaleWrite(f"reservation {reservation_id} fencing token changed")
+        if current.state is target:
+            if (
+                target is QuotaReservationState.CONSUMED
+                and remote_negotiation_id is not None
+                and current.remote_negotiation_id != remote_negotiation_id
+            ):
+                raise StaleWrite("consumed reservation remote negotiation changed")
+            return current
+
+        allowed_sources: dict[
+            QuotaReservationState, frozenset[QuotaReservationState]
+        ] = {
+            QuotaReservationState.HELD: frozenset({QuotaReservationState.RESERVED}),
+            QuotaReservationState.CONSUMED: frozenset(
+                {
+                    QuotaReservationState.RESERVED,
+                    QuotaReservationState.HELD,
+                }
+            ),
+            QuotaReservationState.RELEASED: frozenset(
+                {
+                    QuotaReservationState.RESERVED,
+                    QuotaReservationState.HELD,
+                }
+            ),
+        }
+        if current.state not in allowed_sources.get(target, frozenset()):
+            raise StaleWrite(
+                f"reservation {reservation_id} cannot transition "
+                f"from {current.state.value} to {target.value}"
+            )
+
+        if (
+            target is QuotaReservationState.CONSUMED
+            and remote_negotiation_id is not None
+        ):
+            duplicate = self.conn.execute(
+                """
+                SELECT id FROM hh_autopilot_quota_reservations
+                WHERE remote_negotiation_id = ?
+                """,
+                (remote_negotiation_id,),
+            ).fetchone()
+            if duplicate is not None and int(duplicate["id"]) != reservation_id:
+                raise StaleWrite("remote negotiation belongs to another reservation")
+
+        resolved_at = (
+            "" if target is QuotaReservationState.HELD else instant.isoformat()
+        )
+        cursor = self.conn.execute(
+            """
+            UPDATE hh_autopilot_quota_reservations
+            SET state = ?,
+                remote_negotiation_id = CASE
+                    WHEN ? = 'consumed' THEN ?
+                    ELSE remote_negotiation_id
+                END,
+                resolved_at = ?
+            WHERE id = ? AND state = ? AND fencing_token = ?
+            """,
+            (
+                target.value,
+                target.value,
+                remote_negotiation_id,
+                resolved_at,
+                reservation_id,
+                current.state.value,
+                fencing_token,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleWrite(f"reservation {reservation_id} compare-and-swap failed")
+        return self._reservation_for_update(reservation_id)
+
+    def _reservation_for_update(
+        self,
+        reservation_id: int,
+    ) -> QuotaReservationRecord:
+        row = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_quota_reservations
+            WHERE id = ?
+            """,
+            (reservation_id,),
+        ).fetchone()
+        if row is None:
+            raise StaleWrite(f"reservation {reservation_id} does not exist")
+        return self._reservation_from_row(row)
+
+    def _assert_cooldown_for_update(
+        self,
+        account_id: str,
+        instant: datetime,
+    ) -> None:
+        row = self.conn.execute(
+            """
+            SELECT blocked_until, block_reason
+            FROM hh_autopilot_account_state
+            WHERE account_profile_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        if row is None or not str(row["blocked_until"]).strip():
+            return
+        blocked_until_raw = str(row["blocked_until"])
+        reason = str(row["block_reason"]) or "cooldown"
+        try:
+            blocked_until = _instant(
+                blocked_until_raw,
+                field="blocked_until",
+            )
+        except (TypeError, ValueError):
+            raise CooldownActive(
+                account_id,
+                reason or "invalid_cooldown",
+                blocked_until_raw,
+            ) from None
+        if blocked_until > instant:
+            raise CooldownActive(
+                account_id,
+                reason,
+                blocked_until.isoformat(),
+            )
+
+    def _assert_fence(
+        self,
+        account_id: str,
+        fencing_token: int,
+        instant: datetime,
+    ) -> None:
         row = self.conn.execute(
             """
             SELECT fencing_token, expires_at
@@ -1332,16 +2355,25 @@ class AutopilotRepository:
             """,
             (account_id,),
         ).fetchone()
-        if row is None or int(row["fencing_token"]) != fencing_token:
+        if row is None:
             raise LostLease(f"account {account_id} lease was lost")
-        try:
-            expires_at = datetime.fromisoformat(str(row["expires_at"]))
-            if expires_at.tzinfo is None or expires_at.utcoffset() is None:
-                raise ValueError("lease expiry is not timezone-aware")
-        except ValueError as exc:
-            raise LostLease(f"account {account_id} lease expiry is invalid") from exc
-        if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        stored_token = _stored_fencing_token(
+            row["fencing_token"], account_id=account_id
+        )
+        if stored_token != fencing_token:
+            raise LostLease(f"account {account_id} lease was lost")
+        expires_at = _stored_lease_expiry(row["expires_at"], account_id=account_id)
+        if expires_at <= instant:
             raise LostLease(f"account {account_id} lease expired")
+
+    def _lease_for_update(self, account_id: str) -> LeaseRecord:
+        row = self.conn.execute(
+            "SELECT * FROM hh_autopilot_leases WHERE account_profile_id = ?",
+            (account_id,),
+        ).fetchone()
+        if row is None:
+            raise LostLease(f"account {account_id} lease disappeared")
+        return self._lease_from_row(row)
 
     def _insert_event(
         self,
@@ -1352,6 +2384,7 @@ class AutopilotRepository:
         target: AutopilotState,
         reason: str,
         metadata: dict[str, Any],
+        created_at: datetime | None = None,
     ) -> int:
         cursor = self.conn.execute(
             """
@@ -1367,7 +2400,7 @@ class AutopilotRepository:
                 target.value,
                 reason,
                 _json_dumps(metadata, field="metadata"),
-                _utc_now(),
+                _utc_now() if created_at is None else created_at.isoformat(),
             ),
         )
         return _required_lastrowid(cursor)
@@ -1438,6 +2471,30 @@ class AutopilotRepository:
             fencing_token=int(row["fencing_token"]),
             expires_at=str(row["expires_at"]),
             updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _reservation_from_row(row: sqlite3.Row) -> QuotaReservationRecord:
+        source = str(row["source"])
+        if source not in {"dispatch", "external_sync"}:
+            raise ValueError(f"invalid quota reservation source: {source}")
+        return QuotaReservationRecord(
+            id=int(row["id"]),
+            attempt_id=(None if row["attempt_id"] is None else int(row["attempt_id"])),
+            run_id=None if row["run_id"] is None else int(row["run_id"]),
+            source=source,
+            remote_negotiation_id=(
+                None
+                if row["remote_negotiation_id"] is None
+                else str(row["remote_negotiation_id"])
+            ),
+            account_id=str(row["account_profile_id"]),
+            timezone=str(row["timezone"]),
+            local_date=str(row["local_date"]),
+            state=QuotaReservationState(str(row["state"])),
+            fencing_token=int(row["fencing_token"]),
+            created_at=str(row["created_at"]),
+            resolved_at=str(row["resolved_at"]),
         )
 
     @staticmethod
@@ -1523,11 +2580,65 @@ class AutopilotRepository:
             "previous_state": str(row["previous_state"]),
             "next_state": str(row["next_state"]),
             "reason_code": str(row["reason_code"]),
-            "metadata_json": _json_loads(
-                row["metadata_json"], field="metadata_json"
-            ),
+            "metadata_json": _json_loads(row["metadata_json"], field="metadata_json"),
             "created_at": str(row["created_at"]),
         }
+
+
+class LeaseKeeper:
+    def __init__(
+        self,
+        repository: AutopilotRepository,
+        lease: LeaseRecord,
+        *,
+        ttl_seconds: int,
+        renewal_margin_seconds: int,
+        clock: Callable[[], datetime | str] | None = None,
+    ) -> None:
+        if not isinstance(repository, AutopilotRepository):
+            raise TypeError("repository must be an AutopilotRepository")
+        _lease_input(lease)
+        self._repository = repository
+        self._lease = lease
+        self._ttl_seconds = _integer(ttl_seconds, field="ttl_seconds", minimum=1)
+        self._renewal_margin_seconds = _integer(
+            renewal_margin_seconds,
+            field="renewal_margin_seconds",
+        )
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable")
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @property
+    def lease(self) -> LeaseRecord:
+        return self._lease
+
+    def ensure_current(
+        self,
+        now: datetime | str | None = None,
+    ) -> LeaseRecord:
+        instant = _instant(
+            self._clock() if now is None else now,
+            field="now",
+        )
+        expires_at = _stored_lease_expiry(
+            self._lease.expires_at,
+            account_id=self._lease.account_id,
+        )
+        remaining = expires_at - instant
+        if remaining <= timedelta(seconds=self._renewal_margin_seconds):
+            self._lease = self._repository.renew_lease(
+                self._lease,
+                ttl_seconds=self._ttl_seconds,
+                now=instant,
+            )
+        else:
+            self._repository.assert_fence(
+                self._lease.account_id,
+                self._lease.fencing_token,
+                now=instant,
+            )
+        return self._lease
 
 
 __all__ = [
@@ -1535,14 +2646,19 @@ __all__ = [
     "AuthorizationReconciliationRecord",
     "AutopilotRepository",
     "ChallengeRecord",
+    "CooldownActive",
     "ControlRecord",
     "GrantRecord",
     "ItemRecord",
+    "LeaseKeeper",
     "LeaseRecord",
     "LiveAuthorizationSnapshot",
     "KillSwitchActive",
     "LostLease",
+    "QuotaExceeded",
+    "QuotaReservationRecord",
     "RunRecord",
     "RepositoryAuthorizationDenied",
     "StaleWrite",
+    "TimezoneChangeUnsafe",
 ]

@@ -31,6 +31,13 @@ class DeliveryCertainty(StrEnum):
     DEFINITE_RESPONSE = "definite_response"
 
 
+class QuotaReservationState(StrEnum):
+    RESERVED = "reserved"
+    HELD = "held"
+    CONSUMED = "consumed"
+    RELEASED = "released"
+
+
 STABLE_OUTCOME_CODES = frozenset(
     {
         "applied",
