@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 
@@ -211,6 +212,449 @@ def _json_value(value: Any, *, field_name: str, depth: int = 0) -> Any:
             for index, item in enumerate(value)
         ]
     raise TypeError(f"{field_name} contains a non-JSON value")
+
+
+def _strict_number(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: float,
+    maximum: float,
+) -> float:
+    if type(value) not in {int, float}:
+        raise TypeError(f"{field_name} must be a number")
+    parsed = float(value)
+    if type(value) is int and int(parsed) != value:
+        raise ValueError(f"{field_name} cannot be represented without loss")
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be finite")
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{field_name} must be in {minimum}..{maximum}")
+    return parsed
+
+
+def _bounded_text(
+    value: Any,
+    *,
+    field_name: str,
+    maximum: int,
+    allow_empty: bool = False,
+    canonical: bool = False,
+) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be a string")
+    parsed = re.sub(r"\s+", " ", value).strip()
+    if canonical:
+        parsed = parsed.casefold()
+    if not parsed and not allow_empty:
+        raise ValueError(f"{field_name} must not be empty")
+    if "\0" in parsed:
+        raise ValueError(f"{field_name} must not contain NUL")
+    if len(parsed) > maximum:
+        raise ValueError(f"{field_name} must be at most {maximum} characters")
+    return parsed
+
+
+def _freeze_json(value: Any, *, field_name: str, depth: int = 0) -> Any:
+    if depth > 6:
+        raise ValueError(f"{field_name} is nested too deeply")
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        if abs(value) > 1_000_000_000:
+            raise ValueError(f"{field_name} contains an oversized number")
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} contains a non-finite number")
+        if abs(value) > 1_000_000_000:
+            raise ValueError(f"{field_name} contains an oversized number")
+        return value
+    if type(value) is str:
+        if "\0" in value:
+            raise ValueError(f"{field_name} contains NUL")
+        if len(value) > 300:
+            raise ValueError(f"{field_name} contains an oversized string")
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > 30:
+            raise ValueError(f"{field_name} has too many keys")
+        detached: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{field_name} keys must be strings")
+            normalized_key = _bounded_text(
+                key,
+                field_name=f"{field_name} key",
+                maximum=100,
+            )
+            if normalized_key in detached:
+                raise ValueError(f"{field_name} has duplicate normalized keys")
+            detached[normalized_key] = _freeze_json(
+                item,
+                field_name=f"{field_name}.{normalized_key}",
+                depth=depth + 1,
+            )
+        return MappingProxyType(detached)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if len(value) > 20:
+            raise ValueError(f"{field_name} has too many values")
+        return tuple(
+            _freeze_json(
+                item,
+                field_name=f"{field_name}[{index}]",
+                depth=depth + 1,
+            )
+            for index, item in enumerate(value)
+        )
+    raise TypeError(f"{field_name} contains a non-JSON value")
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+def _component_mapping(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: float,
+    maximum: float,
+) -> Mapping[str, float]:
+    components = (
+        "role",
+        "skills",
+        "experience",
+        "salary",
+        "work_format",
+        "area",
+        "industry",
+    )
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    if set(value) != set(components):
+        raise ValueError(f"{field_name} must contain exactly the fixed components")
+    return MappingProxyType(
+        {
+            name: _strict_number(
+                value[name],
+                field_name=f"{field_name}.{name}",
+                minimum=minimum,
+                maximum=maximum,
+            )
+            for name in components
+        }
+    )
+
+
+@dataclass(frozen=True)
+class FilterDecision:
+    passed: bool
+    reason: str
+    evidence: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if type(self.passed) is not bool:
+            raise TypeError("passed must be a boolean")
+        reason = _bounded_text(self.reason, field_name="reason", maximum=128)
+        if not isinstance(self.evidence, Mapping):
+            raise TypeError("evidence must be a mapping")
+        allowed_evidence = {
+            "checks",
+            "field",
+            "archived",
+            "status",
+            "vacancy_id",
+            "employer_id",
+            "matched",
+            "missing",
+            "actual",
+            "allowed",
+            "area_id",
+            "relocation_allowed",
+            "remote",
+            "schedule",
+            "employment",
+            "experience",
+            "salary_known",
+            "minimum",
+            "currency",
+            "expected_currency",
+            "maximum",
+            "required",
+            "unavailable",
+            "value",
+            "ids",
+        }
+        unknown_evidence = set(self.evidence) - allowed_evidence
+        if unknown_evidence:
+            raise ValueError("evidence contains a non-allowlisted field")
+        evidence = _freeze_json(self.evidence, field_name="evidence")
+        if not isinstance(evidence, Mapping):
+            raise TypeError("evidence must be a mapping")
+        if self.passed and reason != "hard_filters_passed":
+            raise ValueError("a passing filter decision must use hard_filters_passed")
+        if not self.passed and reason == "hard_filters_passed":
+            raise ValueError("a rejected filter decision cannot use hard_filters_passed")
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "evidence", evidence)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "reason": self.reason,
+            "evidence": _thaw_json(self.evidence),
+        }
+
+
+@dataclass(frozen=True)
+class RankScore:
+    score: float
+    components: Mapping[str, float]
+    weights: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        score = _strict_number(
+            self.score,
+            field_name="score",
+            minimum=0.0,
+            maximum=100.0,
+        )
+        components = _component_mapping(
+            self.components,
+            field_name="components",
+            minimum=0.0,
+            maximum=100.0,
+        )
+        weights = _component_mapping(
+            self.weights,
+            field_name="weights",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        total = sum(weights.values())
+        if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("weights must sum to 1")
+        object.__setattr__(self, "score", score)
+        object.__setattr__(self, "components", components)
+        object.__setattr__(self, "weights", weights)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "score": self.score,
+            "components": dict(self.components),
+            "weights": dict(self.weights),
+        }
+
+
+@dataclass(frozen=True)
+class AIDecision:
+    available: bool
+    suitable: bool | None
+    confidence: float | None
+    evidence: tuple[str, ...] | Sequence[str] = ()
+    reasons: tuple[str, ...] | Sequence[str] = ()
+    reason: str = "available"
+
+    def __post_init__(self) -> None:
+        if type(self.available) is not bool:
+            raise TypeError("available must be a boolean")
+        reason = _bounded_text(self.reason, field_name="reason", maximum=128)
+        evidence = self._strings(self.evidence, field_name="evidence")
+        reasons = self._strings(self.reasons, field_name="reasons")
+        if self.available:
+            if type(self.suitable) is not bool:
+                raise TypeError("available AI suitable must be a boolean")
+            if self.confidence is None:
+                raise TypeError("available AI confidence is required")
+            confidence = _strict_number(
+                self.confidence,
+                field_name="confidence",
+                minimum=0.0,
+                maximum=1.0,
+            )
+            if reason != "available":
+                raise ValueError("available AI decision must use reason available")
+        else:
+            if self.suitable is not None or self.confidence is not None:
+                raise ValueError(
+                    "unavailable AI decision cannot contain suitability or confidence"
+                )
+            if evidence or reasons:
+                raise ValueError("unavailable AI decision cannot retain model output")
+            if reason != "ai_unavailable":
+                raise ValueError(
+                    "unavailable AI decision must use reason ai_unavailable"
+                )
+            confidence = None
+        object.__setattr__(self, "confidence", confidence)
+        object.__setattr__(self, "evidence", evidence)
+        object.__setattr__(self, "reasons", reasons)
+        object.__setattr__(self, "reason", reason)
+
+    @staticmethod
+    def _strings(value: Any, *, field_name: str) -> tuple[str, ...]:
+        if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+            raise TypeError(f"{field_name} must be a sequence")
+        if len(value) > 20:
+            raise ValueError(f"{field_name} must contain at most 20 values")
+        return tuple(
+            _bounded_text(
+                item,
+                field_name=f"{field_name}[{index}]",
+                maximum=300,
+                allow_empty=True,
+            )
+            for index, item in enumerate(value)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "suitable": self.suitable,
+            "confidence": self.confidence,
+            "evidence": list(self.evidence),
+            "reasons": list(self.reasons),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class RankingDecision:
+    ready: bool
+    retry: bool
+    reason: str
+    rank_score: RankScore
+    ai_decision: AIDecision | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.ready) is not bool or type(self.retry) is not bool:
+            raise TypeError("ready and retry must be booleans")
+        if self.ready and self.retry:
+            raise ValueError("a ranking decision cannot be ready and retry")
+        if not isinstance(self.rank_score, RankScore):
+            raise TypeError("rank_score must be a RankScore")
+        if self.ai_decision is not None and not isinstance(
+            self.ai_decision, AIDecision
+        ):
+            raise TypeError("ai_decision must be an AIDecision or None")
+        object.__setattr__(
+            self,
+            "reason",
+            _bounded_text(self.reason, field_name="reason", maximum=128),
+        )
+
+    @property
+    def score(self) -> float:
+        return self.rank_score.score
+
+    @property
+    def ai_confidence(self) -> float | None:
+        return (
+            None
+            if self.ai_decision is None or not self.ai_decision.available
+            else self.ai_decision.confidence
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ready": self.ready,
+            "retry": self.retry,
+            "reason": self.reason,
+            "rank_score": self.rank_score.to_dict(),
+            "ai_decision": (
+                None
+                if self.ai_decision is None
+                else self.ai_decision.to_dict()
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class RankedCandidate:
+    account_id: str
+    vacancy_id: str
+    resume_id: str
+    published_at: str
+    decision: RankingDecision
+    item_id: int | None = None
+    expected_version: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "account_id",
+            _bounded_text(
+                self.account_id,
+                field_name="account_id",
+                maximum=256,
+                canonical=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "vacancy_id",
+            _bounded_text(
+                self.vacancy_id,
+                field_name="vacancy_id",
+                maximum=256,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "resume_id",
+            _bounded_text(
+                self.resume_id,
+                field_name="resume_id",
+                maximum=256,
+                canonical=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "published_at",
+            _bounded_text(
+                self.published_at,
+                field_name="published_at",
+                maximum=128,
+                allow_empty=True,
+            ),
+        )
+        if not isinstance(self.decision, RankingDecision):
+            raise TypeError("decision must be a RankingDecision")
+        if self.item_id is not None:
+            object.__setattr__(
+                self,
+                "item_id",
+                _int(self.item_id, field_name="item_id", minimum=1),
+            )
+        if self.expected_version is not None:
+            object.__setattr__(
+                self,
+                "expected_version",
+                _int(
+                    self.expected_version,
+                    field_name="expected_version",
+                    minimum=0,
+                ),
+            )
+        if (self.item_id is None) != (self.expected_version is None):
+            raise ValueError("item_id and expected_version must be supplied together")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "vacancy_id": self.vacancy_id,
+            "resume_id": self.resume_id,
+            "published_at": self.published_at,
+            "decision": self.decision.to_dict(),
+            "item_id": self.item_id,
+            "expected_version": self.expected_version,
+        }
 
 
 @dataclass(frozen=True)

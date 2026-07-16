@@ -21,7 +21,13 @@ from work_hunter.hh_autopilot.repository import (
     RunRecord,
     StaleWrite,
 )
-from work_hunter.hh_autopilot.types import AutopilotState
+from work_hunter.hh_autopilot.types import (
+    AIDecision,
+    AutopilotState,
+    FilterDecision,
+    RankScore,
+    RankingDecision,
+)
 from work_hunter.storage import Storage
 
 
@@ -353,6 +359,48 @@ def repo(tmp_path):
     storage = Storage(tmp_path / "work-hunter.db")
     yield AutopilotRepository(storage)
     storage.close()
+
+
+RANK_COMPONENTS = (
+    "role",
+    "skills",
+    "experience",
+    "salary",
+    "work_format",
+    "area",
+    "industry",
+)
+
+
+def _filter_decision(*, passed: bool = True) -> FilterDecision:
+    return FilterDecision(
+        passed=passed,
+        reason="hard_filters_passed" if passed else "hard_filter:area",
+        evidence={"field": "area", "actual": "1"},
+    )
+
+
+def _ranking_decision(score: float = 80.0) -> RankingDecision:
+    rank_score = RankScore(
+        score=score,
+        components={name: score for name in RANK_COMPONENTS},
+        weights={name: 1 / len(RANK_COMPONENTS) for name in RANK_COMPONENTS},
+    )
+    ai = AIDecision(
+        available=True,
+        suitable=True,
+        confidence=0.9,
+        evidence=("python",),
+        reasons=(),
+        reason="available",
+    )
+    return RankingDecision(
+        ready=True,
+        retry=False,
+        reason="ai_suitable",
+        rank_score=rank_score,
+        ai_decision=ai,
+    )
 
 
 def test_transition_updates_item_and_event_in_one_commit(repo) -> None:
@@ -3181,3 +3229,449 @@ def test_create_grants_rolls_back_batch_on_real_generation_high_water(repo) -> N
         ).fetchall()
     ]
     assert after == before
+
+
+def _prepare_ranked_items(
+    repo: AutopilotRepository,
+    *,
+    account_id: str = "default",
+    vacancy_id: str = "v-1",
+    resume_ids: tuple[str, ...] = ("r-1", "r-2"),
+) -> tuple[RunRecord, tuple[ItemRecord, ...]]:
+    run = repo.create_run(account_id, trigger="manual", policy_hash="hash")
+    ranked: list[ItemRecord] = []
+    for index, resume_id in enumerate(resume_ids):
+        item = repo.create_item(
+            run.id,
+            account_id,
+            vacancy_id,
+            resume_id,
+            "preset:python",
+        )
+        eligible = repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+            published_at=f"2026-07-{16 - index:02d}T09:00:00+00:00",
+        )
+        ranked.append(
+            repo.record_ranking_decision(
+                eligible.id,
+                expected_version=eligible.version,
+                decision=_ranking_decision(90 - index),
+                run_id=run.id,
+            )
+        )
+    return run, tuple(ranked)
+
+
+def test_record_filter_decision_persists_evidence_and_one_transition(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    before_events = len(repo.list_events(item.id))
+
+    changed = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+        published_at="2026-07-16T09:00:00+00:00",
+    )
+
+    assert changed.state is AutopilotState.ELIGIBLE
+    assert changed.query_key == "preset:python"
+    assert changed.filter_data == {
+        "evidence": {"actual": "1", "field": "area"},
+        "passed": True,
+        "reason": "hard_filters_passed",
+    }
+    assert changed.published_at == "2026-07-16T09:00:00+00:00"
+    assert changed.last_outcome_code == "hard_filters_passed"
+    events = repo.list_events(item.id)
+    assert len(events) == before_events + 1
+    assert events[-1]["reason_code"] == "hard_filters_passed"
+
+    changed.filter_data["evidence"]["actual"] = "mutated"
+    assert repo.get_item(item.id).filter_data["evidence"]["actual"] == "1"
+
+
+def test_record_filter_rejection_goes_directly_to_skipped(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+
+    changed = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(passed=False),
+        run_id=run.id,
+    )
+
+    assert changed.state is AutopilotState.SKIPPED
+    assert changed.last_outcome_code == "hard_filter:area"
+
+
+def test_policy_evidence_writes_require_the_items_current_run(repo) -> None:
+    origin = repo.create_run("default", trigger="manual", policy_hash="hash")
+    other = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(
+        origin.id,
+        "default",
+        "v-1",
+        "r-1",
+        "preset:python",
+    )
+
+    with pytest.raises(ValueError, match="same run"):
+        repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=other.id,
+        )
+
+    assert repo.get_item(item.id).state is AutopilotState.DISCOVERED
+
+
+def test_filter_decision_stale_write_and_event_failure_roll_back_everything(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    repo.conn.execute(
+        """
+        CREATE TRIGGER abort_filter_decision_event
+        BEFORE INSERT ON hh_autopilot_events
+        WHEN NEW.reason_code = 'hard_filters_passed'
+        BEGIN
+            SELECT RAISE(ABORT, 'filter event rejected');
+        END
+        """
+    )
+    repo.conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="filter event rejected"):
+        repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+            published_at="2026-07-16T09:00:00+00:00",
+        )
+
+    unchanged = repo.get_item(item.id)
+    assert unchanged.state is AutopilotState.DISCOVERED
+    assert unchanged.version == item.version
+    assert unchanged.filter_data == {}
+    assert unchanged.published_at == ""
+    assert [event["reason_code"] for event in repo.list_events(item.id)] == [
+        "discovered"
+    ]
+
+    repo.conn.execute("DROP TRIGGER abort_filter_decision_event")
+    repo.conn.commit()
+    changed = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+    with pytest.raises(StaleWrite):
+        repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+        )
+    assert repo.get_item(item.id) == changed
+
+
+def test_record_ranking_decision_persists_finite_score_and_structured_ai(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    eligible = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+
+    ranked = repo.record_ranking_decision(
+        eligible.id,
+        expected_version=eligible.version,
+        decision=_ranking_decision(82.5),
+        run_id=run.id,
+    )
+
+    assert ranked.state is AutopilotState.RANKED
+    assert ranked.deterministic_score == 82.5
+    assert ranked.ai_data == {
+        "ai": {
+            "available": True,
+            "confidence": 0.9,
+            "evidence": ["python"],
+            "reason": "available",
+            "reasons": [],
+            "suitable": True,
+        },
+        "ready": True,
+        "reason": "ai_suitable",
+        "retry": False,
+    }
+    assert repo.list_events(item.id)[-1]["reason_code"] == "ai_suitable"
+
+
+def test_ranking_event_failure_rolls_back_score_and_state(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    eligible = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+    repo.conn.execute(
+        """
+        CREATE TRIGGER abort_ranking_event
+        BEFORE INSERT ON hh_autopilot_events
+        WHEN NEW.reason_code = 'ai_suitable'
+        BEGIN
+            SELECT RAISE(ABORT, 'ranking event rejected');
+        END
+        """
+    )
+    repo.conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="ranking event rejected"):
+        repo.record_ranking_decision(
+            eligible.id,
+            expected_version=eligible.version,
+            decision=_ranking_decision(),
+            run_id=run.id,
+        )
+
+    unchanged = repo.get_item(item.id)
+    assert unchanged.state is AutopilotState.ELIGIBLE
+    assert unchanged.version == eligible.version
+    assert unchanged.deterministic_score is None
+    assert unchanged.ai_data == {}
+
+
+def test_finalize_best_resume_marks_one_ready_and_others_not_best(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+
+    changed = repo.finalize_ranked_candidates(
+        {item.id: item.version for item in ranked},
+        selected_item_ids=[ranked[0].id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )
+
+    by_id = {item.id: item for item in changed}
+    assert by_id[ranked[0].id].state is AutopilotState.READY
+    assert by_id[ranked[0].id].last_outcome_code == "ready"
+    assert by_id[ranked[1].id].state is AutopilotState.SKIPPED
+    assert by_id[ranked[1].id].last_outcome_code == "not_best_resume"
+    assert repo.count_guards() == 0
+    assert repo.count_application_attempts() == 0
+    assert repo.count_reservations() == 0
+
+
+def test_finalize_best_resume_rejects_a_non_winning_tie_break_selection(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    ranked: list[ItemRecord] = []
+    for resume_id in ("r-2", "r-1"):
+        item = repo.create_item(
+            run.id,
+            "default",
+            "v-1",
+            resume_id,
+            "preset:python",
+        )
+        eligible = repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+            published_at="2026-07-16T09:00:00+00:00",
+        )
+        ranked.append(
+            repo.record_ranking_decision(
+                eligible.id,
+                expected_version=eligible.version,
+                decision=_ranking_decision(80),
+                run_id=run.id,
+            )
+        )
+
+    with pytest.raises(ValueError, match="stable best"):
+        repo.finalize_ranked_candidates(
+            {item.id: item.version for item in ranked},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+
+    changed = repo.finalize_ranked_candidates(
+        {item.id: item.version for item in ranked},
+        selected_item_ids=[ranked[1].id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )
+    by_id = {item.id: item for item in changed}
+    assert by_id[ranked[1].id].state is AutopilotState.READY
+
+
+def test_finalize_per_resume_marks_every_qualifying_candidate_ready(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+
+    changed = repo.finalize_ranked_candidates(
+        {item.id: item.version for item in ranked},
+        selected_item_ids=[item.id for item in ranked],
+        resume_policy="per_resume",
+        run_id=run.id,
+    )
+
+    assert [item.state for item in changed] == [
+        AutopilotState.READY,
+        AutopilotState.READY,
+    ]
+    assert repo.count_guards() == 0
+    assert repo.count_application_attempts() == 0
+    assert repo.count_reservations() == 0
+
+
+def test_finalize_rejects_stale_mixed_or_invalid_candidate_sets(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+    other_run, other_ranked = _prepare_ranked_items(
+        repo,
+        account_id="other",
+        vacancy_id="v-1",
+        resume_ids=("r-3",),
+    )
+    assert other_run.id != run.id
+
+    with pytest.raises(ValueError, match="account"):
+        repo.finalize_ranked_candidates(
+            {
+                ranked[0].id: ranked[0].version,
+                other_ranked[0].id: other_ranked[0].version,
+            },
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+    with pytest.raises(StaleWrite):
+        repo.finalize_ranked_candidates(
+            {ranked[0].id: ranked[0].version + 1},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+    with pytest.raises(ValueError, match="every candidate"):
+        repo.finalize_ranked_candidates(
+            {item.id: item.version for item in ranked},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="per_resume",
+            run_id=run.id,
+        )
+
+    assert all(
+        repo.get_item(item.id).state is AutopilotState.RANKED for item in ranked
+    )
+
+
+def test_finalize_candidate_set_rolls_back_all_items_when_late_event_fails(repo) -> None:
+    run, ranked = _prepare_ranked_items(repo)
+    repo.conn.execute(
+        """
+        CREATE TRIGGER abort_not_best_event
+        BEFORE INSERT ON hh_autopilot_events
+        WHEN NEW.reason_code = 'not_best_resume'
+        BEGIN
+            SELECT RAISE(ABORT, 'not-best event rejected');
+        END
+        """
+    )
+    repo.conn.commit()
+    before_events = {
+        item.id: len(repo.list_events(item.id))
+        for item in ranked
+    }
+
+    with pytest.raises(sqlite3.IntegrityError, match="not-best event rejected"):
+        repo.finalize_ranked_candidates(
+            {item.id: item.version for item in ranked},
+            selected_item_ids=[ranked[0].id],
+            resume_policy="best_resume_only",
+            run_id=run.id,
+        )
+
+    for item in ranked:
+        unchanged = repo.get_item(item.id)
+        assert unchanged.state is AutopilotState.RANKED
+        assert unchanged.version == item.version
+        assert len(repo.list_events(item.id)) == before_events[item.id]
+
+
+def test_policy_repository_methods_honor_optional_current_fence(repo) -> None:
+    lease = repo.acquire_lease(
+        "default",
+        "owner",
+        ttl_seconds=3600,
+        now=LEASE_START,
+    )
+    run = repo.create_run(
+        "default",
+        trigger="manual",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+
+    with pytest.raises(LostLease):
+        repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=run.id,
+            fencing_token=lease.fencing_token + 1,
+        )
+    assert repo.get_item(item.id).state is AutopilotState.DISCOVERED
+
+    changed = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+        fencing_token=lease.fencing_token,
+    )
+    assert changed.state is AutopilotState.ELIGIBLE
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("query_key", b"preset:python"),
+        ("filter_json", '{"x":NaN}'),
+        ("filter_json", '{"x":1}'),
+        ("ai_json", "[]"),
+        ("ai_json", '{"x":1}'),
+        ("deterministic_score", 101.0),
+        ("published_at", b"7"),
+        ("last_outcome_code", b"ai_suitable"),
+        ("account_profile_id", " Default "),
+        ("resume_id", "R-1"),
+    ],
+)
+def test_item_reader_rejects_malformed_persisted_policy_facts(
+    repo, column: str, value: Any
+) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    repo.conn.execute(
+        f"UPDATE hh_autopilot_items SET {column} = ? WHERE id = ?",
+        (value, item.id),
+    )
+    repo.conn.commit()
+
+    with pytest.raises((StaleWrite, ValueError)):
+        repo.get_item(item.id)
