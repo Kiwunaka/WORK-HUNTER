@@ -40,12 +40,34 @@ def _object(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _optional_number(value: Any) -> int | None:
-    return value if type(value) is int else None
+def _fact_object(source: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    if key not in source or source[key] is None:
+        return {}
+    value = source[key]
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{key} must be a mapping or None")
+    return value
 
 
-def _optional_bool(value: Any) -> bool | None:
-    return value if type(value) is bool else None
+def _optional_amount(source: Mapping[str, Any], key: str) -> int | None:
+    if key not in source or source[key] is None:
+        return None
+    value = source[key]
+    if type(value) is not int:
+        raise TypeError(f"salary.{key} must be an integer or None")
+    if value < 0:
+        raise ValueError(f"salary.{key} must not be negative")
+    return value
+
+
+def _optional_bool_fact(source: Mapping[str, Any], key: str, *, prefix: str = "") -> bool | None:
+    if key not in source or source[key] is None:
+        return None
+    value = source[key]
+    if type(value) is not bool:
+        name = f"{prefix}.{key}" if prefix else key
+        raise TypeError(f"{name} must be a boolean or None")
+    return value
 
 
 def _identifier_list(value: Any, *, named: bool = False) -> tuple[str, ...]:
@@ -78,20 +100,23 @@ def _relation_list(value: Any) -> tuple[str, ...]:
 def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
     if not isinstance(raw, Mapping):
         raise TypeError("vacancy must be a mapping")
-    vacancy_id = _clean(raw.get("id"), limit=256)
+    raw_id = raw.get("id")
+    if not isinstance(raw_id, str):
+        raise TypeError("vacancy id must be a string")
+    vacancy_id = _clean(raw_id, limit=256)
     if not vacancy_id:
         raise ValueError("vacancy id must not be empty")
     if "\0" in vacancy_id:
         raise ValueError("vacancy id must not contain NUL")
 
-    employer = _object(raw.get("employer"))
-    area = _object(raw.get("area"))
-    salary = _object(raw.get("salary"))
-    schedule = _object(raw.get("schedule"))
-    employment = _object(raw.get("employment"))
-    experience = _object(raw.get("experience"))
-    vacancy_type = _object(raw.get("type"))
-    snippet = _object(raw.get("snippet"))
+    employer = _fact_object(raw, "employer")
+    area = _fact_object(raw, "area")
+    salary = _fact_object(raw, "salary")
+    schedule = _fact_object(raw, "schedule")
+    employment = _fact_object(raw, "employment")
+    experience = _fact_object(raw, "experience")
+    vacancy_type = _fact_object(raw, "type")
+    snippet = _fact_object(raw, "snippet")
     description = _clean(
         " ".join(
             part
@@ -106,8 +131,8 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
     title = _clean(raw.get("name"), limit=1_000)
     employer_name = _clean(employer.get("name"), limit=1_000)
     area_name = _clean(area.get("name"), limit=1_000)
-    salary_from = _optional_number(salary.get("from"))
-    salary_to = _optional_number(salary.get("to"))
+    salary_from = _optional_amount(salary, "from")
+    salary_to = _optional_amount(salary, "to")
     currency = _clean(salary.get("currency"), limit=32)
     schedule_id = _clean(schedule.get("id"), limit=128)
     published_at = _clean(raw.get("published_at"), limit=128)
@@ -130,20 +155,20 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
         salary_to=salary_to,
         currency=currency,
         location=area_name,
-        remote=schedule_id == "remote",
+        remote=None if not schedule_id else schedule_id == "remote",
         description=description,
         published_at=published_at,
     ).to_dict()
-    archived = _optional_bool(raw.get("archived"))
-    has_test = _optional_bool(raw.get("has_test"))
-    letter_required = _optional_bool(raw.get("response_letter_required"))
-    incomplete = _optional_bool(raw.get("accept_incomplete_resumes"))
-    temporary = _optional_bool(raw.get("accept_temporary"))
+    archived = _optional_bool_fact(raw, "archived")
+    has_test = _optional_bool_fact(raw, "has_test")
+    letter_required = _optional_bool_fact(raw, "response_letter_required")
+    incomplete = _optional_bool_fact(raw, "accept_incomplete_resumes")
+    temporary = _optional_bool_fact(raw, "accept_temporary")
     status_value = raw.get("status")
     if isinstance(status_value, Mapping):
         status_value = status_value.get("id")
     status = _clean(status_value, limit=128)
-    if not status:
+    if not status and archived is not None:
         status = "archived" if archived else "open"
     return NormalizedVacancy(
         id=vacancy_id,
@@ -155,7 +180,7 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
         salary_from=salary_from,
         salary_to=salary_to,
         salary_currency=currency,
-        salary_gross=_optional_bool(salary.get("gross")),
+        salary_gross=_optional_bool_fact(salary, "gross", prefix="salary"),
         schedule_id=schedule_id,
         work_format_ids=_identifier_list(raw.get("work_format")),
         employment_id=_clean(employment.get("id"), limit=128),
@@ -164,17 +189,17 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
         key_skills=_identifier_list(raw.get("key_skills"), named=True),
         published_at=published_at,
         url=url,
-        archived=False if archived is None else archived,
+        archived=archived,
         status=status,
         vacancy_type=_clean(vacancy_type.get("id"), limit=128),
         description=description,
         response_url=_clean(raw.get("response_url"), limit=2_000),
         apply_alternate_url=_clean(raw.get("apply_alternate_url"), limit=2_000),
         relations=_relation_list(raw.get("relations")),
-        has_test=False if has_test is None else has_test,
-        response_letter_required=False if letter_required is None else letter_required,
-        accept_incomplete_resumes=False if incomplete is None else incomplete,
-        accept_temporary=False if temporary is None else temporary,
+        has_test=has_test,
+        response_letter_required=letter_required,
+        accept_incomplete_resumes=incomplete,
+        accept_temporary=temporary,
         job=job,
     )
 
@@ -240,13 +265,16 @@ class HHSearchProvider:
             cycle.id, request.resume_id, request.query_key
         )
         if checkpoint.status == "complete":
-            return SearchResult((), checkpoint.next_page, cycle.id, 0)
+            return SearchResult((), checkpoint.next_page, cycle.id, 0, 0)
 
         known_cycle_ids = set(self.repository.list_search_cycle_vacancy_ids(cycle.id))
+        absolute_distinct_cap = len(known_cycle_ids) + request.remaining_budget
         newly_budgeted: set[str] = set()
         result: dict[str, NormalizedVacancy] = {}
         page_number = checkpoint.next_page
-        inserted_before = self.repository.count_search_results(cycle_id=cycle.id)
+        inserted_references = 0
+        new_distinct = 0
+        current_checkpoint = checkpoint
         while page_number < request.max_pages and len(newly_budgeted) < request.remaining_budget:
             page = self._fetch_page(request, page_number)
             normalized_page: list[NormalizedVacancy] = []
@@ -263,7 +291,15 @@ class HHSearchProvider:
                 if is_new:
                     newly_budgeted.add(vacancy.id)
 
-            self.repository.commit_search_page(
+            next_page = page_number + 1
+            terminal = (
+                next_page >= request.max_pages
+                or len(page.items) < request.per_page
+                or (page.total > 0 and next_page * page.per_page >= page.total)
+                or (page.pages > 0 and next_page >= page.pages)
+                or len(newly_budgeted) >= request.remaining_budget
+            )
+            outcome = self.repository.commit_search_page(
                 checkpoint.id,
                 expected_next_page=page_number,
                 page=page,
@@ -273,34 +309,36 @@ class HHSearchProvider:
                 owner_run_id=request.run_id,
                 expected_claim_version=cycle.claim_version,
                 policy_hash=request.policy_hash,
+                terminal=terminal,
+                absolute_distinct_cap=absolute_distinct_cap,
             )
+            accepted_ids = set(outcome.accepted_vacancy_ids)
             for vacancy in normalized_page:
-                result.setdefault(vacancy.id, vacancy)
-            known_cycle_ids.update(item.id for item in normalized_page)
-            page_number += 1
+                if vacancy.id in accepted_ids:
+                    result.setdefault(vacancy.id, vacancy)
+            known_cycle_ids.update(outcome.accepted_vacancy_ids)
+            inserted_references += outcome.inserted_reference_count
+            new_distinct += outcome.new_distinct_count
+            current_checkpoint = outcome.checkpoint
+            page_number = outcome.checkpoint.next_page
 
-            if len(newly_budgeted) >= request.remaining_budget:
-                break
-            if len(page.items) < request.per_page:
-                break
-            if page.total > 0 and page_number * page.per_page >= page.total:
-                break
-            if page.pages > 0 and page_number >= page.pages:
+            if outcome.checkpoint.status == "complete":
                 break
 
-        self.repository.complete_checkpoint(
-            checkpoint.id,
-            request.fencing_token,
-            owner_run_id=request.run_id,
-            expected_claim_version=cycle.claim_version,
-            policy_hash=request.policy_hash,
-        )
-        inserted_after = self.repository.count_search_results(cycle_id=cycle.id)
+        if current_checkpoint.status != "complete":
+            current_checkpoint = self.repository.complete_checkpoint(
+                checkpoint.id,
+                request.fencing_token,
+                owner_run_id=request.run_id,
+                expected_claim_version=cycle.claim_version,
+                policy_hash=request.policy_hash,
+            )
         return SearchResult(
             tuple(result.values()),
-            page_number,
+            current_checkpoint.next_page,
             cycle.id,
-            inserted_after - inserted_before,
+            inserted_references,
+            new_distinct,
         )
 
 

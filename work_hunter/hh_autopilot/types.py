@@ -5,6 +5,7 @@ import html
 import math
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Mapping, Sequence
 
@@ -300,17 +301,17 @@ class NormalizedVacancy:
     key_skills: tuple[str, ...] = ()
     published_at: str = ""
     url: str = ""
-    archived: bool = False
-    status: str = "open"
+    archived: bool | None = None
+    status: str = ""
     vacancy_type: str = ""
     description: str = ""
     response_url: str = ""
     apply_alternate_url: str = ""
     relations: tuple[str, ...] = ()
-    has_test: bool = False
-    response_letter_required: bool = False
-    accept_incomplete_resumes: bool = False
-    accept_temporary: bool = False
+    has_test: bool | None = None
+    response_letter_required: bool | None = None
+    accept_incomplete_resumes: bool | None = None
+    accept_temporary: bool | None = None
     job: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -342,6 +343,8 @@ class NormalizedVacancy:
             value = getattr(self, field_name)
             if value is not None and type(value) is not int:
                 raise TypeError(f"{field_name} must be an integer or None")
+            if value is not None and value < 0:
+                raise ValueError(f"{field_name} must not be negative")
         if self.salary_gross is not None and type(self.salary_gross) is not bool:
             raise TypeError("salary_gross must be a boolean or None")
         for field_name in (
@@ -351,8 +354,9 @@ class NormalizedVacancy:
             "accept_incomplete_resumes",
             "accept_temporary",
         ):
-            if type(getattr(self, field_name)) is not bool:
-                raise TypeError(f"{field_name} must be a boolean")
+            value = getattr(self, field_name)
+            if value is not None and type(value) is not bool:
+                raise TypeError(f"{field_name} must be a boolean or None")
         for field_name in (
             "work_format_ids",
             "professional_role_ids",
@@ -369,14 +373,146 @@ class NormalizedVacancy:
             object.__setattr__(self, field_name, cleaned)
         if not isinstance(self.job, Mapping):
             raise TypeError("job must be a mapping")
+        expected_job_keys = {
+            "source",
+            "source_id",
+            "url",
+            "title",
+            "company",
+            "salary_text",
+            "salary_from",
+            "salary_to",
+            "currency",
+            "location",
+            "remote",
+            "description",
+            "published_at",
+            "fetched_at",
+            "id",
+            "status",
+            "score",
+        }
+        if set(self.job) != expected_job_keys:
+            raise ValueError("job must use the exact normalized Job schema")
         detached_job = _json_value(self.job, field_name="job")
         assert isinstance(detached_job, dict)
+        for key in (
+            "source",
+            "source_id",
+            "url",
+            "title",
+            "company",
+            "salary_text",
+            "currency",
+            "location",
+            "description",
+            "published_at",
+            "fetched_at",
+            "status",
+        ):
+            if type(detached_job[key]) is not str:
+                raise TypeError(f"job.{key} must be a string")
         for key, value in tuple(detached_job.items()):
             if isinstance(value, str):
                 detached_job[key] = _clean_text(
                     value, field_name=f"job.{key}", maximum=8_000
                 )
+        for key in ("salary_from", "salary_to"):
+            value = detached_job[key]
+            if value is not None and (type(value) is not int or value < 0):
+                raise TypeError(f"job.{key} must be a nonnegative integer or None")
+        if detached_job["remote"] is not None and type(detached_job["remote"]) is not bool:
+            raise TypeError("job.remote must be a boolean or None")
+        if detached_job["id"] is not None or detached_job["score"] is not None:
+            raise ValueError("normalized job id and score must be None")
+        if detached_job["source"] != "hh" or detached_job["source_id"] != self.id:
+            raise ValueError("normalized job source provenance does not match vacancy")
+        expected_salary_text = ""
+        if self.salary_from is not None and self.salary_to is not None:
+            expected_salary_text = (
+                f"{self.salary_from}-{self.salary_to} {self.salary_currency}".strip()
+            )
+        elif self.salary_from is not None:
+            expected_salary_text = (
+                f"from {self.salary_from} {self.salary_currency}".strip()
+            )
+        elif self.salary_to is not None:
+            expected_salary_text = (
+                f"up to {self.salary_to} {self.salary_currency}".strip()
+            )
+        if detached_job["salary_text"] != expected_salary_text:
+            raise ValueError("normalized job salary_text does not match salary facts")
+        if detached_job["status"] != "new":
+            raise ValueError("normalized job status must be new")
+        try:
+            fetched_at = datetime.fromisoformat(detached_job["fetched_at"])
+        except ValueError as exc:
+            raise ValueError("normalized job fetched_at must be ISO-8601") from exc
+        if (
+            fetched_at.tzinfo is None
+            or fetched_at.utcoffset() != timedelta(0)
+            or fetched_at.microsecond != 0
+            or fetched_at.isoformat() != detached_job["fetched_at"]
+        ):
+            raise ValueError("normalized job fetched_at must be canonical UTC seconds")
+        expected_remote = None if not self.schedule_id else self.schedule_id == "remote"
+        if detached_job["remote"] is not expected_remote:
+            raise ValueError("normalized job remote fact does not match schedule")
+        mirrored = {
+            "url": self.url,
+            "title": self.title,
+            "company": self.employer_name,
+            "salary_from": self.salary_from,
+            "salary_to": self.salary_to,
+            "currency": self.salary_currency,
+            "location": self.area_name,
+            "description": self.description,
+            "published_at": self.published_at,
+        }
+        for key, expected in mirrored.items():
+            if detached_job[key] != expected:
+                raise ValueError(f"normalized job {key} does not match vacancy")
         object.__setattr__(self, "job", detached_job)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> NormalizedVacancy:
+        if not isinstance(value, Mapping):
+            raise TypeError("normalized vacancy must be a mapping")
+        expected = {
+            "id",
+            "title",
+            "employer_id",
+            "employer_name",
+            "area_id",
+            "area_name",
+            "salary_from",
+            "salary_to",
+            "salary_currency",
+            "salary_gross",
+            "schedule_id",
+            "work_format_ids",
+            "employment_id",
+            "experience_id",
+            "professional_role_ids",
+            "key_skills",
+            "published_at",
+            "url",
+            "archived",
+            "status",
+            "vacancy_type",
+            "description",
+            "response_url",
+            "apply_alternate_url",
+            "relations",
+            "has_test",
+            "response_letter_required",
+            "accept_incomplete_resumes",
+            "accept_temporary",
+            "job",
+        }
+        if set(value) != expected:
+            raise ValueError("normalized vacancy must use the exact persisted schema")
+        return cls(**copy.deepcopy(dict(value)))
 
     def to_dict(self) -> dict[str, Any]:
         return copy.deepcopy(
@@ -421,6 +557,11 @@ class SearchResult:
     next_page: int
     cycle_id: int
     inserted_count: int = 0
+    new_distinct_count: int = 0
+
+    @property
+    def inserted_reference_count(self) -> int:
+        return self.inserted_count
 
     def __post_init__(self) -> None:
         if isinstance(self.vacancies, (str, bytes)) or not isinstance(
@@ -441,4 +582,13 @@ class SearchResult:
             self,
             "inserted_count",
             _int(self.inserted_count, field_name="inserted_count", minimum=0),
+        )
+        object.__setattr__(
+            self,
+            "new_distinct_count",
+            _int(
+                self.new_distinct_count,
+                field_name="new_distinct_count",
+                minimum=0,
+            ),
         )
