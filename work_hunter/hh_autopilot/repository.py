@@ -1050,7 +1050,13 @@ class AutopilotRepository:
                     """,
                     (account_id, APPLICATION_SCOPE),
                 ).fetchone()
-                generation = int(row["generation"]) + 1
+                generation = (
+                    _persisted_integer(
+                        row["generation"],
+                        field="grant generation high-water",
+                    )
+                    + 1
+                )
                 now = _utc_now()
                 self.conn.execute(
                     """
@@ -2711,7 +2717,15 @@ class AutopilotRepository:
             account_id=str(row["account_profile_id"]),
             trigger=trigger,
             status=status,
-            grant_id=None if row["grant_id"] is None else int(row["grant_id"]),
+            grant_id=(
+                None
+                if row["grant_id"] is None
+                else _persisted_integer(
+                    row["grant_id"],
+                    field="run grant_id",
+                    minimum=1,
+                )
+            ),
             policy_hash=str(row["policy_hash"]),
             fencing_token=_persisted_integer(
                 row["fencing_token"],
@@ -2833,7 +2847,10 @@ class AutopilotRepository:
         scope = str(row["scope"])
         if scope != APPLICATION_SCOPE:
             raise ValueError(f"invalid grant scope in storage: {scope}")
-        active = int(row["active"])
+        active = _persisted_integer(
+            row["active"],
+            field="grant active",
+        )
         if active not in {0, 1}:
             raise ValueError(f"invalid grant active flag in storage: {active}")
         return GrantRecord(
@@ -2841,7 +2858,11 @@ class AutopilotRepository:
             account_id=str(row["account_profile_id"]),
             scope=scope,
             policy_hash=str(row["policy_hash"]),
-            generation=int(row["generation"]),
+            generation=_persisted_integer(
+                row["generation"],
+                field="grant generation",
+                minimum=1,
+            ),
             active=bool(active),
             actor=str(row["actor"]),
             source=str(row["source"]),

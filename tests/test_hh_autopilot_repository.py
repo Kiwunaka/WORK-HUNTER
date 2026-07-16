@@ -3040,3 +3040,140 @@ def test_dispatch_remote_replay_keeps_occurrence_compatibility(repo) -> None:
         now=LEASE_START + timedelta(seconds=2),
     )
     assert replay == consumed
+
+
+def _live_grant_snapshot_context(repo: AutopilotRepository) -> tuple[Any, Any, int]:
+    policy_hash = "live-policy-hash"
+    generation = repo.create_grants([("default", policy_hash, "operator", "test")])[
+        "default"
+    ]
+    grant = repo.active_grant("default")
+    assert grant is not None
+    run = repo.create_run(
+        "default",
+        trigger="manual",
+        policy_hash=policy_hash,
+        grant_id=grant.id,
+        fencing_token=11,
+    )
+    return grant, run, generation
+
+
+def test_live_snapshot_rejects_real_run_grant_id(repo) -> None:
+    grant, run, generation = _live_grant_snapshot_context(repo)
+    _unsafe_real_update(
+        repo,
+        "UPDATE hh_autopilot_runs SET grant_id = 1.5 WHERE id = ?",
+        (run.id,),
+    )
+    stored = repo.conn.execute(
+        "SELECT grant_id, typeof(grant_id) AS storage_type "
+        "FROM hh_autopilot_runs WHERE id = ?",
+        (run.id,),
+    ).fetchone()
+    assert stored["grant_id"] == 1.5
+    assert stored["storage_type"] == "real"
+
+    with pytest.raises(StaleWrite, match="run grant_id"):
+        repo.validate_live_authorization_snapshot(
+            "default",
+            generation=generation,
+            policy_hash=grant.policy_hash,
+            run_id=run.id,
+            fencing_token=run.fencing_token,
+        )
+
+
+def test_live_snapshot_rejects_real_grant_generation(repo) -> None:
+    grant, run, generation = _live_grant_snapshot_context(repo)
+    _unsafe_real_update(
+        repo,
+        "UPDATE hh_autopilot_grants SET generation = 1.5 WHERE id = ?",
+        (grant.id,),
+    )
+    stored = repo.conn.execute(
+        "SELECT generation, typeof(generation) AS storage_type "
+        "FROM hh_autopilot_grants WHERE id = ?",
+        (grant.id,),
+    ).fetchone()
+    assert stored["generation"] == 1.5
+    assert stored["storage_type"] == "real"
+
+    with pytest.raises(StaleWrite, match="grant generation"):
+        repo.validate_live_authorization_snapshot(
+            "default",
+            generation=generation,
+            policy_hash=grant.policy_hash,
+            run_id=run.id,
+            fencing_token=run.fencing_token,
+        )
+
+
+def _unsafe_grant_active_update(
+    repo: AutopilotRepository,
+    grant_id: int,
+    value: float,
+) -> None:
+    repo.conn.commit()
+    repo.conn.execute("PRAGMA ignore_check_constraints = ON")
+    try:
+        repo.conn.execute(
+            "UPDATE hh_autopilot_grants SET active = ? WHERE id = ?",
+            (value, grant_id),
+        )
+        repo.conn.commit()
+    finally:
+        repo.conn.execute("PRAGMA ignore_check_constraints = OFF")
+
+
+def test_grant_parser_rejects_real_active_flag(repo) -> None:
+    grant, _run, _generation = _live_grant_snapshot_context(repo)
+    _unsafe_grant_active_update(repo, grant.id, 1.5)
+    row = repo.conn.execute(
+        "SELECT *, typeof(active) AS active_storage_type "
+        "FROM hh_autopilot_grants WHERE id = ?",
+        (grant.id,),
+    ).fetchone()
+    assert row["active"] == 1.5
+    assert row["active_storage_type"] == "real"
+
+    with pytest.raises(StaleWrite, match="grant active"):
+        repo._grant_from_row(row)
+
+
+def test_create_grants_rolls_back_batch_on_real_generation_high_water(repo) -> None:
+    repo.create_grants(
+        [
+            ("first", "old-first", "operator", "test"),
+            ("broken", "old-broken", "operator", "test"),
+        ]
+    )
+    broken = repo.active_grant("broken")
+    assert broken is not None
+    _unsafe_real_update(
+        repo,
+        "UPDATE hh_autopilot_grants SET generation = 1.5 WHERE id = ?",
+        (broken.id,),
+    )
+    before = [
+        tuple(row)
+        for row in repo.conn.execute(
+            "SELECT * FROM hh_autopilot_grants ORDER BY id"
+        ).fetchall()
+    ]
+
+    with pytest.raises(StaleWrite, match="grant generation"):
+        repo.create_grants(
+            [
+                ("first", "new-first", "operator", "test"),
+                ("broken", "new-broken", "operator", "test"),
+            ]
+        )
+
+    after = [
+        tuple(row)
+        for row in repo.conn.execute(
+            "SELECT * FROM hh_autopilot_grants ORDER BY id"
+        ).fetchall()
+    ]
+    assert after == before
