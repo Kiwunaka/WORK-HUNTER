@@ -367,7 +367,11 @@ def _search_params(value: Any) -> dict[str, Any]:
     for key in value:
         if not isinstance(key, str):
             raise TypeError("params keys must be strings")
-    return deepcopy(value)
+    copied = deepcopy(value)
+    return {
+        key: str(item).lower() if type(item) is bool else item
+        for key, item in copied.items()
+    }
 
 
 def _search_page(data: Any) -> SearchPage:

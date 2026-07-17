@@ -74,6 +74,38 @@ def test_search_page_preserves_metadata_without_mutating_params(monkeypatch):
     assert calls[0][0:2] == ("GET", "/vacancies")
 
 
+def test_search_page_serializes_boolean_filters_for_hh(monkeypatch):
+    session = HHApiSession({"access_token": "token"})
+    params = {
+        "page": 0,
+        "per_page": 20,
+        "only_with_salary": True,
+        "no_magic": False,
+        "premium": True,
+    }
+    sent: list[dict] = []
+
+    def fake_request_json(method, path, **kwargs):
+        sent.append(kwargs["params"])
+        return {"items": [], "page": 0, "pages": 0, "per_page": 20, "found": 0}
+
+    monkeypatch.setattr(session, "request_json", fake_request_json)
+
+    session.search_vacancies_page(params)
+
+    assert sent == [
+        {
+            "page": 0,
+            "per_page": 20,
+            "only_with_salary": "true",
+            "no_magic": "false",
+            "premium": "true",
+        }
+    ]
+    assert params["only_with_salary"] is True
+    assert params["no_magic"] is False
+
+
 def test_resume_recommendation_page_uses_original_private_encoded_endpoint(monkeypatch):
     session = HHApiSession({"access_token": "token"})
     calls = []
