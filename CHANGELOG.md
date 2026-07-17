@@ -11,6 +11,7 @@
 ### HH application and maintenance parity
 
 - Render configurable template or AI cover letters inside the production autopilot instead of requiring a pre-saved draft; cache each rendered letter for stable retries.
+- Feed the production hard filter with the persisted employer blacklist and the application capabilities actually enabled by `screening_mode` and `form_mode`.
 - Run paginated employer replies, resume raising, recruiter follow-up, negotiation cleanup, and skipped-state maintenance through the configurable JSON runner.
 - Generate employer replies from full paginated chat history and suppress duplicate replies and email follow-ups.
 

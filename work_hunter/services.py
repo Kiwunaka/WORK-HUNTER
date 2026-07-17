@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from . import __version__
 from .config import (
@@ -1539,6 +1539,20 @@ def _hh_policy_material(
     )
 
 
+def _hh_supported_application_capabilities(
+    application: Mapping[str, Any],
+) -> list[str]:
+    capabilities = ["direct"]
+    screening_mode = (
+        str(application.get("screening_mode") or "").strip().casefold()
+    )
+    if screening_mode == "ai":
+        capabilities.append("screening")
+    if str(application.get("form_mode") or "").strip().casefold() != "off":
+        capabilities.append("form")
+    return capabilities
+
+
 def _hh_engine_context(
     service: "WorkHunter",
     repository: Any,
@@ -1598,6 +1612,13 @@ def _hh_engine_context(
         ).fetchall()
     ]
     skipped = [item.vacancy_id for item in service.storage.list_hh_skipped_vacancies()]
+    blacklisted_employers = sorted(
+        {
+            str(item.get("employer_id") or "").strip()
+            for item in service.storage.list_hh_employer_blacklist()
+            if str(item.get("employer_id") or "").strip()
+        }
+    )
     profiles = config.get("profiles") or {}
     candidate = copy.deepcopy(profiles.get(account.candidate_profile_id) or active_profile(config))
     return EngineRunContext(
@@ -1612,8 +1633,13 @@ def _hh_engine_context(
                 "active_vacancy_ids": active,
                 "permanently_skipped_vacancy_ids": skipped,
             },
-            "blacklist": {"vacancy_ids": [], "employer_ids": []},
-            "supported_application_capabilities": ["direct"],
+            "blacklist": {
+                "vacancy_ids": [],
+                "employer_ids": blacklisted_employers,
+            },
+            "supported_application_capabilities": (
+                _hh_supported_application_capabilities(settings.application)
+            ),
         },
     )
 
