@@ -678,8 +678,10 @@ def _parse_search(raw: Any) -> SearchSettings:
 
 def _parse_filters(raw: Any) -> dict[str, Any]:
     value = _mapping("filters", raw, _FILTER_KEYS)
-    keyword = lambda name, item: _text(name, item, casefold=True)
-    dictionary = lambda name, item: _text(name, item, casefold=True)
+
+    def casefolded_text(name: str, item: Any) -> str:
+        return _text(name, item, casefold=True)
+
     salary_currency = _text("filters.salary_currency", value["salary_currency"])
     if not re.fullmatch(r"[A-Za-z]{3}", salary_currency):
         raise AutopilotConfigError(
@@ -691,21 +693,21 @@ def _parse_filters(raw: Any) -> dict[str, Any]:
             value["excluded_keywords"],
             low=0,
             high=1000,
-            normalize=keyword,
+            normalize=casefolded_text,
         ),
         "required_keywords": _normalized_array(
             "filters.required_keywords",
             value["required_keywords"],
             low=0,
             high=1000,
-            normalize=keyword,
+            normalize=casefolded_text,
         ),
         "allowed_role_families": _normalized_array(
             "filters.allowed_role_families",
             value["allowed_role_families"],
             low=0,
             high=1000,
-            normalize=keyword,
+            normalize=casefolded_text,
         ),
         "areas": _normalized_array(
             "filters.areas", value["areas"], low=0, high=500, normalize=_hh_id
@@ -716,21 +718,21 @@ def _parse_filters(raw: Any) -> dict[str, Any]:
             value["schedules"],
             low=0,
             high=100,
-            normalize=dictionary,
+            normalize=casefolded_text,
         ),
         "employment_types": _normalized_array(
             "filters.employment_types",
             value["employment_types"],
             low=0,
             high=100,
-            normalize=dictionary,
+            normalize=casefolded_text,
         ),
         "experience_levels": _normalized_array(
             "filters.experience_levels",
             value["experience_levels"],
             low=0,
             high=100,
-            normalize=dictionary,
+            normalize=casefolded_text,
         ),
         "languages": _normalized_array(
             "filters.languages",
@@ -1617,11 +1619,11 @@ def _canonicalize(value: Any, path: tuple[str, ...]) -> Any:
                 )
         return normalized_items
     if isinstance(value, str):
-        normalized = value.strip()
+        normalized_text = value.strip()
         key = path[-1] if path else ""
         if key in _CASEFOLD_VALUE_KEYS:
-            normalized = normalized.casefold()
-        return normalized
+            normalized_text = normalized_text.casefold()
+        return normalized_text
     if value is None or type(value) is bool or type(value) is int:
         return value
     if isinstance(value, float):
