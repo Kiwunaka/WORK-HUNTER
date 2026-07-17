@@ -836,6 +836,22 @@ tr:last-child td { border-bottom: none; }
   background: var(--panel-solid); font-size: 12px;
 }
 
+/* HH Autopilot */
+.hh-autopilot { display: grid; gap: 14px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+.hh-autopilot-head { align-items: end; }
+.hh-autopilot-head h3 { margin: 0 0 4px; }
+.hh-autopilot-account-row, .hh-autopilot-controls, .hh-autopilot-status-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.hh-autopilot-status { display: grid; gap: 8px; }
+.hh-autopilot-status-row { padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.hh-autopilot-run-tools, .hh-autopilot-data-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.hh-autopilot-run-tools fieldset { display: grid; gap: 7px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.hh-autopilot-config-grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 10px; }
+.hh-autopilot-config-grid label { display: grid; gap: 5px; color: var(--ink-secondary); font-size: 12px; }
+.hh-autopilot-config-grid input, .hh-autopilot-config-grid select, #hh-autopilot-config { width: 100%; }
+#hh-autopilot-config { resize: vertical; font: 12px/1.45 'SF Mono', 'Cascadia Code', Consolas, monospace; }
+.hh-autopilot-data-grid > section { min-width: 0; }
+.hh-autopilot-data-grid .agent-list { max-height: 360px; overflow: auto; }
+
 /* ── Bulk toolbar ────── */
 .bulk-toolbar {
   display: flex; gap: 8px; align-items: center;
@@ -936,7 +952,8 @@ tr:last-child td { border-bottom: none; }
   .chat-layout { grid-template-columns: 1fr !important; }
   .chat-sidebar { display: none; }
   .detail-panels { grid-column: 1; }
-  .agent-form-grid, .agent-form-grid.three, .agent-split-list, .hh-lab-editor { grid-template-columns: 1fr; }
+  .agent-form-grid, .agent-form-grid.three, .agent-split-list, .hh-lab-editor, .hh-autopilot-config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hh-autopilot-run-tools, .hh-autopilot-data-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {
@@ -967,7 +984,7 @@ tr:last-child td { border-bottom: none; }
   .filters { padding: 12px; gap: 10px; }
   .filters label { width: 100%; }
   .filters input:not([type="checkbox"]), .filters select { width: 100%; }
-  .workspace, .today-grid, .stats-grid, .agent-metrics, .agent-form-grid, .agent-form-grid.three, .agent-split-list, .hh-lab-editor { grid-template-columns: minmax(0, 1fr); }
+  .workspace, .today-grid, .stats-grid, .agent-metrics, .agent-form-grid, .agent-form-grid.three, .agent-split-list, .hh-lab-editor, .hh-autopilot-config-grid, .hh-autopilot-run-tools, .hh-autopilot-data-grid { grid-template-columns: minmax(0, 1fr); }
   .job-list { min-width: 0; overflow-x: auto; }
   .job-list table { min-width: 540px; }
   .detail-panels { min-width: 0; grid-column: 1; }
@@ -977,6 +994,7 @@ tr:last-child td { border-bottom: none; }
   .agent-row-head { align-items: flex-start; flex-direction: column; }
   .agent-tabs, .destination-tabs { overflow-x: auto; flex-wrap: nowrap; }
   .agent-tab { flex: 0 0 auto; }
+  .hh-autopilot-panel > .panel-head { flex-direction: column; align-items: stretch; }
   .panel, .detail { max-width: 100%; }
   pre, textarea, input, select { max-width: 100%; }
 }

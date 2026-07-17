@@ -27,6 +27,12 @@ const state = {
     events: [],
     tasks: [],
   },
+  hhAutopilot: {
+    config: null,
+    managed: [],
+    status: null,
+    historyOffset: 0,
+  },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -500,11 +506,16 @@ async function saveProfile() {
 
 async function loadConfig() {
   state.config = await api("/api/config");
+  const legacyBroadKey = ["allow", "broad", "apply"].join("_");
+  if (state.config?.sources?.hh) delete state.config.sources.hh[legacyBroadKey];
+  for (const account of state.config?.sources?.hh?.autopilot?.accounts || []) {
+    delete account.enabled;
+    delete account.authorization_generation;
+  }
   $("#config-editor").value = JSON.stringify(state.config, null, 2);
 
   if (state.config && state.config.sources && state.config.sources.hh) {
     $("#hh-token-input").value = state.config.sources.hh.access_token || "";
-    $("#hh-allow-broad").checked = !!state.config.sources.hh.allow_broad_apply;
   }
 
   if (state.config && state.config.ai) {
@@ -537,18 +548,368 @@ async function saveConfig() {
 
 async function saveHhToken() {
   const token = $("#hh-token-input").value.trim();
-  const allowBroad = $("#hh-allow-broad").checked;
   if (!state.config) return;
 
   if (!state.config.sources) state.config.sources = {};
   if (!state.config.sources.hh) state.config.sources.hh = {};
 
   state.config.sources.hh.access_token = token;
-  state.config.sources.hh.allow_broad_apply = allowBroad;
 
   state.config = await api("/api/config", { method: "POST", body: JSON.stringify(state.config) });
   $("#config-editor").value = JSON.stringify(state.config, null, 2);
   notify("success", "settings-hh", "saved", "Настройки HH сохранены");
+}
+
+const HH_AUTOPILOT_COMMON_FIELDS = [
+  ["#hh-autopilot-timezone", "timezone", "text"],
+  ["#hh-autopilot-schedule-start", "schedule.start", "text"],
+  ["#hh-autopilot-schedule-end", "schedule.end", "text"],
+  ["#hh-autopilot-interval", "schedule.interval_minutes", "number"],
+  ["#hh-autopilot-max-pages", "search.max_pages", "number"],
+  ["#hh-autopilot-max-results", "search.max_results_per_run", "number"],
+  ["#hh-autopilot-required-keywords", "filters.required_keywords", "list"],
+  ["#hh-autopilot-excluded-keywords", "filters.excluded_keywords", "list"],
+  ["#hh-autopilot-remote", "filters.remote", "text"],
+  ["#hh-autopilot-minimum-salary", "filters.minimum_salary", "number"],
+  ["#hh-autopilot-minimum-score", "ranking.minimum_score", "number"],
+  ["#hh-autopilot-ai-mode", "ranking.ai_mode", "text"],
+  ["#hh-autopilot-daily-limit", "limits.daily_success", "number"],
+  ["#hh-autopilot-run-limit", "limits.per_run_success", "number"],
+  ["#hh-autopilot-delay-min", "limits.send_delay_min_seconds", "number"],
+  ["#hh-autopilot-delay-max", "limits.send_delay_max_seconds", "number"],
+];
+
+function hhAutopilotAccount() {
+  const value = $("#hh-autopilot-account")?.value || "";
+  return value.startsWith("__") ? null : value;
+}
+
+function hhAutopilotQuery(extra = {}) {
+  const params = new URLSearchParams(extra);
+  const account = hhAutopilotAccount();
+  if (account) params.set("account", account);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+function hhAutopilotScope(action) {
+  const selected = $("#hh-autopilot-account")?.value || "";
+  if (selected === "__all__") return { all: true };
+  if (selected === "__global__") {
+    if (!["kill-switch", "clear-kill-switch", "recover-now"].includes(action)) {
+      throw new Error("Глобальный scope доступен только для kill/recovery");
+    }
+    return action === "recover-now" ? {} : { global: true };
+  }
+  if (!selected) throw new Error("Выберите HH-аккаунт");
+  return { account: selected };
+}
+
+function getAutopilotValue(config, path) {
+  return path.split(".").reduce((value, key) => value?.[key], config);
+}
+
+function setAutopilotValue(config, path, value) {
+  const parts = path.split(".");
+  let target = config;
+  parts.slice(0, -1).forEach((key) => {
+    if (!target[key] || typeof target[key] !== "object") target[key] = {};
+    target = target[key];
+  });
+  target[parts.at(-1)] = value;
+}
+
+function renderHhAutopilotConfig(payload) {
+  state.hhAutopilot.config = structuredClone(payload.config || {});
+  state.hhAutopilot.managed = payload.managed?.accounts || [];
+  const selector = $("#hh-autopilot-account");
+  const previous = selector.value;
+  selector.replaceChildren();
+  for (const item of state.hhAutopilot.managed) {
+    selector.add(new Option(item.profile_id, item.profile_id));
+  }
+  selector.add(new Option("Все аккаунты", "__all__"));
+  selector.add(new Option("Global control", "__global__"));
+  selector.value = [...selector.options].some((option) => option.value === previous)
+    ? previous
+    : (state.hhAutopilot.managed[0]?.profile_id || "__all__");
+  $("#hh-autopilot-config").value = JSON.stringify(state.hhAutopilot.config, null, 2);
+  for (const [selectorName, path, type] of HH_AUTOPILOT_COMMON_FIELDS) {
+    const input = $(selectorName);
+    const value = getAutopilotValue(state.hhAutopilot.config, path);
+    input.value = type === "list" ? (value || []).join(", ") : (value ?? "");
+  }
+  const migration = payload.migration || {};
+  const migrationNote = $("#hh-autopilot-migration-note");
+  migrationNote.hidden = !migration.legacy_broad_apply_present;
+  migrationNote.textContent = migration.message || "";
+  syncHhAutopilotScopeBadge();
+}
+
+function syncHhAutopilotScopeBadge() {
+  const selected = $("#hh-autopilot-account")?.value || "";
+  $("#hh-autopilot-scope-badge").textContent = selected === "__all__"
+    ? "all accounts"
+    : (selected === "__global__" ? "global" : "account");
+}
+
+function hhAutopilotBadge(label, value, tone = "") {
+  const badge = document.createElement("span");
+  badge.className = `agent-badge ${tone}`.trim();
+  badge.textContent = `${label}: ${value}`;
+  return badge;
+}
+
+function renderHhAutopilotStatus(payload) {
+  state.hhAutopilot.status = payload;
+  const target = $("#hh-autopilot-status");
+  target.replaceChildren();
+  const statuses = payload.accounts
+    ? Object.entries(payload.accounts)
+    : [[payload.account || hhAutopilotAccount() || "all", payload]];
+  for (const [account, status] of statuses) {
+    const row = document.createElement("div");
+    row.className = "hh-autopilot-status-row";
+    const controls = status.controls || {};
+    const quota = status.quota || {};
+    row.append(
+      hhAutopilotBadge("account", account),
+      hhAutopilotBadge("enabled", controls.enabled === true ? "yes" : "no", controls.enabled ? "ok" : "warning"),
+      hhAutopilotBadge("grant", status.grant ? "active" : "none", status.grant ? "ok" : "warning"),
+      hhAutopilotBadge("policy", status.policy_match === true ? "match" : "reauthorize", status.policy_match ? "ok" : "warning"),
+      hhAutopilotBadge("paused", controls.paused === true ? "yes" : "no", controls.paused ? "warning" : "ok"),
+      hhAutopilotBadge("kill", controls.kill_switch === true ? "on" : "off", controls.kill_switch ? "error" : "ok"),
+      hhAutopilotBadge("quota", `${quota.used || 0}/${quota.daily_limit || "—"}`),
+      hhAutopilotBadge("next", status.schedule?.next_run || "—"),
+      hhAutopilotBadge("lease", status.lease?.expires_at || "free"),
+    );
+    target.append(row);
+  }
+}
+
+function appendAutopilotRow(target, title, detail, actions = []) {
+  const row = document.createElement("article");
+  row.className = "agent-row";
+  const head = document.createElement("div");
+  head.className = "agent-row-head";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  head.append(strong);
+  const body = document.createElement("div");
+  body.className = "meta";
+  body.textContent = detail;
+  row.append(head, body);
+  if (actions.length) {
+    const actionRow = document.createElement("div");
+    actionRow.className = "agent-row-actions";
+    for (const action of actions) actionRow.append(action);
+    row.append(actionRow);
+  }
+  target.append(row);
+}
+
+function renderHhAutopilotQueue(payload) {
+  const target = $("#hh-autopilot-queue");
+  target.replaceChildren();
+  const statuses = payload.accounts ? Object.entries(payload.accounts) : [[payload.account, payload]];
+  for (const [account, status] of statuses) {
+    const queue = status.queue || {};
+    appendAutopilotRow(
+      target,
+      account || "Очередь",
+      `pending ${queue.pending || 0} · retry ${queue.retry || 0} · reconciling ${queue.reconciling || 0} · manual ${queue.manual || 0} · dead ${queue.dead || 0}`,
+    );
+    for (const run of status.runs || []) {
+      appendAutopilotRow(target, `Run #${run.id}: ${run.status}`, `${run.trigger} · ${run.started_at || ""} · ${run.error || "без ошибки"}`);
+    }
+  }
+  if (!target.children.length) appendAutopilotRow(target, "Очередь пуста", "Нет активных элементов");
+}
+
+function flattenAutopilotPayload(payload, key) {
+  if (!payload.accounts) return payload[key] || [];
+  return Object.entries(payload.accounts).flatMap(([account, value]) =>
+    (value[key] || []).map((item) => ({ ...item, account: item.account || account })),
+  );
+}
+
+function challengeButton(label, challenge, action) {
+  const button = document.createElement("button");
+  button.textContent = label;
+  button.addEventListener("click", () => resolveHhAutopilotChallenge(challenge, action, button));
+  return button;
+}
+
+function renderHhAutopilotChallenges(payload) {
+  const target = $("#hh-autopilot-challenges");
+  target.replaceChildren();
+  for (const challenge of flattenAutopilotPayload(payload, "challenges")) {
+    const actions = [];
+    const type = String(challenge.challenge_type || challenge.type || "manual");
+    if (challenge.sanitized_url) {
+      const link = document.createElement("a");
+      link.href = challenge.sanitized_url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = type.includes("captcha") ? "Открыть CAPTCHA" : "Открыть handoff";
+      actions.push(link);
+    }
+    if (type.includes("ambigu")) {
+      actions.push(
+        challengeButton("Уже применён", challenge, "confirmed_applied"),
+        challengeButton("Не применён — retry", challenge, "confirmed_not_applied_retry"),
+        challengeButton("Не применён — skip", challenge, "confirmed_not_applied_skip"),
+        challengeButton("Проверить ещё", challenge, "retry_reconciliation"),
+      );
+    } else {
+      actions.push(
+        challengeButton(type.includes("auth") ? "Авторизация восстановлена" : "Я завершил", challenge, type.includes("auth") ? "auth_restored" : "completed"),
+        challengeButton("Закрыть", challenge, "dismissed"),
+      );
+    }
+    appendAutopilotRow(
+      target,
+      `#${challenge.id} · ${type}`,
+      `${challenge.account || challenge.account_profile_id || ""} · до ${challenge.expires_at || "—"}${type.includes("ambigu") ? " · квота удерживается до решения" : ""}`,
+      actions,
+    );
+  }
+  if (!target.children.length) appendAutopilotRow(target, "Нет challenges", "Ручное действие не требуется");
+}
+
+function renderHhAutopilotHistory(payload, { append = false } = {}) {
+  const target = $("#hh-autopilot-history");
+  if (!append) target.replaceChildren();
+  for (const event of flattenAutopilotPayload(payload, "events")) {
+    const actions = [];
+    if (Number.isInteger(event.item_id) && event.item_id > 0 && event.account) {
+      const retry = document.createElement("button");
+      retry.textContent = "Retry item";
+      retry.addEventListener("click", () => runHhAutopilotMutation("retry", { account: event.account, item_id: event.item_id }, retry));
+      actions.push(retry);
+    }
+    appendAutopilotRow(
+      target,
+      `${event.event_type || event.type || event.action || "event"} · ${event.vacancy_id || ""}`,
+      `${event.account || ""} · ${event.created_at || event.at || ""} · ${event.reason || ""}`,
+      actions,
+    );
+  }
+  if (!target.children.length) appendAutopilotRow(target, "Журнал пуст", "Событий пока нет");
+  const nextOffset = payload.next_offset;
+  $("#hh-autopilot-history-more").hidden = !Number.isInteger(nextOffset);
+  state.hhAutopilot.historyOffset = Number.isInteger(nextOffset) ? nextOffset : 0;
+}
+
+async function loadHhAutopilot() {
+  const configPayload = await api(`/api/hh/autopilot/config${hhAutopilotQuery()}`);
+  renderHhAutopilotConfig(configPayload);
+  await loadHhAutopilotData();
+}
+
+async function loadHhAutopilotData() {
+  syncHhAutopilotScopeBadge();
+  const query = hhAutopilotQuery();
+  const [status, challenges, history] = await Promise.all([
+    api(`/api/hh/autopilot/status${query}`),
+    api(`/api/hh/autopilot/challenges${query}`),
+    api(`/api/hh/autopilot/history${query}`),
+  ]);
+  renderHhAutopilotStatus(status);
+  renderHhAutopilotQueue(status);
+  renderHhAutopilotChallenges(challenges);
+  renderHhAutopilotHistory(history);
+}
+
+async function loadMoreHhAutopilotHistory() {
+  const offset = state.hhAutopilot.historyOffset;
+  if (!offset) return;
+  const payload = await api(`/api/hh/autopilot/history${hhAutopilotQuery({ offset })}`);
+  renderHhAutopilotHistory(payload, { append: true });
+}
+
+async function saveHhAutopilotConfig() {
+  const config = JSON.parse($("#hh-autopilot-config").value);
+  if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Config должен быть JSON object");
+  for (const [selectorName, path, type] of HH_AUTOPILOT_COMMON_FIELDS) {
+    const raw = $(selectorName).value.trim();
+    let value = raw;
+    if (type === "number") {
+      value = Number(raw);
+      if (!Number.isFinite(value)) throw new Error(`${path}: нужно число`);
+    } else if (type === "list") {
+      value = raw.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+    setAutopilotValue(config, path, value);
+  }
+  for (const account of config.accounts || []) {
+    delete account.enabled;
+    delete account.authorization_generation;
+  }
+  const body = { config };
+  const account = hhAutopilotAccount();
+  if (account) body.account = account;
+  const result = await api("/api/hh/autopilot/config", { method: "POST", body: JSON.stringify(body) });
+  renderHhAutopilotConfig(result);
+  $("#hh-autopilot-policy-note").textContent = result.reauthorization_required
+    ? "Политика изменилась: включите Autopilot снова."
+    : "Настройки сохранены, текущая авторизация подходит.";
+  await loadHhAutopilotData();
+}
+
+async function runHhAutopilotMutation(action, extra = {}, trigger = null, confirmed = false) {
+  const scope = extra.account ? {} : hhAutopilotScope(action);
+  const payload = { ...scope, ...extra };
+  if (confirmed) payload.confirm = true;
+  if (trigger) trigger.disabled = true;
+  try {
+    const result = await api(`/api/hh/autopilot/${action}`, { method: "POST", body: JSON.stringify(payload) });
+    notify("success", "hh-autopilot", action, `HH Autopilot: ${action}`);
+    await loadHhAutopilot();
+    return result;
+  } finally {
+    if (trigger) trigger.disabled = false;
+  }
+}
+
+function confirmHhAutopilotMutation(action, title, extra, trigger) {
+  let scope;
+  try {
+    scope = hhAutopilotScope(action);
+  } catch (error) {
+    notifyError("hh-autopilot-scope", error);
+    return;
+  }
+  const reviewed = { action, scope, ...extra };
+  const fingerprint = stableActionFingerprint(reviewed);
+  const descriptor = {
+    operationType: "resume_account",
+    title,
+    consequence: "Команда изменит автономный режим и может привести к реальным действиям в HH.",
+    targetRows: [
+      { key: "resume_or_account", label: "Scope", safeValue: scope.account || (scope.all ? "all accounts" : "global") },
+      { key: "changes", label: "Команда", safeValue: action },
+    ],
+    riskFlags: [{ code: "external_mutation", safeMessage: "Проверьте scope, лимиты и точную цель." }],
+    acknowledgement: "Я проверил аккаунт, параметры и понимаю последствия",
+    confirmLabel: "Подтвердить",
+    fingerprint,
+    trigger,
+    revalidate: async () => ({ status: "executable", fingerprint, canExecute: true }),
+    execute: async (confirm) => runHhAutopilotMutation(action, extra, trigger, confirm === true),
+  };
+  openLiveAction(descriptor);
+}
+
+async function resolveHhAutopilotChallenge(challenge, action, trigger) {
+  const account = challenge.account || challenge.account_profile_id || hhAutopilotAccount();
+  if (!account) throw new Error("Для challenge нужен точный account");
+  await runHhAutopilotMutation("resolve-challenge", { account, challenge_id: Number(challenge.id), action }, trigger);
+}
+
+async function validateHhAutopilot() {
+  const result = await api(`/api/hh/autopilot/validate${hhAutopilotQuery()}`);
+  $("#hh-autopilot-policy-note").textContent = result.valid ? `Конфигурация валидна: ${result.accounts.join(", ")}` : "Конфигурация невалидна";
 }
 
 async function saveAiSettings() {
@@ -2344,6 +2705,35 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#min-score-filter").addEventListener("change", loadJobs);
   $("#save-config-button").addEventListener("click", saveConfig);
   $("#save-token-button").addEventListener("click", saveHhToken);
+  $("#hh-autopilot-account")?.addEventListener("change", () => loadHhAutopilotData().catch((error) => notifyError("hh-autopilot-load", error)));
+  $("#hh-autopilot-refresh")?.addEventListener("click", () => loadHhAutopilot().catch((error) => notifyError("hh-autopilot-load", error)));
+  $("#hh-autopilot-validate")?.addEventListener("click", () => validateHhAutopilot().catch((error) => notifyError("hh-autopilot-validate", error)));
+  $("#hh-autopilot-save-config")?.addEventListener("click", () => saveHhAutopilotConfig().catch((error) => notifyError("hh-autopilot-config", error)));
+  $("#hh-autopilot-enable")?.addEventListener("click", (event) => confirmHhAutopilotMutation("enable", "Включить HH Autopilot?", {}, event.currentTarget));
+  $("#hh-autopilot-disable")?.addEventListener("click", (event) => confirmHhAutopilotMutation("disable", "Выключить HH Autopilot?", {}, event.currentTarget));
+  $("#hh-autopilot-kill")?.addEventListener("click", (event) => confirmHhAutopilotMutation("kill-switch", "Включить kill switch?", {}, event.currentTarget));
+  $("#hh-autopilot-clear-kill")?.addEventListener("click", (event) => confirmHhAutopilotMutation("clear-kill-switch", "Снять kill switch?", {}, event.currentTarget));
+  $("#hh-autopilot-pause")?.addEventListener("click", (event) => runHhAutopilotMutation("pause", {}, event.currentTarget).catch((error) => notifyError("hh-autopilot-pause", error)));
+  $("#hh-autopilot-resume")?.addEventListener("click", (event) => runHhAutopilotMutation("resume", {}, event.currentTarget).catch((error) => notifyError("hh-autopilot-resume", error)));
+  $("#hh-autopilot-run-now")?.addEventListener("click", (event) => runHhAutopilotMutation("run-now", {}, event.currentTarget).catch((error) => notifyError("hh-autopilot-run", error)));
+  $("#hh-autopilot-recover")?.addEventListener("click", (event) => runHhAutopilotMutation("recover-now", {}, event.currentTarget).catch((error) => notifyError("hh-autopilot-recover", error)));
+  $("#hh-autopilot-stop")?.addEventListener("click", (event) => runHhAutopilotMutation("stop", { run_id: Number($("#hh-autopilot-run-id").value) }, event.currentTarget).catch((error) => notifyError("hh-autopilot-stop", error)));
+  $("#hh-autopilot-shadow")?.addEventListener("click", (event) => runHhAutopilotMutation("shadow", {
+    resume_id: $("#hh-autopilot-shadow-resume").value.trim() || undefined,
+    preset: $("#hh-autopilot-shadow-preset").value.trim() || undefined,
+  }, event.currentTarget).catch((error) => notifyError("hh-autopilot-shadow", error)));
+  $("#hh-autopilot-canary")?.addEventListener("click", (event) => {
+    const extra = {
+      resume_id: $("#hh-autopilot-canary-resume").value.trim(),
+      vacancy_id: $("#hh-autopilot-canary-vacancy").value.trim(),
+    };
+    if (!extra.resume_id || !extra.vacancy_id) {
+      notify("warning", "hh-autopilot", "canary-target", "Укажите resume id и vacancy id");
+      return;
+    }
+    confirmHhAutopilotMutation("canary", "Запустить точный canary-отклик?", extra, event.currentTarget);
+  });
+  $("#hh-autopilot-history-more")?.addEventListener("click", () => loadMoreHhAutopilotHistory().catch((error) => notifyError("hh-autopilot-history", error)));
   $("#save-ai-button").addEventListener("click", saveAiSettings);
   $("#save-profile-button").addEventListener("click", saveProfile);
   $("#rescore-after-save").addEventListener("click", scoreJobs);
@@ -2405,6 +2795,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await Promise.allSettled([
     runIsolatedLoad("jobs", loadJobs),
     runIsolatedLoad("config", loadConfig),
+    runIsolatedLoad("hh-autopilot", loadHhAutopilot),
     runIsolatedLoad("profile", loadProfile),
     runIsolatedLoad("sources", loadSources),
   ]);

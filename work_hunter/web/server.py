@@ -4,6 +4,7 @@ import json
 import mimetypes
 import socket
 import time
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +44,71 @@ APPLICATION_FUNNEL_STAGES = (
     "offer",
     "rejected",
 )
+
+
+@dataclass(frozen=True)
+class _AutopilotMutationRoute:
+    action: str
+    account_required: bool = False
+    allows_all: bool = False
+    allows_global: bool = False
+    confirmation_required: bool = False
+
+
+HH_AUTOPILOT_GET_ROUTES = {
+    "/api/hh/autopilot/config": "config",
+    "/api/hh/autopilot/validate": "validate",
+    "/api/hh/autopilot/status": "status",
+    "/api/hh/autopilot/history": "history",
+    "/api/hh/autopilot/challenges": "challenges",
+}
+
+HH_AUTOPILOT_MUTATION_ROUTES = {
+    "/api/hh/autopilot/config": _AutopilotMutationRoute("config"),
+    "/api/hh/autopilot/enable": _AutopilotMutationRoute(
+        "enable", account_required=True, allows_all=True, confirmation_required=True
+    ),
+    "/api/hh/autopilot/disable": _AutopilotMutationRoute(
+        "disable", account_required=True, allows_all=True, confirmation_required=True
+    ),
+    "/api/hh/autopilot/pause": _AutopilotMutationRoute(
+        "pause", account_required=True, allows_all=True
+    ),
+    "/api/hh/autopilot/resume": _AutopilotMutationRoute(
+        "resume", account_required=True, allows_all=True
+    ),
+    "/api/hh/autopilot/stop": _AutopilotMutationRoute("stop", account_required=True),
+    "/api/hh/autopilot/kill-switch": _AutopilotMutationRoute(
+        "kill-switch",
+        account_required=True,
+        allows_all=True,
+        allows_global=True,
+        confirmation_required=True,
+    ),
+    "/api/hh/autopilot/clear-kill-switch": _AutopilotMutationRoute(
+        "clear-kill-switch",
+        account_required=True,
+        allows_all=True,
+        allows_global=True,
+        confirmation_required=True,
+    ),
+    "/api/hh/autopilot/shadow": _AutopilotMutationRoute(
+        "shadow", account_required=True
+    ),
+    "/api/hh/autopilot/canary": _AutopilotMutationRoute(
+        "canary", account_required=True, confirmation_required=True
+    ),
+    "/api/hh/autopilot/run-now": _AutopilotMutationRoute(
+        "run-now", account_required=True, allows_all=True
+    ),
+    "/api/hh/autopilot/recover-now": _AutopilotMutationRoute(
+        "recover-now", allows_all=True
+    ),
+    "/api/hh/autopilot/retry": _AutopilotMutationRoute("retry", account_required=True),
+    "/api/hh/autopilot/resolve-challenge": _AutopilotMutationRoute(
+        "resolve-challenge", account_required=True
+    ),
+}
 
 
 def run_server(root: str | Path | None = None, host: str = "127.0.0.1", port: int = 8787) -> None:
@@ -176,6 +242,24 @@ def make_handler(root: Path):
             path = parsed.path
             if path == "/" or path in UI_ROUTES:
                 self._send_static("index.html")
+                return
+            autopilot_action = HH_AUTOPILOT_GET_ROUTES.get(path)
+            if autopilot_action is not None:
+                try:
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    app = WorkHunter(root)
+                    result = _dispatch_hh_autopilot_get(
+                        app,
+                        autopilot_action,
+                        query,
+                    )
+                except Exception as exc:
+                    self._send_json(
+                        {"status": "blocked", "error": str(exc)},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                self._send_json(mask_secrets(result))
                 return
             if path == "/api/jobs":
                 query = parse_qs(parsed.query)
@@ -443,6 +527,17 @@ def make_handler(root: Path):
             body = self._read_json()
             app = WorkHunter(root)
             try:
+                autopilot_route = HH_AUTOPILOT_MUTATION_ROUTES.get(path)
+                if autopilot_route is not None:
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    result = _dispatch_hh_autopilot_mutation(
+                        app,
+                        autopilot_route,
+                        body,
+                        query,
+                    )
+                    self._send_json(mask_secrets(result))
+                    return
                 if path == "/api/sync":
                     sync_result = app.sync_sources(
                         sources=body.get("sources"),
@@ -926,7 +1021,10 @@ def make_handler(root: Path):
                     self._send_json({"status": "ok"})
                     return
             except Exception as exc:
-                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                payload = {"error": str(exc)}
+                if path in HH_AUTOPILOT_MUTATION_ROUTES:
+                    payload["status"] = "blocked"
+                self._send_json(payload, HTTPStatus.BAD_REQUEST)
                 return
             self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
@@ -977,6 +1075,189 @@ def make_handler(root: Path):
             self.wfile.write(content)
 
     return WorkHunterHandler
+
+
+def _single_query_arg(
+    query: dict[str, list[str]],
+    name: str,
+) -> str | None:
+    values = query.get(name, [])
+    if len(values) > 1:
+        raise ValueError(f"query parameter '{name}' must be supplied once")
+    if not values:
+        return None
+    value = values[0].strip()
+    return value or None
+
+
+def _request_account(
+    body: dict[str, Any],
+    query: dict[str, list[str]],
+) -> str | None:
+    query_account = _single_query_arg(query, "account")
+    raw_account = body.get("account")
+    if raw_account is None:
+        account = query_account
+    else:
+        if not isinstance(raw_account, str) or not raw_account.strip():
+            raise ValueError("account must be a non-empty string")
+        account = raw_account.strip()
+        if query_account is not None and query_account.casefold() != account.casefold():
+            raise ValueError("query and body account disagree")
+    return account
+
+
+def _positive_payload_int(body: dict[str, Any], name: str) -> int:
+    value = body.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _dispatch_hh_autopilot_get(
+    app: WorkHunter,
+    action: str,
+    query: dict[str, list[str]],
+) -> dict[str, Any]:
+    account = _single_query_arg(query, "account")
+    if action == "config":
+        return app.hh_autopilot_config(account=account)
+    if action == "validate":
+        return app.validate_hh_autopilot(account=account)
+    if action == "status":
+        return app.hh_autopilot_status(account=account)
+    if action == "history":
+        limit = int(_single_query_arg(query, "limit") or "100")
+        return app.hh_autopilot_history(
+            account=account,
+            vacancy_id=_single_query_arg(query, "vacancy_id"),
+            limit=limit,
+            offset=int(_single_query_arg(query, "offset") or "0"),
+        )
+    if action == "challenges":
+        limit = int(_single_query_arg(query, "limit") or "100")
+        return app.hh_autopilot_challenges(account=account, limit=limit)
+    raise AssertionError(f"unsupported HH autopilot GET action: {action}")
+
+
+def _dispatch_hh_autopilot_mutation(
+    app: WorkHunter,
+    route: _AutopilotMutationRoute,
+    body: dict[str, Any],
+    query: dict[str, list[str]],
+) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError("JSON body must be an object")
+    account = _request_account(body, query)
+    all_accounts = body.get("all") is True or body.get("scope") == "all"
+    global_scope = body.get("global") is True or body.get("scope") == "global"
+    selected_scopes = sum((account is not None, all_accounts, global_scope))
+    if selected_scopes > 1:
+        raise ValueError("account, all, and global scopes are mutually exclusive")
+    if all_accounts and not route.allows_all:
+        raise ValueError("all-account scope is not supported for this action")
+    if global_scope and not route.allows_global:
+        raise ValueError("global scope is not supported for this action")
+    if route.account_required and selected_scopes == 0:
+        raise ValueError("an explicit account scope is required")
+    if route.confirmation_required and body.get("confirm") is not True:
+        raise ValueError("literal JSON confirmation true is required")
+
+    accounts = None if all_accounts or global_scope else ([account] if account else None)
+    action = route.action
+    if action == "config":
+        submitted = body.get("config", body)
+        if submitted is body:
+            submitted = {
+                key: value
+                for key, value in body.items()
+                if key not in {"account", "scope", "all", "global", "confirm"}
+            }
+        if not isinstance(submitted, dict):
+            raise ValueError("config must be an object")
+        return app.update_hh_autopilot_config(submitted, account=account)
+    if action == "enable":
+        return app.enable_hh_autopilot(accounts=accounts, confirm=True)
+    if action == "disable":
+        return app.disable_hh_autopilot(accounts=accounts, confirm=True)
+    if action == "pause":
+        return app.pause_hh_autopilot(accounts=accounts)
+    if action == "resume":
+        return app.resume_hh_autopilot(accounts=accounts)
+    if action == "stop":
+        assert account is not None
+        return app.stop_hh_autopilot(
+            account=account,
+            run_id=_positive_payload_int(body, "run_id"),
+        )
+    if action == "kill-switch":
+        return app.kill_hh_autopilot(
+            accounts=accounts,
+            global_scope=global_scope,
+            confirm=True,
+        )
+    if action == "clear-kill-switch":
+        return app.clear_hh_autopilot_kill_switch(
+            accounts=accounts,
+            global_scope=global_scope,
+            confirm=True,
+        )
+    if action == "shadow":
+        assert account is not None
+        return app.shadow_hh_autopilot(
+            account=account,
+            resume_id=_optional_nonempty_text(body.get("resume_id"), "resume_id"),
+            preset=_optional_nonempty_text(body.get("preset"), "preset"),
+        )
+    if action == "canary":
+        assert account is not None
+        resume_id = _optional_nonempty_text(body.get("resume_id"), "resume_id")
+        vacancy_id = _optional_nonempty_text(body.get("vacancy_id"), "vacancy_id")
+        if resume_id is None or vacancy_id is None:
+            raise ValueError("resume_id and vacancy_id are required")
+        return app.canary_hh_autopilot(
+            account=account,
+            resume_id=resume_id,
+            vacancy_id=vacancy_id,
+            confirm=True,
+        )
+    if action == "run-now":
+        return app.run_hh_autopilot(accounts=accounts)
+    if action == "recover-now":
+        return app.recover_hh_autopilot(account=account)
+    if action == "retry":
+        assert account is not None
+        return app.retry_hh_autopilot(
+            account=account,
+            item_id=_positive_payload_int(body, "item_id"),
+        )
+    if action == "resolve-challenge":
+        assert account is not None
+        challenge_action = _optional_nonempty_text(body.get("action"), "action")
+        if challenge_action not in {
+            "completed",
+            "dismissed",
+            "confirmed_applied",
+            "confirmed_not_applied_retry",
+            "confirmed_not_applied_skip",
+            "retry_reconciliation",
+            "auth_restored",
+        }:
+            raise ValueError("unsupported challenge action")
+        return app.resolve_hh_autopilot_challenge(
+            account=account,
+            challenge_id=_positive_payload_int(body, "challenge_id"),
+            action=challenge_action,
+        )
+    raise AssertionError(f"unsupported HH autopilot mutation action: {action}")
+
+
+def _optional_nonempty_text(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value.strip()
 
 
 def _path_int(path: str, prefix: str) -> int:

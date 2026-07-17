@@ -10,7 +10,13 @@ from pathlib import Path
 
 from work_hunter.models import Job, JobScore, Resume
 from work_hunter.services import WorkHunter
-from work_hunter.web.server import _compute_stats, _job_json, make_handler
+from work_hunter.web.server import (
+    HH_AUTOPILOT_GET_ROUTES,
+    HH_AUTOPILOT_MUTATION_ROUTES,
+    _compute_stats,
+    _job_json,
+    make_handler,
+)
 
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "work_hunter" / "web" / "static"
@@ -333,6 +339,63 @@ def test_ui_static_contract_has_routes_and_no_duplicate_ids():
         assert f'"{path}"' in core
     assert "window.history.pushState" in app
     assert 'global.addEventListener("popstate"' in core
+
+
+def test_hh_autopilot_ui_and_declarative_route_contract():
+    index = _read_static("index.html")
+    script = _read_static("app.js")
+    for element_id in (
+        "hh-autopilot-account",
+        "hh-autopilot-enable",
+        "hh-autopilot-disable",
+        "hh-autopilot-pause",
+        "hh-autopilot-run-now",
+        "hh-autopilot-shadow",
+        "hh-autopilot-canary",
+        "hh-autopilot-config",
+        "hh-autopilot-queue",
+        "hh-autopilot-challenges",
+        "hh-autopilot-history",
+    ):
+        assert f'id="{element_id}"' in index
+    for group in (
+        "schedule",
+        "search",
+        "filters",
+        "ranking/AI",
+        "limits",
+        "retry",
+        "lease",
+        "application",
+        "browser",
+        "notifications",
+        "retention",
+    ):
+        assert group in index
+    assert "allow_broad_apply" not in script
+    assert set(HH_AUTOPILOT_GET_ROUTES) == {
+        "/api/hh/autopilot/config",
+        "/api/hh/autopilot/validate",
+        "/api/hh/autopilot/status",
+        "/api/hh/autopilot/history",
+        "/api/hh/autopilot/challenges",
+    }
+    assert set(HH_AUTOPILOT_MUTATION_ROUTES) == {
+        "/api/hh/autopilot/config",
+        "/api/hh/autopilot/enable",
+        "/api/hh/autopilot/disable",
+        "/api/hh/autopilot/pause",
+        "/api/hh/autopilot/resume",
+        "/api/hh/autopilot/stop",
+        "/api/hh/autopilot/kill-switch",
+        "/api/hh/autopilot/clear-kill-switch",
+        "/api/hh/autopilot/shadow",
+        "/api/hh/autopilot/canary",
+        "/api/hh/autopilot/run-now",
+        "/api/hh/autopilot/recover-now",
+        "/api/hh/autopilot/retry",
+        "/api/hh/autopilot/resolve-challenge",
+    }
 
 
 def test_ui_static_assets_have_no_remote_runtime_dependencies():

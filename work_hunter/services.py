@@ -1042,6 +1042,62 @@ def _result_dict(value: Any) -> dict[str, Any]:
     raise TypeError("HH autopilot component returned an invalid report")
 
 
+def _merge_autopilot_patch(
+    current: dict[str, Any],
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    merged = copy.deepcopy(current)
+    for key, value in patch.items():
+        previous = merged.get(key)
+        if isinstance(previous, dict) and isinstance(value, dict):
+            merged[key] = _merge_autopilot_patch(previous, value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _editable_autopilot_config(raw: dict[str, Any]) -> dict[str, Any]:
+    editable = copy.deepcopy(raw)
+    accounts = editable.get("accounts")
+    if isinstance(accounts, list):
+        for item in accounts:
+            if isinstance(item, dict):
+                item.pop("enabled", None)
+                item.pop("authorization_generation", None)
+    return editable
+
+
+def _autopilot_policy_projections(settings: Any) -> dict[str, dict[str, Any]]:
+    serialized = asdict(settings)
+    common = {
+        key: copy.deepcopy(serialized[key])
+        for key in (
+            "timezone",
+            "schedule",
+            "search",
+            "filters",
+            "limits",
+            "ranking",
+            "retry",
+            "lease",
+            "application",
+            "browser",
+        )
+    }
+    projections: dict[str, dict[str, Any]] = {}
+    for account in serialized["accounts"]:
+        account_id = str(account["profile_id"]).strip().casefold()
+        projections[account_id] = {
+            **copy.deepcopy(common),
+            "account": {
+                key: copy.deepcopy(value)
+                for key, value in account.items()
+                if key not in {"enabled", "paused", "authorization_generation"}
+            },
+        }
+    return projections
+
+
 class _ReadOnlyHHNegotiations:
     def __init__(self, client: HHApplyClient) -> None:
         self._client = client
@@ -1398,6 +1454,106 @@ class WorkHunter:
             "valid": True,
         }
 
+    def hh_autopilot_config(
+        self,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        settings = parse_autopilot_settings(copy.deepcopy(self.config))
+        if account is not None:
+            self._hh_autopilot_account_ids([account])
+        raw = copy.deepcopy(
+            ((self.config.get("sources") or {}).get("hh") or {}).get("autopilot")
+            or {}
+        )
+        managed = [
+            {
+                "profile_id": item.profile_id,
+                "enabled": item.enabled,
+                "paused": item.paused,
+                "authorization_generation": item.authorization_generation,
+            }
+            for item in settings.accounts
+        ]
+        hh_config = (self.config.get("sources") or {}).get("hh") or {}
+        legacy_present = "allow_broad_apply" in hh_config
+        return {
+            "status": "ok",
+            "account": account,
+            "config": mask_secrets(_editable_autopilot_config(raw)),
+            "managed": {"accounts": managed},
+            "migration": {
+                "legacy_broad_apply_present": legacy_present,
+                "message": (
+                    "allow_broad_apply устарел и не разрешает HH Autopilot"
+                    if legacy_present
+                    else ""
+                ),
+            },
+        }
+
+    def update_hh_autopilot_config(
+        self,
+        patch: dict[str, Any],
+        *,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        if not isinstance(patch, dict):
+            raise TypeError("HH autopilot config must be an object")
+        accounts = patch.get("accounts")
+        if isinstance(accounts, list):
+            for item in accounts:
+                if isinstance(item, dict) and (
+                    "enabled" in item or "authorization_generation" in item
+                ):
+                    raise ValueError(
+                        "HH autopilot enabled and authorization_generation are service-managed"
+                    )
+
+        outcome: dict[str, Any] = {}
+
+        def apply_patch(config: dict[str, Any]) -> None:
+            before = parse_autopilot_settings(copy.deepcopy(config))
+            sources = config.setdefault("sources", {})
+            if not isinstance(sources, dict):
+                raise TypeError("sources must be an object")
+            hh = sources.setdefault("hh", {})
+            if not isinstance(hh, dict):
+                raise TypeError("sources.hh must be an object")
+            current = hh.get("autopilot") or {}
+            if not isinstance(current, dict):
+                raise TypeError("sources.hh.autopilot must be an object")
+            submitted = _merge_autopilot_patch(current, patch)
+            hh["autopilot"] = submitted
+            after = parse_autopilot_settings(copy.deepcopy(config))
+            if account is not None:
+                wanted = account.strip().casefold()
+                if wanted not in {
+                    item.profile_id.strip().casefold() for item in after.accounts
+                }:
+                    raise ValueError(f"HH autopilot account '{account}' not found")
+            before_policy = _autopilot_policy_projections(before)
+            after_policy = _autopilot_policy_projections(after)
+            changed = sorted(
+                account_id
+                for account_id in set(before_policy) | set(after_policy)
+                if before_policy.get(account_id) != after_policy.get(account_id)
+            )
+            outcome["changed_accounts"] = changed
+
+        self._update_config_fresh(apply_patch)
+        response = self.hh_autopilot_config(account=account)
+        changed_accounts = list(outcome.get("changed_accounts") or [])
+        response.update(
+            policy_changed=bool(changed_accounts),
+            changed_accounts=changed_accounts,
+            reauthorization_required=bool(changed_accounts),
+        )
+        return response
+
     def enable_hh_autopilot(
         self,
         *,
@@ -1698,6 +1854,14 @@ class WorkHunter:
         custom = getattr(repository, "status", None)
         if callable(custom):
             return custom(account_id)
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        settings = parse_autopilot_settings(copy.deepcopy(self.config))
+        account_settings = next(
+            item
+            for item in settings.accounts
+            if item.profile_id.strip().casefold() == account_id
+        )
         conn = repository.conn
         state_rows = conn.execute(
             """
@@ -1723,10 +1887,52 @@ class WorkHunter:
             """,
             (account_id, account_id),
         ).fetchone()
+        state_counts = {
+            str(row["state"]): int(row["total"])
+            for row in state_rows
+        }
+        pending_states = {"discovered", "eligible", "ranked", "ready", "applying"}
+        grant = repository.active_grant(account_id)
+        lease = repository.get_lease(account_id)
+        account_state = repository.get_account_state(account_id)
         return {
             "account": account_id,
-            "states": {str(row["state"]): int(row["total"]) for row in state_rows},
-            "quota": {"used": int(quota["used"] if quota is not None else 0)},
+            "schedule": {
+                **copy.deepcopy(settings.schedule),
+                "timezone": settings.timezone,
+                "last_run": (
+                    account_state.last_scheduled_at if account_state is not None else ""
+                ),
+                "next_run": (
+                    account_state.next_scheduled_at if account_state is not None else ""
+                ),
+            },
+            "quota": {
+                "used": int(quota["used"] if quota is not None else 0),
+                "daily_limit": settings.limits.daily_success,
+                "per_run_limit": settings.limits.per_run_success,
+            },
+            "states": state_counts,
+            "queue": {
+                "states": state_counts,
+                "pending": sum(state_counts.get(name, 0) for name in pending_states),
+                "retry": state_counts.get("retry_wait", 0),
+                "reconciling": state_counts.get("reconciling", 0),
+                "manual": state_counts.get("manual_challenge", 0),
+                "dead": state_counts.get("dead", 0),
+            },
+            "grant": None if grant is None else _result_dict(grant),
+            "policy_match": bool(
+                grant is not None
+                and account_settings.authorization_generation == grant.generation
+            ),
+            "lease": None if lease is None else _result_dict(lease),
+            "controls": {
+                "enabled": account_settings.enabled,
+                "paused": repository.pause_active(account_id),
+                "kill_switch": repository.kill_switch_active(account_id),
+                "authorization_generation": account_settings.authorization_generation,
+            },
             "runs": [
                 {
                     "id": int(row["id"]),
@@ -1747,6 +1953,7 @@ class WorkHunter:
         account: str | None = None,
         vacancy_id: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         if account is None:
             return {
@@ -1755,22 +1962,26 @@ class WorkHunter:
                         account=account_id,
                         vacancy_id=vacancy_id,
                         limit=limit,
+                        offset=offset,
                     )
                     for account_id in self._hh_autopilot_account_ids()
                 }
             }
         account_id = self._hh_autopilot_account_ids([account])[0]
         limit = max(1, min(500, int(limit)))
+        offset = max(0, int(offset))
         repository = self._hh_autopilot().repository
         custom = getattr(repository, "history", None)
         if callable(custom):
+            if offset:
+                raise ValueError("history pagination is unavailable for this repository")
             return custom(account_id, vacancy_id, limit)
         clauses = ["item.account_profile_id = ?"]
         params: list[Any] = [account_id]
         if vacancy_id:
             clauses.append("item.vacancy_id = ?")
             params.append(str(vacancy_id))
-        params.append(limit)
+        params.extend((limit + 1, offset))
         rows = repository.conn.execute(
             """
             SELECT event.*, item.vacancy_id, item.resume_id
@@ -1778,15 +1989,23 @@ class WorkHunter:
             JOIN hh_autopilot_items AS item ON item.id = event.item_id
             WHERE """
             + " AND ".join(clauses)
-            + " ORDER BY event.id DESC LIMIT ?",
+            + " ORDER BY event.id DESC LIMIT ? OFFSET ?",
             tuple(params),
         ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
         events = []
         for row in rows:
             event = repository._event_from_row(row)
             event.update(vacancy_id=str(row["vacancy_id"]), resume_id=str(row["resume_id"]))
             events.append(event)
-        return {"account": account_id, "events": events}
+        return {
+            "account": account_id,
+            "events": events,
+            "limit": limit,
+            "offset": offset,
+            "next_offset": offset + limit if has_more else None,
+        }
 
     def hh_autopilot_challenges(
         self,

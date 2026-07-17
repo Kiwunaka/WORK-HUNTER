@@ -661,7 +661,7 @@
           <span id="auto-sync-status" class="meta"></span>
         </div>
       </div>
-      <div class="panel">
+      <div class="panel hh-autopilot-panel">
         <div class="panel-head">
           <h2>Ключи и токены HH</h2>
           <div class="inline-form" style="display: flex; flex-direction: column; gap: 8px;">
@@ -669,9 +669,98 @@
               <input type="password" id="hh-token-input" placeholder="HH Access Token" style="flex: 1; padding: 4px;">
               <button id="save-token-button">Обновить токен</button>
             </div>
-            <label style="font-size: 0.9em; cursor: pointer;">
-              <input type="checkbox" id="hh-allow-broad"> Разрешить реальные отклики (allow_broad_apply)
+          </div>
+        </div>
+        <div class="hh-autopilot" aria-labelledby="hh-autopilot-title">
+          <div class="panel-head hh-autopilot-head">
+            <div>
+              <h3 id="hh-autopilot-title">HH Autopilot</h3>
+              <p class="meta">Поиск → фильтры → рейтинг → лимиты → отклик → формы и CAPTCHA → журнал → retry.</p>
+            </div>
+            <div class="hh-autopilot-account-row">
+              <label>Аккаунт
+                <select id="hh-autopilot-account"></select>
+              </label>
+              <span id="hh-autopilot-scope-badge" class="agent-badge">account</span>
+              <button id="hh-autopilot-refresh">Обновить</button>
+            </div>
+          </div>
+
+          <div id="hh-autopilot-status" class="hh-autopilot-status" aria-live="polite"></div>
+          <p id="hh-autopilot-policy-note" class="meta" aria-live="polite"></p>
+          <p id="hh-autopilot-migration-note" class="meta" hidden></p>
+
+          <div class="hh-autopilot-controls" aria-label="Управление автопилотом">
+            <button id="hh-autopilot-validate">Проверить</button>
+            <button id="hh-autopilot-enable" class="primary">Включить</button>
+            <button id="hh-autopilot-disable" class="danger-action">Выключить</button>
+            <button id="hh-autopilot-pause">Пауза</button>
+            <button id="hh-autopilot-resume">Продолжить</button>
+            <button id="hh-autopilot-run-now">Запустить сейчас</button>
+            <button id="hh-autopilot-recover">Recovery</button>
+            <button id="hh-autopilot-kill" class="danger-action">Kill</button>
+            <button id="hh-autopilot-clear-kill">Снять kill</button>
+          </div>
+
+          <div class="hh-autopilot-run-tools">
+            <fieldset>
+              <legend>Остановить run</legend>
+              <input id="hh-autopilot-run-id" type="number" min="1" placeholder="run id">
+              <button id="hh-autopilot-stop">Stop</button>
+            </fieldset>
+            <fieldset>
+              <legend>Shadow</legend>
+              <input id="hh-autopilot-shadow-resume" placeholder="resume id (необязательно)">
+              <input id="hh-autopilot-shadow-preset" placeholder="preset (необязательно)">
+              <button id="hh-autopilot-shadow">Shadow run</button>
+            </fieldset>
+            <fieldset>
+              <legend>Точный canary</legend>
+              <input id="hh-autopilot-canary-resume" placeholder="resume id">
+              <input id="hh-autopilot-canary-vacancy" placeholder="vacancy id">
+              <button id="hh-autopilot-canary" class="danger-action">Canary 1 отклик</button>
+            </fieldset>
+          </div>
+
+          <form id="hh-autopilot-common-config" class="hh-autopilot-config-grid">
+            <label>Timezone <input id="hh-autopilot-timezone" data-autopilot-path="timezone"></label>
+            <label>Начало <input id="hh-autopilot-schedule-start" type="time" data-autopilot-path="schedule.start"></label>
+            <label>Конец <input id="hh-autopilot-schedule-end" type="time" data-autopilot-path="schedule.end"></label>
+            <label>Интервал, мин <input id="hh-autopilot-interval" type="number" min="1" data-autopilot-path="schedule.interval_minutes"></label>
+            <label>Страниц поиска <input id="hh-autopilot-max-pages" type="number" min="1" data-autopilot-path="search.max_pages"></label>
+            <label>Результатов за run <input id="hh-autopilot-max-results" type="number" min="1" data-autopilot-path="search.max_results_per_run"></label>
+            <label>Обязательные слова <input id="hh-autopilot-required-keywords" data-autopilot-path="filters.required_keywords" placeholder="python, fastapi"></label>
+            <label>Исключить слова <input id="hh-autopilot-excluded-keywords" data-autopilot-path="filters.excluded_keywords" placeholder="1C, стажёр"></label>
+            <label>Удалёнка
+              <select id="hh-autopilot-remote" data-autopilot-path="filters.remote">
+                <option value="any">Любая</option><option value="only">Только remote</option><option value="exclude">Без remote</option>
+              </select>
             </label>
+            <label>Минимальная зарплата <input id="hh-autopilot-minimum-salary" type="number" min="0" data-autopilot-path="filters.minimum_salary"></label>
+            <label>Минимальный score <input id="hh-autopilot-minimum-score" type="number" min="0" max="100" data-autopilot-path="ranking.minimum_score"></label>
+            <label>AI ranking
+              <select id="hh-autopilot-ai-mode" data-autopilot-path="ranking.ai_mode">
+                <option value="off">off</option><option value="borderline">borderline</option><option value="all">all</option>
+              </select>
+            </label>
+            <label>Откликов в день <input id="hh-autopilot-daily-limit" type="number" min="1" data-autopilot-path="limits.daily_success"></label>
+            <label>Откликов за run <input id="hh-autopilot-run-limit" type="number" min="1" data-autopilot-path="limits.per_run_success"></label>
+            <label>Пауза min, сек <input id="hh-autopilot-delay-min" type="number" min="0" data-autopilot-path="limits.send_delay_min_seconds"></label>
+            <label>Пауза max, сек <input id="hh-autopilot-delay-max" type="number" min="0" data-autopilot-path="limits.send_delay_max_seconds"></label>
+          </form>
+          <details class="detail-disclosure hh-autopilot-advanced">
+            <summary>Все параметры: accounts, resume mappings, schedule, search, filters, ranking/AI, limits, retry, lease, application, browser, notifications, retention</summary>
+            <p class="meta">Валидируемый JSON. enabled и authorization generation меняются только командами управления.</p>
+            <textarea id="hh-autopilot-config" rows="18" spellcheck="false"></textarea>
+          </details>
+          <div class="actions">
+            <button id="hh-autopilot-save-config" class="primary">Сохранить настройки</button>
+          </div>
+
+          <div class="hh-autopilot-data-grid">
+            <section><h4>Очередь</h4><div id="hh-autopilot-queue" class="agent-list compact"></div></section>
+            <section><h4>Challenges</h4><div id="hh-autopilot-challenges" class="agent-list compact"></div></section>
+            <section><h4>Журнал</h4><div id="hh-autopilot-history" class="agent-list compact"></div><button id="hh-autopilot-history-more" hidden>Ещё</button></section>
           </div>
         </div>
       </div>
