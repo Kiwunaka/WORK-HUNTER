@@ -181,19 +181,39 @@ def main(argv: list[str] | None = None) -> None:
     hh_negotiations = sub.add_parser("hh-negotiations")
     hh_negotiations.add_argument("--sync", action="store_true")
     hh_negotiations.add_argument("--status", default="active")
+    hh_negotiations.add_argument("--max-pages", type=int, default=25)
 
     hh_negotiation_cleanup = sub.add_parser("hh-negotiation-cleanup")
     hh_negotiation_cleanup.add_argument("--status", default="active")
     hh_negotiation_cleanup.add_argument("--max-age-days", type=int)
+    hh_negotiation_cleanup.add_argument("--max-pages", type=int, default=25)
     hh_negotiation_cleanup.add_argument("--decline-message", default="")
     hh_negotiation_cleanup.add_argument("--blacklist", action="store_true")
+    hh_negotiation_cleanup.add_argument("--block-ats", action="store_true")
+    hh_negotiation_cleanup.add_argument("--ats-max-response-minutes", type=int, default=16)
     hh_negotiation_cleanup.add_argument("--confirm", action="store_true")
     hh_negotiation_cleanup.add_argument("--now")
 
     hh_reply_employers = sub.add_parser("hh-reply-employers")
-    hh_reply_employers.add_argument("--template", required=True)
+    hh_reply_employers.add_argument("--template", default="")
     hh_reply_employers.add_argument("--status", default="active")
     hh_reply_employers.add_argument("--limit", type=int)
+    hh_reply_employers.add_argument("--resume-id")
+    hh_reply_employers.add_argument("--max-pages", type=int, default=25)
+    hh_reply_employers.add_argument("--message-max-pages", type=int, default=25)
+    hh_reply_employers.add_argument("--period-days", type=int)
+    hh_reply_employers.add_argument("--only-invitations", action="store_true")
+    hh_reply_employers.add_argument(
+        "--include-unviewed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    hh_reply_employers.add_argument("--use-ai", action="store_true")
+    hh_reply_employers.add_argument("--system-prompt", default="")
+    hh_reply_employers.add_argument("--message-prompt", default="")
+    hh_reply_employers.add_argument("--history-limit", type=int, default=10)
+    hh_reply_employers.add_argument("--send-delay-min-seconds", type=float, default=1.0)
+    hh_reply_employers.add_argument("--send-delay-max-seconds", type=float, default=3.0)
     hh_reply_employers.add_argument("--confirm", action="store_true")
 
     hh_skipped = sub.add_parser("hh-skipped")
@@ -940,7 +960,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "hh-negotiations":
         if args.sync:
-            print_json(app.sync_hh_negotiations(status=args.status))
+            print_json(
+                app.sync_hh_negotiations(
+                    status=args.status,
+                    max_pages=args.max_pages,
+                )
+            )
         else:
             print_json([item.to_dict() for item in app.storage.list_hh_negotiations()])
         return
@@ -950,7 +975,10 @@ def main(argv: list[str] | None = None) -> None:
                 app.confirm_hh_negotiation_cleanup(
                     status=args.status,
                     max_age_days=args.max_age_days,
+                    max_pages=args.max_pages,
                     blacklist=args.blacklist,
+                    block_ats=args.block_ats,
+                    ats_max_response_minutes=args.ats_max_response_minutes,
                     decline_message=args.decline_message,
                     now=args.now,
                     confirm=True,
@@ -961,6 +989,8 @@ def main(argv: list[str] | None = None) -> None:
                 app.plan_hh_negotiation_cleanup(
                     status=args.status,
                     max_age_days=args.max_age_days,
+                    max_pages=args.max_pages,
+                    ats_max_response_minutes=args.ats_max_response_minutes,
                     now=args.now,
                 )
             )
@@ -973,6 +1003,18 @@ def main(argv: list[str] | None = None) -> None:
                 limit=args.limit,
                 dry_run=not args.confirm,
                 confirm=args.confirm,
+                resume_id=args.resume_id,
+                max_pages=args.max_pages,
+                message_max_pages=args.message_max_pages,
+                period_days=args.period_days,
+                only_invitations=args.only_invitations,
+                include_unviewed=args.include_unviewed,
+                use_ai=args.use_ai,
+                system_prompt=args.system_prompt,
+                message_prompt=args.message_prompt,
+                history_limit=args.history_limit,
+                send_delay_min_seconds=args.send_delay_min_seconds,
+                send_delay_max_seconds=args.send_delay_max_seconds,
             )
         )
         return

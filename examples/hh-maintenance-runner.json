@@ -1,0 +1,43 @@
+{
+  "tasks": [
+    {"task": "hh-autopilot-recover"},
+    {"task": "hh-autopilot-tick"},
+    {"task": "hh-update-resumes", "confirm": false},
+    {"task": "hh-sync-negotiations", "status": "active", "max_pages": 25},
+    {
+      "task": "hh-reply-employers",
+      "confirm": false,
+      "use_ai": true,
+      "status": "active",
+      "limit": 10,
+      "max_pages": 25,
+      "message_max_pages": 25,
+      "period_days": 30,
+      "only_invitations": false,
+      "include_unviewed": true,
+      "history_limit": 10,
+      "send_delay_min_seconds": 1,
+      "send_delay_max_seconds": 3
+    },
+    {"task": "hh-employer-enrich", "limit": 50},
+    {
+      "task": "hh-email-followups",
+      "confirm": false,
+      "template": "Здравствуйте, {employer_name}! Прошу рассмотреть моё резюме.",
+      "subject": "Резюме кандидата",
+      "limit": 10,
+      "repeat_after_days": 30
+    },
+    {
+      "task": "hh-negotiation-cleanup",
+      "confirm": false,
+      "status": "active",
+      "max_pages": 25,
+      "max_age_days": 60,
+      "blacklist": false,
+      "block_ats": false,
+      "ats_max_response_minutes": 16,
+      "decline_message": ""
+    }
+  ]
+}

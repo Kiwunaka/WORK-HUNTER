@@ -573,4 +573,28 @@ work-hunter --root . hh autopilot history --account $account --limit 20
 
 Запишите дату, git revision, masked account, vacancy ID, outcome и journal ID. Не записывайте credentials или form answers. Пока такого результата нет, корректная формулировка релиза: **deterministic contract verified; current live HH application flow not proven**.
 
-Текущий application grant не разрешает автономный resume raise/update, employer replies, recruiter email, negotiation/skipped cleanup или независимый token-refresh schedule. Их существующие вручную подтверждаемые операции остаются доступны. Автоматизация этих действий относится к отдельно одобренному parity-maintenance slice и требует отдельных grants.
+Текущий application grant не разрешает resume raise/update, employer replies, recruiter email или cleanup. Для них runner использует отдельное явное `confirm: true` в плане: application grant сам по себе эти действия не включает.
+
+## 16. Post-apply maintenance как в оригинале
+
+`examples/hh-maintenance-runner.json` добавляет к основному автопилоту фоновые операции оригинала:
+
+- поднятие всех доступных к публикации резюме;
+- полную синхронизацию переговоров;
+- ответы работодателям по всем страницам и страницам истории сообщений;
+- AI-ответы по профилю и переписке;
+- поиск публичных email и follow-up;
+- очистку отказов/старых переговоров и опциональную блокировку быстрых ATS-отказов;
+- локальный журнал reply/email/cleanup и защиту от повторного ответа или письма.
+
+В примере внешние изменения выключены через `confirm: false`: runner строит план, но не отправляет. После проверки шаблонов поставьте `confirm: true` только у нужных задач. Все параметры можно менять прямо в JSON, включая `resume_id`, лимиты, глубину страниц, возраст диалога, только приглашения, AI prompts/model, задержку между сообщениями, период повторного email, возраст cleanup и ATS-порог.
+
+```powershell
+Copy-Item examples\hh-maintenance-runner.json .work-hunter\hh-maintenance-runner.json
+notepad.exe .work-hunter\hh-maintenance-runner.json
+work-hunter --root . runner --plan .work-hunter\hh-maintenance-runner.json
+```
+
+Для полного автоматического режима оставьте этот же вызов в Windows Task Scheduler/cron. `hh-reply-employers` запоминает исходное сообщение работодателя и не отвечает на него второй раз; новый ответ возможен только после нового входящего сообщения. `hh-email-followups` по умолчанию не повторяет уже отправленное письмо с тем же адресом и темой; `repeat_after_days: 0` разрешает повтор каждый запуск, число задаёт cooldown, отсутствие поля запрещает повтор навсегда.
+
+Очистка локального списка пропусков также доступна задачей `{"task": "hh-clear-skipped"}`, но её не следует ставить в каждый tick: после очистки ранее пропущенные вакансии снова попадут в подбор.

@@ -100,3 +100,12 @@ def test_send_hh_email_followups_requires_confirm_and_sends_with_injected_sender
     events = app.storage.list_hh_email_followups()
     assert events[0]["status"] == "sent"
     assert events[0]["to_email"] == "hr@acme.test"
+    assert app.plan_hh_email_followups(
+        template="Hi {employer_name}",
+        subject="Follow-up",
+    )["count"] == 0
+    assert app.plan_hh_email_followups(
+        template="Hi {employer_name}",
+        subject="Follow-up",
+        repeat_after_days=0,
+    )["count"] == 1

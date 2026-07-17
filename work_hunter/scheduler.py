@@ -14,6 +14,12 @@ SAFE_TASKS = {
     "score",
     "hh-refresh-token",
     "hh-update-resumes",
+    "hh-sync-negotiations",
+    "hh-reply-employers",
+    "hh-employer-enrich",
+    "hh-email-followups",
+    "hh-negotiation-cleanup",
+    "hh-clear-skipped",
     "hh-campaign-plan",
     "hh-autopilot-recover",
     "hh-autopilot-tick",
@@ -137,6 +143,78 @@ class SafeTaskRunner:
                     }
                 else:
                     result = self.app.update_hh_resumes(confirm=True)
+            elif task_name == "hh-sync-negotiations":
+                result = self.app.sync_hh_negotiations(
+                    status=str(task.get("status") or "active"),
+                    max_pages=int(task.get("max_pages") or 25),
+                )
+            elif task_name == "hh-reply-employers":
+                real = _explicit_real(task)
+                result = self.app.reply_hh_employers(
+                    template=str(task.get("template") or ""),
+                    status=str(task.get("status") or "active"),
+                    limit=_optional_int(task.get("limit")),
+                    dry_run=not real,
+                    confirm=real,
+                    resume_id=_optional_text(task.get("resume_id")),
+                    max_pages=int(task.get("max_pages") or 25),
+                    message_max_pages=int(task.get("message_max_pages") or 25),
+                    period_days=_optional_int(task.get("period_days")),
+                    only_invitations=bool(task.get("only_invitations", False)),
+                    include_unviewed=bool(task.get("include_unviewed", True)),
+                    use_ai=bool(task.get("use_ai", False)),
+                    system_prompt=str(task.get("system_prompt") or ""),
+                    message_prompt=str(task.get("message_prompt") or ""),
+                    history_limit=int(task.get("history_limit") or 10),
+                    send_delay_min_seconds=float(
+                        task.get("send_delay_min_seconds", 1.0)
+                    ),
+                    send_delay_max_seconds=float(
+                        task.get("send_delay_max_seconds", 3.0)
+                    ),
+                )
+            elif task_name == "hh-employer-enrich":
+                result = self.app.enrich_hh_employers(
+                    limit=_optional_int(task.get("limit")),
+                )
+            elif task_name == "hh-email-followups":
+                params = {
+                    "template": str(task.get("template") or ""),
+                    "subject": str(task.get("subject") or "Follow-up"),
+                    "limit": _optional_int(task.get("limit")),
+                    "repeat_after_days": _optional_int(
+                        task.get("repeat_after_days")
+                    ),
+                }
+                if _explicit_real(task):
+                    result = self.app.send_hh_email_followups(
+                        **params,
+                        confirm=True,
+                    )
+                else:
+                    result = self.app.plan_hh_email_followups(**params)
+            elif task_name == "hh-negotiation-cleanup":
+                params = {
+                    "status": str(task.get("status") or "active"),
+                    "max_age_days": _optional_int(task.get("max_age_days")),
+                    "max_pages": int(task.get("max_pages") or 25),
+                    "ats_max_response_minutes": int(
+                        task.get("ats_max_response_minutes") or 16
+                    ),
+                    "now": _optional_text(task.get("now")),
+                }
+                if _explicit_real(task):
+                    result = self.app.confirm_hh_negotiation_cleanup(
+                        **params,
+                        blacklist=bool(task.get("blacklist", False)),
+                        block_ats=bool(task.get("block_ats", False)),
+                        decline_message=str(task.get("decline_message") or ""),
+                        confirm=True,
+                    )
+                else:
+                    result = self.app.plan_hh_negotiation_cleanup(**params)
+            elif task_name == "hh-clear-skipped":
+                result = self.app.clear_hh_skipped_vacancies()
             elif task_name == "hh-campaign-plan":
                 result = self.app.plan_hh_campaign(
                     limit=int(task.get("limit") or 100),
@@ -251,6 +329,19 @@ def _command_log_entry(
 
 def _explicit_real(task: dict[str, Any]) -> bool:
     return bool(task.get("confirm") is True or task.get("real") is True or task.get("dry_run") is False)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    parsed = str(value).strip()
+    return parsed or None
 
 
 def _invalid_autopilot_parameters(task_name: str, task: dict[str, Any]) -> bool:

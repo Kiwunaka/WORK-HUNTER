@@ -170,6 +170,26 @@ def default_config() -> dict[str, Any]:
                     "Верни только краткий ответ для поля."
                 ),
             },
+            "replies": {
+                "model": "",
+                "temperature": 0.2,
+                "max_tokens": 350,
+                "timeout": 60,
+                "system_prompt": (
+                    "Ты — соискатель на HeadHunter. Отвечай от первого лица, "
+                    "вежливо, кратко и только по фактам из профиля кандидата. "
+                    "Не выдумывай опыт, условия и контакты."
+                ),
+                "message_prompt": (
+                    "Вакансия: {vacancy_name}\n"
+                    "Работодатель: {employer_name}\n"
+                    "Резюме: {resume_title}\n"
+                    "Профиль кандидата: {candidate_profile}\n"
+                    "Дополнительные факты: {candidate_about}\n"
+                    "История переписки:\n{history}\n\n"
+                    "Напиши только готовый короткий ответ работодателю."
+                ),
+            },
             "captcha": {
                 "backend": "direct",
                 "model": "",

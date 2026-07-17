@@ -376,6 +376,27 @@ class HHApplyClient:
     def list_negotiations(self, status: str = "active") -> list[dict[str, Any]]:
         return self.session.list_negotiations(status=status)
 
+    def list_negotiations_paginated(
+        self,
+        *,
+        status: str = "active",
+        max_pages: int = 25,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        if type(max_pages) is not int or not 1 <= max_pages <= 100:
+            raise ValueError("max_pages must be in 1..100")
+        items: list[dict[str, Any]] = []
+        for page in range(max_pages):
+            result = self.session.list_negotiations_page(
+                status=status,
+                page=page,
+                per_page=per_page,
+            )
+            items.extend(result.items)
+            if page + 1 >= result.pages:
+                break
+        return items
+
     def negotiation_snapshots(
         self,
         account_id: str | None = None,
@@ -417,6 +438,27 @@ class HHApplyClient:
 
     def list_negotiation_messages(self, negotiation_id: str) -> list[dict[str, Any]]:
         return self.session.list_negotiation_messages(negotiation_id)
+
+    def list_negotiation_messages_paginated(
+        self,
+        negotiation_id: str,
+        *,
+        max_pages: int = 25,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        if type(max_pages) is not int or not 1 <= max_pages <= 100:
+            raise ValueError("max_pages must be in 1..100")
+        items: list[dict[str, Any]] = []
+        for page in range(max_pages):
+            result = self.session.list_negotiation_messages_page(
+                negotiation_id=negotiation_id,
+                page=page,
+                per_page=per_page,
+            )
+            items.extend(result.items)
+            if page + 1 >= result.pages:
+                break
+        return items
 
     def send_negotiation_message(
         self,

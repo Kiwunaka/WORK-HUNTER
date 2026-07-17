@@ -141,6 +141,71 @@ def test_safe_task_runner_plans_mutating_resume_update_by_default(tmp_path):
     assert app.calls == [("hh-update-resumes", {"confirm": True})]
 
 
+def test_safe_task_runner_runs_configurable_hh_maintenance_tasks(tmp_path):
+    class MaintenanceApp(FakeApp):
+        def sync_hh_negotiations(self, *, status="active", max_pages=25):
+            self.calls.append(
+                (
+                    "hh-sync-negotiations",
+                    {"status": status, "max_pages": max_pages},
+                )
+            )
+            return {"status": "ok", "count": 2}
+
+        def reply_hh_employers(self, **kwargs):
+            self.calls.append(("hh-reply-employers", kwargs))
+            return {"status": "planned", "count": 1}
+
+        def plan_hh_email_followups(self, **kwargs):
+            self.calls.append(("hh-email-followups", kwargs))
+            return {"status": "planned", "count": 1}
+
+        def confirm_hh_negotiation_cleanup(self, **kwargs):
+            self.calls.append(("hh-negotiation-cleanup", kwargs))
+            return {"status": "completed", "count": 1}
+
+        def clear_hh_skipped_vacancies(self):
+            self.calls.append(("hh-clear-skipped", {}))
+            return {"status": "ok", "count": 3}
+
+    app = MaintenanceApp(tmp_path)
+    report = SafeTaskRunner(app, root=tmp_path).run(
+        [
+            {"task": "hh-sync-negotiations", "status": "active"},
+            {
+                "task": "hh-reply-employers",
+                "use_ai": True,
+                "max_pages": 8,
+                "confirm": False,
+            },
+            {
+                "task": "hh-email-followups",
+                "template": "Hello {employer_name}",
+                "repeat_after_days": 30,
+            },
+            {
+                "task": "hh-negotiation-cleanup",
+                "max_age_days": 60,
+                "block_ats": True,
+                "confirm": True,
+            },
+            {"task": "hh-clear-skipped"},
+        ]
+    )
+
+    assert report["status"] == "completed"
+    assert report["counts"]["completed"] == 5
+    reply_call = next(item for item in app.calls if item[0] == "hh-reply-employers")
+    assert reply_call[1]["dry_run"] is True
+    assert reply_call[1]["use_ai"] is True
+    assert reply_call[1]["max_pages"] == 8
+    cleanup_call = next(
+        item for item in app.calls if item[0] == "hh-negotiation-cleanup"
+    )
+    assert cleanup_call[1]["confirm"] is True
+    assert cleanup_call[1]["block_ats"] is True
+
+
 def test_safe_task_runner_forwards_confirmation_to_real_work_hunter(
     monkeypatch, tmp_path
 ):

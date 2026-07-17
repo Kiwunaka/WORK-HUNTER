@@ -211,6 +211,30 @@ class HHApiSession:
             return list(data["messages"])
         return []
 
+    def list_negotiation_messages_page(
+        self,
+        *,
+        negotiation_id: str,
+        page: int,
+        per_page: int = 100,
+    ) -> SearchPage:
+        negotiation_id = _path_identifier(
+            negotiation_id,
+            field="negotiation_id",
+        )
+        if type(page) is not int or page < 0:
+            raise ValueError("page must be a nonnegative integer")
+        if type(per_page) is not int or not 1 <= per_page <= 100:
+            raise ValueError("per_page must be in 1..100")
+        data = self.request_json(
+            "GET",
+            f"/negotiations/{negotiation_id}/messages",
+            params={"page": page, "per_page": per_page},
+        )
+        if "items" not in data and isinstance(data.get("messages"), list):
+            data = {**data, "items": data["messages"]}
+        return _search_page(data)
+
     def send_negotiation_message(
         self,
         negotiation_id: str,

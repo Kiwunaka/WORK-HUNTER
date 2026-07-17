@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import random
 import re
 import smtplib
 import sqlite3
@@ -740,16 +741,81 @@ def _format_apply_from_file_template(template: str, row: ApplyFromFileRow) -> st
 def _participant_type(message: dict[str, Any]) -> str:
     author = message.get("author") or {}
     if isinstance(author, dict):
-        return str(author.get("participant_type") or author.get("type") or "")
-    return str(author or "")
+        return str(
+            author.get("participant_type") or author.get("type") or ""
+        ).casefold()
+    return str(author or "").casefold()
+
+
+def _list_hh_negotiations(
+    client: Any,
+    *,
+    status: str,
+    max_pages: int,
+) -> list[dict[str, Any]]:
+    if not 1 <= int(max_pages) <= 100:
+        raise ValueError("max_pages must be in 1..100")
+    list_paginated = getattr(client, "list_negotiations_paginated", None)
+    if callable(list_paginated):
+        return list_paginated(status=status, max_pages=int(max_pages))
+    return client.list_negotiations(status=status)
+
+
+def _last_text_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for message in reversed(messages):
+        if str(message.get("text") or message.get("body") or "").strip():
+            return message
+    return None
+
+
+def _message_fingerprint(message: dict[str, Any]) -> str:
+    material = {
+        "id": str(message.get("id") or ""),
+        "author": _participant_type(message),
+        "created_at": str(message.get("created_at") or ""),
+        "text": str(message.get("text") or message.get("body") or "").strip(),
+    }
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _format_hh_message_history(
+    messages: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> str:
+    history: list[str] = []
+    for message in messages:
+        text = str(message.get("text") or message.get("body") or "").strip()
+        if not text:
+            continue
+        author = "Работодатель" if _participant_type(message) == "employer" else "Я"
+        created_at = str(message.get("created_at") or "").strip()
+        prefix = f"[{created_at}] " if created_at else ""
+        history.append(f"{prefix}{author}: {text}")
+    return "\n".join(history[-limit:])
+
+
+def _hh_payload_older_than_days(payload: dict[str, Any], days: int) -> bool:
+    updated_at = _parse_hh_datetime(str(payload.get("updated_at") or ""))
+    if updated_at is None:
+        return False
+    now = (
+        datetime.now(updated_at.tzinfo)
+        if updated_at.tzinfo is not None
+        else datetime.now()
+    )
+    return (now - updated_at).days > days
 
 
 def _last_message_from_employer(messages: list[dict[str, Any]]) -> bool:
-    for message in reversed(messages):
-        if not message.get("text"):
-            continue
-        return _participant_type(message) == "employer"
-    return False
+    message = _last_text_message(messages)
+    return bool(message and _participant_type(message) == "employer")
 
 
 def _negotiation_reply_context(payload: dict[str, Any]) -> dict[str, str]:
@@ -851,6 +917,32 @@ def _format_followup_template(template: str, context: dict[str, Any]) -> str:
             return ""
 
     return template.format_map(SafeDict(context)).strip()
+
+
+def _hh_followup_already_sent(
+    history: list[dict[str, Any]],
+    *,
+    to_email: str,
+    subject: str,
+    repeat_after_days: int | None,
+) -> bool:
+    matching = [
+        item
+        for item in history
+        if str(item.get("to_email") or "").casefold() == to_email.casefold()
+        and str(item.get("subject") or "") == subject
+    ]
+    if not matching:
+        return False
+    if repeat_after_days is None:
+        return True
+    if repeat_after_days == 0:
+        return False
+    latest = _parse_hh_datetime(str(matching[-1].get("created_at") or ""))
+    if latest is None:
+        return True
+    now = datetime.now(latest.tzinfo) if latest.tzinfo else datetime.now()
+    return (now - latest) < timedelta(days=repeat_after_days)
 
 
 def _hh_question_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4032,12 +4124,21 @@ class WorkHunter:
             confirm=confirm,
         )
 
-    def sync_hh_negotiations(self, *, status: str = "active") -> dict[str, Any]:
+    def sync_hh_negotiations(
+        self,
+        *,
+        status: str = "active",
+        max_pages: int = 25,
+    ) -> dict[str, Any]:
         client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         count = 0
-        for payload in client.list_negotiations(status=status):
+        for payload in _list_hh_negotiations(
+            client,
+            status=status,
+            max_pages=max_pages,
+        ):
             self._save_hh_negotiation_payload(payload)
             count += 1
         return {"status": "ok", "count": count}
@@ -4101,8 +4202,16 @@ class WorkHunter:
         template: str,
         subject: str = "Follow-up",
         limit: int | None = None,
+        repeat_after_days: int | None = None,
     ) -> dict[str, Any]:
+        if repeat_after_days is not None and int(repeat_after_days) < 0:
+            raise ValueError("repeat_after_days must be nonnegative")
         snapshots = _latest_snapshots_by_employer(self.storage.list_hh_employer_snapshots())
+        sent_history = [
+            item
+            for item in self.storage.list_hh_email_followups()
+            if item.get("status") == "sent"
+        ]
         followups: list[dict[str, Any]] = []
         for employer in self.storage.list_hh_employers():
             snapshot = snapshots.get(employer.id)
@@ -4117,6 +4226,13 @@ class WorkHunter:
                 }
                 body = _format_followup_template(template, context)
                 if not body:
+                    continue
+                if _hh_followup_already_sent(
+                    sent_history,
+                    to_email=str(email),
+                    subject=subject,
+                    repeat_after_days=repeat_after_days,
+                ):
                     continue
                 followups.append(
                     {
@@ -4137,10 +4253,16 @@ class WorkHunter:
         template: str,
         subject: str = "Follow-up",
         limit: int | None = None,
+        repeat_after_days: int | None = None,
         confirm: bool = False,
         sender: Any | None = None,
     ) -> dict[str, Any]:
-        plan = self.plan_hh_email_followups(template=template, subject=subject, limit=limit)
+        plan = self.plan_hh_email_followups(
+            template=template,
+            subject=subject,
+            limit=limit,
+            repeat_after_days=repeat_after_days,
+        )
         if not confirm:
             return {
                 "status": "blocked",
@@ -4185,17 +4307,45 @@ class WorkHunter:
     def reply_hh_employers(
         self,
         *,
-        template: str,
+        template: str = "",
         status: str = "active",
         limit: int | None = None,
         dry_run: bool = True,
         confirm: bool = False,
+        resume_id: str | None = None,
+        max_pages: int = 25,
+        message_max_pages: int = 25,
+        period_days: int | None = None,
+        only_invitations: bool = False,
+        include_unviewed: bool = True,
+        use_ai: bool = False,
+        system_prompt: str = "",
+        message_prompt: str = "",
+        history_limit: int = 10,
+        send_delay_min_seconds: float = 1.0,
+        send_delay_max_seconds: float = 3.0,
     ) -> dict[str, Any]:
         client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
-        if not template.strip():
-            raise ValueError("Reply template is required")
+        if not template.strip() and not use_ai:
+            raise ValueError("Reply template is required unless use_ai=True")
+        if not 1 <= int(max_pages) <= 100:
+            raise ValueError("max_pages must be in 1..100")
+        if not 1 <= int(message_max_pages) <= 100:
+            raise ValueError("message_max_pages must be in 1..100")
+        if period_days is not None and int(period_days) < 0:
+            raise ValueError("period_days must be nonnegative")
+        if limit is not None and int(limit) < 1:
+            raise ValueError("limit must be positive")
+        if not 1 <= int(history_limit) <= 100:
+            raise ValueError("history_limit must be in 1..100")
+        delay_min = float(send_delay_min_seconds)
+        delay_max = float(send_delay_max_seconds)
+        if delay_min < 0 or delay_max < delay_min or delay_max > 300:
+            raise ValueError(
+                "send delay must satisfy 0 <= min <= max <= 300 seconds"
+            )
         if not dry_run and not confirm:
             return {
                 "status": "blocked",
@@ -4204,16 +4354,105 @@ class WorkHunter:
             }
 
         replies: list[dict[str, Any]] = []
-        for payload in client.list_negotiations(status=status):
+        planning_errors: list[dict[str, Any]] = []
+        negotiations = _list_hh_negotiations(
+            client,
+            status=status,
+            max_pages=int(max_pages),
+        )
+
+        published_resume_ids: set[str] | None = None
+        list_resumes = getattr(client, "list_resumes", None)
+        if callable(list_resumes):
+            published_resume_ids = {
+                _text_id(item)
+                for item in list_resumes()
+                if _text_id(item) and _text_id(item.get("status")) == "published"
+            }
+        blacklisted_employers = {
+            str(item.get("employer_id") or "")
+            for item in self.storage.list_hh_employer_blacklist()
+        }
+        previous_auto_replies: dict[str, list[Any]] = {}
+        for item in self.storage.list_hh_agent_outbox(channel="hh_reply_auto"):
+            if item.status != "sent":
+                continue
+            previous_auto_replies.setdefault(item.target, []).append(item)
+
+        for payload in negotiations:
             self._save_hh_negotiation_payload(payload)
             context = _negotiation_reply_context(payload)
             negotiation_id = context["negotiation_id"]
             if not negotiation_id:
                 continue
-            messages = client.list_negotiation_messages(negotiation_id)
-            if not _last_message_from_employer(messages) and payload.get("viewed_by_opponent", True):
+            if resume_id and context["resume_id"] != str(resume_id):
                 continue
-            message = _format_reply_template(template, context)
+            if (
+                published_resume_ids is not None
+                and context["resume_id"] not in published_resume_ids
+            ):
+                continue
+            if only_invitations and not context["state"].casefold().startswith("inv"):
+                continue
+            if context["employer_id"] in blacklisted_employers:
+                continue
+            if period_days is not None and _hh_payload_older_than_days(
+                payload,
+                int(period_days),
+            ):
+                continue
+
+            list_messages = getattr(
+                client,
+                "list_negotiation_messages_paginated",
+                None,
+            )
+            if callable(list_messages):
+                messages = list_messages(
+                    negotiation_id,
+                    max_pages=int(message_max_pages),
+                )
+            else:
+                messages = client.list_negotiation_messages(negotiation_id)
+            last_message = _last_text_message(messages)
+            if last_message is None:
+                continue
+            last_from_employer = _participant_type(last_message) == "employer"
+            already_sent = previous_auto_replies.get(negotiation_id, [])
+            if last_from_employer:
+                source_fingerprint = _message_fingerprint(last_message)
+                if any(
+                    item.payload.get("source_message_fingerprint")
+                    == source_fingerprint
+                    for item in already_sent
+                ):
+                    continue
+            else:
+                if already_sent:
+                    continue
+                if not include_unviewed or payload.get("viewed_by_opponent", True):
+                    continue
+                source_fingerprint = _message_fingerprint(last_message)
+
+            if use_ai:
+                try:
+                    message = self._draft_hh_employer_reply_ai(
+                        context=context,
+                        messages=messages,
+                        system_prompt=system_prompt,
+                        message_prompt=message_prompt,
+                        history_limit=int(history_limit),
+                    )
+                except Exception as exc:
+                    planning_errors.append(
+                        {
+                            "negotiation_id": negotiation_id,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+            else:
+                message = _format_reply_template(template, context)
             if not message:
                 continue
             replies.append(
@@ -4226,17 +4465,25 @@ class WorkHunter:
                     "employer_name": context["employer_name"],
                     "resume_id": context["resume_id"],
                     "message": message,
+                    "source_message_fingerprint": source_fingerprint,
                 }
             )
             if limit is not None and len(replies) >= limit:
                 break
 
         if dry_run:
-            return {"status": "planned", "count": len(replies), "replies": replies}
+            return {
+                "status": "planned" if not planning_errors else "partial",
+                "count": len(replies),
+                "replies": replies,
+                "errors": planning_errors,
+            }
 
         sent: list[dict[str, Any]] = []
-        errors: list[dict[str, Any]] = []
-        for reply in replies:
+        errors: list[dict[str, Any]] = list(planning_errors)
+        for index, reply in enumerate(replies):
+            if index and delay_max:
+                time.sleep(random.uniform(delay_min, delay_max))
             try:
                 result = client.send_negotiation_message(
                     str(reply["negotiation_id"]),
@@ -4244,8 +4491,33 @@ class WorkHunter:
                     chat_id=str(reply.get("chat_id") or "") or None,
                 )
                 sent.append({**reply, "result": result})
+                self.storage.create_hh_agent_outbox(
+                    channel="hh_reply_auto",
+                    target=str(reply["negotiation_id"]),
+                    payload={
+                        "reply": reply,
+                        "source_message_fingerprint": reply[
+                            "source_message_fingerprint"
+                        ],
+                        "send_result": result,
+                    },
+                    status="sent",
+                )
             except Exception as exc:
-                errors.append({**reply, "error": str(exc)})
+                error = {**reply, "error": str(exc)}
+                errors.append(error)
+                self.storage.create_hh_agent_outbox(
+                    channel="hh_reply_auto",
+                    target=str(reply["negotiation_id"]),
+                    payload={
+                        "reply": reply,
+                        "source_message_fingerprint": reply[
+                            "source_message_fingerprint"
+                        ],
+                        "error": str(exc),
+                    },
+                    status="error",
+                )
         status_value = "sent" if not errors else "partial"
         return {
             "status": status_value,
@@ -4253,6 +4525,55 @@ class WorkHunter:
             "sent": sent,
             "errors": errors,
         }
+
+    def _draft_hh_employer_reply_ai(
+        self,
+        *,
+        context: dict[str, str],
+        messages: list[dict[str, Any]],
+        system_prompt: str,
+        message_prompt: str,
+        history_limit: int,
+    ) -> str:
+        from .hh_autopilot.challenge_ai import scoped_ai_config
+
+        ai_config = scoped_ai_config(self.config.get("ai") or {}, "replies")
+        configured_system = system_prompt.strip() or str(
+            ai_config.get("system_prompt") or ""
+        ).strip()
+        configured_prompt = message_prompt.strip() or str(
+            ai_config.get("message_prompt") or ""
+        ).strip()
+        if not configured_system or not configured_prompt:
+            raise ValueError("AI reply prompts are not configured")
+        history = _format_hh_message_history(messages, limit=history_limit)
+        last_message = _last_text_message(messages) or {}
+        prompt_context = {
+            **context,
+            "history": history,
+            "last_message": str(
+                last_message.get("text") or last_message.get("body") or ""
+            ),
+            "candidate_profile": json.dumps(
+                active_profile(self.config),
+                ensure_ascii=False,
+            ),
+            "candidate_about": json.dumps(
+                self.config.get("about") or {},
+                ensure_ascii=False,
+            ),
+        }
+        prompt = configured_prompt.format_map(_SafeFormatDict(prompt_context))
+        message = chat_completion(
+            [
+                {"role": "system", "content": configured_system},
+                {"role": "user", "content": prompt},
+            ],
+            ai_config,
+        ).strip()
+        if not message:
+            raise ValueError("AI returned an empty employer reply")
+        return message
 
     def plan_hh_reply(
         self,
@@ -4342,17 +4663,29 @@ class WorkHunter:
         *,
         status: str = "active",
         max_age_days: int | None = None,
+        max_pages: int = 25,
+        ats_max_response_minutes: int = 16,
         now: str | None = None,
     ) -> dict[str, Any]:
+        if max_age_days is not None and int(max_age_days) < 0:
+            raise ValueError("max_age_days must be nonnegative")
+        if not 1 <= int(ats_max_response_minutes) <= 1440:
+            raise ValueError("ats_max_response_minutes must be in 1..1440")
         client = self._hh_client()
         if not client.has_token():
             return {"status": "blocked", "count": 0, "message": "HH access token is required."}
         now_dt = _parse_hh_datetime(now or "") or datetime.now().astimezone()
         actions: list[dict[str, Any]] = []
-        for payload in client.list_negotiations(status=status):
+        for payload in _list_hh_negotiations(
+            client,
+            status=status,
+            max_pages=max_pages,
+        ):
             self._save_hh_negotiation_payload(payload)
             state = _text_id(payload.get("state"))
+            created_at = str(payload.get("created_at") or "")
             updated_at = str(payload.get("updated_at") or "")
+            created_dt = _parse_hh_datetime(created_at)
             updated_dt = _parse_hh_datetime(updated_at)
             vacancy = payload.get("vacancy") or {}
             employer = payload.get("employer") or vacancy.get("employer") or {}
@@ -4364,12 +4697,25 @@ class WorkHunter:
                     reason = "stale"
             if not reason:
                 continue
+            response_seconds: int | None = None
+            if created_dt is not None and updated_dt is not None:
+                response_seconds = max(
+                    0,
+                    int((updated_dt - created_dt).total_seconds()),
+                )
+            ats_detected = bool(
+                response_seconds is not None
+                and response_seconds <= int(ats_max_response_minutes) * 60
+            )
             action = {
                 "action": "cancel",
                 "reason": reason,
                 "negotiation_id": str(payload.get("id") or ""),
                 "state": state,
+                "created_at": created_at,
                 "updated_at": updated_at,
+                "response_seconds": response_seconds,
+                "ats_detected": ats_detected,
                 "vacancy_id": _text_id(vacancy),
                 "vacancy_name": str(vacancy.get("name") or ""),
                 "employer_id": _text_id(employer),
@@ -4393,12 +4739,21 @@ class WorkHunter:
         *,
         status: str = "active",
         max_age_days: int | None = None,
+        max_pages: int = 25,
         blacklist: bool = False,
+        block_ats: bool = False,
+        ats_max_response_minutes: int = 16,
         decline_message: str = "",
         now: str | None = None,
         confirm: bool = False,
     ) -> dict[str, Any]:
-        plan = self.plan_hh_negotiation_cleanup(status=status, max_age_days=max_age_days, now=now)
+        plan = self.plan_hh_negotiation_cleanup(
+            status=status,
+            max_age_days=max_age_days,
+            max_pages=max_pages,
+            ats_max_response_minutes=ats_max_response_minutes,
+            now=now,
+        )
         if plan.get("status") != "planned":
             return plan
         if not confirm:
@@ -4418,8 +4773,20 @@ class WorkHunter:
                 )
                 result = {**action, "cancel_result": cancel_result}
                 employer_id = str(action.get("employer_id") or "")
-                if blacklist and employer_id:
+                should_blacklist = bool(
+                    blacklist or (block_ats and action.get("ats_detected"))
+                )
+                if should_blacklist and employer_id:
                     result["blacklist_result"] = client.blacklist_employer(employer_id)
+                    self.storage.upsert_hh_employer_blacklist(
+                        employer_id=employer_id,
+                        employer_name=str(action.get("employer_name") or ""),
+                        reason=(
+                            "ats_fast_reject"
+                            if action.get("ats_detected") and block_ats
+                            else f"cleanup_{action.get('reason') or 'negotiation'}"
+                        ),
+                    )
                 completed.append(result)
                 self.storage.save_hh_cleanup_event(
                     negotiation_id=str(action["negotiation_id"]),

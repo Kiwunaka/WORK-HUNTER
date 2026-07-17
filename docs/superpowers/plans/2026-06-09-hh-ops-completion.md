@@ -178,6 +178,16 @@ Run: `pytest tests/test_hh_campaign_outcomes.py -q`
 - Run `python -m compileall work_hunter` before completion.
 - Update this plan with completed slices and remaining work.
 
+## Task 11: Scheduled Post-Apply Parity
+
+- [x] Paginate negotiations and message history for employer replies.
+- [x] Add resume, invitation, age, blacklist, AI, history, and delay controls.
+- [x] Journal automatic replies and suppress duplicate replies to the same message.
+- [x] Suppress duplicate recruiter email with configurable repeat cooldown.
+- [x] Add configurable ATS fast-reject detection to cleanup.
+- [x] Expose resume raise, sync, replies, enrichment, email, cleanup, and clear-skipped through the JSON runner.
+- [x] Add a complete maintenance runner example while keeping each live task separately opt-in.
+
 ## Progress
 
 - 2026-06-09: Implemented rich HH search campaign planning via `plan_hh_search_campaign`, `HHApplyClient.search_vacancies`, and CLI `hh-search-campaign-plan`.

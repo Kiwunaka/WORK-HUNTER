@@ -100,6 +100,86 @@ def test_reply_hh_employers_confirm_sends_only_employer_threads(monkeypatch, tmp
     ]
 
 
+def test_reply_hh_employers_ai_paginates_and_deduplicates_source_message(
+    monkeypatch,
+    tmp_path,
+):
+    class PaginatedReplyClient(FakeHHReplyClient):
+        pagination_calls: list[tuple[str, int]] = []
+
+        def list_resumes(self):
+            return [
+                {
+                    "id": "resume-1",
+                    "title": "Backend",
+                    "status": {"id": "published"},
+                }
+            ]
+
+        def list_negotiations_paginated(self, *, status, max_pages, per_page=100):
+            self.pagination_calls.append(("negotiations", max_pages))
+            return super().list_negotiations(status=status)[:1]
+
+        def list_negotiation_messages_paginated(
+            self,
+            negotiation_id,
+            *,
+            max_pages,
+            per_page=100,
+        ):
+            self.pagination_calls.append(("messages", max_pages))
+            return super().list_negotiation_messages(negotiation_id)
+
+    prompts: list[list[dict]] = []
+
+    def fake_completion(messages, config):
+        prompts.append(messages)
+        return "Да, расскажу подробнее о Python backend."
+
+    monkeypatch.setattr("work_hunter.services.HHApplyClient", PaginatedReplyClient)
+    monkeypatch.setattr("work_hunter.services.chat_completion", fake_completion)
+    PaginatedReplyClient.sent_messages = []
+    PaginatedReplyClient.pagination_calls = []
+    app = WorkHunter(root=tmp_path)
+    app.config["sources"]["hh"]["access_token"] = "token"
+
+    first = app.reply_hh_employers(
+        use_ai=True,
+        dry_run=False,
+        confirm=True,
+        max_pages=7,
+        message_max_pages=9,
+        send_delay_min_seconds=0,
+        send_delay_max_seconds=0,
+    )
+    second = app.reply_hh_employers(
+        use_ai=True,
+        dry_run=False,
+        confirm=True,
+        max_pages=7,
+        message_max_pages=9,
+        send_delay_min_seconds=0,
+        send_delay_max_seconds=0,
+    )
+
+    assert first["status"] == "sent"
+    assert first["count"] == 1
+    assert second["count"] == 0
+    assert PaginatedReplyClient.sent_messages == [
+        ("neg-1", "Да, расскажу подробнее о Python backend.", "chat-1")
+    ]
+    assert PaginatedReplyClient.pagination_calls == [
+        ("negotiations", 7),
+        ("messages", 9),
+        ("negotiations", 7),
+        ("messages", 9),
+    ]
+    assert "Can you tell us more?" in prompts[0][1]["content"]
+    outbox = app.storage.list_hh_agent_outbox(channel="hh_reply_auto")
+    assert len(outbox) == 1
+    assert outbox[0].status == "sent"
+
+
 def test_reply_hh_employers_cli_requires_confirm_for_send(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr("work_hunter.services.HHApplyClient", FakeHHReplyClient)
     FakeHHReplyClient.sent_messages = []
