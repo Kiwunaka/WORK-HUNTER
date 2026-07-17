@@ -38,6 +38,10 @@ work-hunter = "work_hunter.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "restart: recovery behavior after an interrupted HH application request",
+  "concurrency: account lease and dispatch concurrency contracts",
+]
 
 [tool.setuptools.packages.find]
 include = ["work_hunter*"]
