@@ -458,7 +458,7 @@ work-hunter --root . hh autopilot resolve-challenge --account default --challeng
 work-hunter --root . hh autopilot resolve-challenge --account default --challenge-id CHALLENGE_ID --action dismissed
 ```
 
-`dismissed`/expiry переводит оставшийся manual CAPTCHA/assessment item в `skipped`. Login CAPTCHA и OTP остаются ручными в browser profile — автоматический Vision-контур относится к CAPTCHA во время отклика, как в оригинале.
+`dismissed`/expiry переводит оставшийся manual CAPTCHA/assessment item в `skipped`. Истечение автоматически обрабатывается каждым scheduler tick с тем же lease/fencing, после чего очередь продолжает работу. Login CAPTCHA и OTP остаются ручными в browser profile — автоматический Vision-контур относится к CAPTCHA во время отклика, как в оригинале.
 
 ## 11. Ambiguous application и held quota
 

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from .repository import ChallengeRecord, ItemRecord, LeaseRecord
+from .repository import ChallengeRecord, ItemRecord, LeaseRecord, LostLease, StaleWrite
 from .types import AutopilotState, DispatchOutcome
 
 
@@ -161,14 +162,95 @@ class HHChallengeHandler:
         browser_session: Any | None = None,
         mapper: GroundedAnswerMapper | None = None,
         challenge_expiry_hours: int = 24,
+        lease_ttl_provider: Callable[[], int] | None = None,
+        owner_token_factory: Callable[[], str] | None = None,
     ) -> None:
         self.repository = repository
         self.browser = browser
         self.browser_session = browser_session
         self.mapper = mapper or GroundedAnswerMapper()
         self.challenge_expiry_hours = int(challenge_expiry_hours)
+        self.lease_ttl_provider = lease_ttl_provider or (lambda: 120)
+        self.owner_token_factory = owner_token_factory or (
+            lambda: f"hh-challenge-expiry:{uuid.uuid4().hex}"
+        )
         if self.challenge_expiry_hours < 1:
             raise ValueError("challenge_expiry_hours must be positive")
+        if not callable(self.lease_ttl_provider):
+            raise TypeError("lease_ttl_provider must be callable")
+        if not callable(self.owner_token_factory):
+            raise TypeError("owner_token_factory must be callable")
+
+    def expire_due(
+        self,
+        now: datetime,
+    ) -> tuple[dict[str, Any], ...]:
+        if self.repository is None:
+            return ()
+        instant = _aware_utc(now)
+        due = self.repository.due_challenges(now=instant)
+        by_account: dict[str, list[ChallengeRecord]] = {}
+        for challenge in due:
+            by_account.setdefault(challenge.account_id, []).append(challenge)
+
+        updates: list[dict[str, Any]] = []
+        for account_id, challenges in by_account.items():
+            ttl_seconds = int(self.lease_ttl_provider())
+            if ttl_seconds < 1:
+                raise ValueError("challenge expiry lease TTL must be positive")
+            lease = self.repository.acquire_lease(
+                account_id,
+                self.owner_token_factory(),
+                ttl_seconds=ttl_seconds,
+                now=instant,
+            )
+            if lease is None:
+                updates.extend(
+                    {
+                        "challenge_id": challenge.id,
+                        "account_id": account_id,
+                        "status": "busy",
+                    }
+                    for challenge in challenges
+                )
+                continue
+            try:
+                for challenge in challenges:
+                    try:
+                        if challenge.challenge_type == "ambiguous_application":
+                            item = self.repository.expire_challenge(
+                                challenge.id,
+                                fencing_token=lease.fencing_token,
+                                now=instant,
+                            )
+                        else:
+                            item = self.repository.resolve_manual_challenge(
+                                challenge.id,
+                                action="expire",
+                                actor="scheduler",
+                                fencing_token=lease.fencing_token,
+                                now=instant,
+                            )
+                        updates.append(
+                            {
+                                "challenge_id": challenge.id,
+                                "account_id": account_id,
+                                "item_id": item.id,
+                                "state": item.state.value,
+                                "status": "expired",
+                            }
+                        )
+                    except (KeyError, LostLease, StaleWrite, ValueError):
+                        updates.append(
+                            {
+                                "challenge_id": challenge.id,
+                                "account_id": account_id,
+                                "status": "stale",
+                            }
+                        )
+            finally:
+                self.repository.release_lease(lease)
+        return tuple(updates)
 
     def handle_required_flow(
         self,
@@ -301,6 +383,14 @@ def sanitize_hh_url(url: str) -> str:
         return ""
     host = parts.hostname.casefold().rstrip(".")
     return urlunsplit((parts.scheme.casefold(), host + port, parts.path or "/", "", ""))
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if not isinstance(value, datetime):
+        raise TypeError("challenge expiry time must be a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("challenge expiry time must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 def _field_mapping(value: Any) -> Mapping[str, Any]:

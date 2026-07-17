@@ -1768,6 +1768,7 @@ class _ConfiguredHHAutopilotEngine:
 
 
 def build_hh_autopilot_components(service: "WorkHunter") -> HHAutopilotComponents:
+    from .hh_autopilot.challenges import HHChallengeHandler
     from .hh_autopilot.config import parse_autopilot_settings
     from .hh_autopilot.reconcile import HHApplicationReconciler, HHRecoverySweep
     from .hh_autopilot.repository import AutopilotRepository
@@ -1792,6 +1793,16 @@ def build_hh_autopilot_components(service: "WorkHunter") -> HHAutopilotComponent
         config_loader=settings_provider,
         engine=engine,
         recovery_sweep=recovery,
+        challenge_handler=HHChallengeHandler(
+            repository,
+            challenge_expiry_hours=int(
+                settings_provider().application["challenge_expiry_hours"]
+            ),
+            lease_ttl_provider=lambda: settings_provider().lease.ttl_seconds,
+            owner_token_factory=lambda: (
+                f"work-hunter-challenge-expiry:{uuid.uuid4().hex}"
+            ),
+        ),
     )
     return HHAutopilotComponents(repository, engine, scheduler, recovery)
 

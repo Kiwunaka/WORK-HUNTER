@@ -6461,6 +6461,28 @@ class AutopilotRepository:
         ).fetchone()
         return self._challenge_from_row(row) if row is not None else None
 
+    def due_challenges(
+        self,
+        *,
+        now: datetime | str | None = None,
+        limit: int = 1000,
+    ) -> tuple[ChallengeRecord, ...]:
+        instant = _instant(now, field="now")
+        limit = _integer(limit, field="limit", minimum=1)
+        if limit > 10_000:
+            raise ValueError("limit must not exceed 10000")
+        rows = self.conn.execute(
+            """
+            SELECT * FROM hh_autopilot_challenges
+            WHERE status IN ('open','in_progress')
+              AND expires_at <> '' AND expires_at <= ?
+            ORDER BY expires_at ASC, id ASC
+            LIMIT ?
+            """,
+            (instant.isoformat(), limit),
+        ).fetchall()
+        return tuple(self._challenge_from_row(row) for row in rows)
+
     def dispatch_reservation(self, item_id: int) -> QuotaReservationRecord | None:
         """Return the reservation attached to an item's latest dispatch attempt."""
         item_id = _integer(item_id, field="item_id", minimum=1)

@@ -160,6 +160,41 @@ def test_captcha_handoff_is_idempotent_releases_quota_and_resumes_with_cookies(
         storage.close()
 
 
+def test_scheduler_expiry_closes_due_manual_challenge(tmp_path: Path) -> None:
+    storage, repo, item, lease = _applying_case(tmp_path)
+    handler = HHChallengeHandler(
+        repo,
+        challenge_expiry_hours=1,
+        lease_ttl_provider=lambda: 120,
+        owner_token_factory=lambda: "expiry-owner",
+    )
+    try:
+        opened = handler.handle_captcha(
+            item,
+            url="https://hh.ru/captcha",
+            lease=lease,
+        )
+        challenge = repo.get_challenge(opened.challenge_id)
+        assert challenge is not None
+        expires_at = datetime.fromisoformat(challenge.expires_at)
+
+        updates = handler.expire_due(expires_at)
+
+        assert updates == (
+            {
+                "challenge_id": challenge.id,
+                "account_id": "default",
+                "item_id": item.id,
+                "state": "skipped",
+                "status": "expired",
+            },
+        )
+        assert repo.get_item(item.id).state is AutopilotState.SKIPPED
+        assert repo.get_challenge(challenge.id).status == "expired"
+    finally:
+        storage.close()
+
+
 @pytest.mark.parametrize(
     ("challenge_type", "action", "expected"),
     [
