@@ -25,7 +25,7 @@ RUN apt-get update \
 
 COPY --from=builder /dist/work_hunter-1.0.0-py3-none-any.whl /tmp/
 RUN python -m pip install --upgrade "pip>=26.1.2" \
-    && python -m pip install /tmp/work_hunter-1.0.0-py3-none-any.whl \
+    && python -m pip install /tmp/work_hunter-1.0.0-py3-none-any.whl[ui] \
     && rm /tmp/work_hunter-1.0.0-py3-none-any.whl
 
 ARG INSTALL_PLAYWRIGHT=false

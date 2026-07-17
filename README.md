@@ -65,6 +65,23 @@ python -m work_hunter doctor --json
 python -m work_hunter config --json
 ```
 
+### HH Autopilot
+
+Полный операторский гайд: [docs/hh-autopilot.md](docs/hh-autopilot.md).
+
+```powershell
+python -m pip install -e ".[browser,ui]"
+python -m playwright install chromium
+work-hunter hh auth login --account default
+work-hunter hh autopilot validate --account default
+work-hunter hh autopilot shadow --account default
+work-hunter hh autopilot canary --account default --resume RESUME_ID --vacancy VACANCY_ID --confirm
+work-hunter hh autopilot enable --account default --confirm
+work-hunter runner --plan examples/hh-autopilot-runner.json
+```
+
+Defaults are validated and configurable: `50/day`, `10/run`, `45-120s`, `08:00-21:00 Europe/Moscow`, hourly, and up to `20 x 100` search results. Fresh installs remain disabled with no grant.
+
 ## Common Commands
 
 Initialize local config:
@@ -110,7 +127,7 @@ On a genuine first run, a three-step sheet reviews the search goal, enabled sour
 
 Use **Settings → Help → Repeat introduction** to review setup again. **Show tips again** resets contextual coach marks. The interface adapts from a full sidebar to a compact icon sidebar and then to a mobile menu sheet.
 
-Real HH mutations are never autonomous. The UI shows a dedicated safety sheet with the exact target and consequence, requires acknowledgement, revalidates immediately before execution, and sends the literal JSON boolean `confirm: true`. Server-side authorization and policy checks remain authoritative.
+Autonomous HH applications require an active account- and policy-bound HH Autopilot grant created by explicit `enable --confirm`. The legacy `sources.hh.allow_broad_apply` flag is ignored for authorization. UI actions that create, revoke, or replace authority use a dedicated confirmation sheet and literal JSON `confirm: true`; server-side checks remain authoritative.
 
 Run the MCP server:
 

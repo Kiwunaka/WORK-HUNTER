@@ -23,7 +23,11 @@ jobs:
       - run: python -m pip install --upgrade "pip>=26.1.2"
       - run: python -m pip install "setuptools>=75,<81" "wheel>=0.44,<1"
       - run: python -m pip install -e ".[dev,ui,release]"
-      - run: python -m pytest -q --ignore=tests/test_web_ui_browser.py
+      - name: Deterministic suite
+        run: python -m pytest -q -m "not live_canary" --ignore=tests/test_web_ui_browser.py
+      - name: HH autopilot restart and concurrency contracts
+        if: matrix.python-version == '3.12'
+        run: python -m pytest tests/test_hh_autopilot_e2e.py -m "restart or concurrency" -q
 
   quality:
     runs-on: ubuntu-latest
@@ -54,4 +58,7 @@ jobs:
       - run: python -m pip install --upgrade "pip>=26.1.2"
       - run: python -m pip install -e ".[dev,browser,ui]"
       - run: python -m playwright install --with-deps chromium
-      - run: python -m pytest tests/test_web_ui_browser.py -q
+      - name: Browser UI
+        run: python -m pytest tests/test_web_ui_browser.py -q
+      - name: HH autopilot browser fixtures
+        run: python -m pytest tests/test_hh_autopilot_challenges.py -q
