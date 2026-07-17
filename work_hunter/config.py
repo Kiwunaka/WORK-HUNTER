@@ -170,6 +170,27 @@ def default_config() -> dict[str, Any]:
                     "Верни только краткий ответ для поля."
                 ),
             },
+            "cover_letters": {
+                "model": "",
+                "temperature": 0.4,
+                "max_tokens": 700,
+                "timeout": 60,
+                "failure_policy": "template",
+                "system_prompt": (
+                    "Ты пишешь короткие сопроводительные письма от первого "
+                    "лица. Используй только переданные факты, не выдумывай "
+                    "опыт, цифры, контакты и условия. Верни только текст письма."
+                ),
+                "message_prompt": (
+                    "Вакансия: {vacancy_name}\n"
+                    "Компания: {employer_name}\n"
+                    "Описание: {vacancy_description}\n"
+                    "Резюме: {resume_title}\n"
+                    "Профиль кандидата: {candidate_profile}\n"
+                    "Опыт и факты: {candidate_about}\n\n"
+                    "Напиши персональное письмо на 4-6 предложений."
+                ),
+            },
             "replies": {
                 "model": "",
                 "temperature": 0.2,

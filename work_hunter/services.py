@@ -1199,19 +1199,253 @@ class _ReadOnlyHHNegotiations:
         return self._client.negotiation_snapshots(account_id)
 
 
-class _StoredHHCoverLetters:
-    def __init__(self, storage: Storage) -> None:
-        self._storage = storage
+def _hh_cover_letter_policy_version(config: dict[str, Any]) -> str:
+    hh = ((config.get("sources") or {}).get("hh") or {})
+    autopilot = hh.get("autopilot") or {}
+    application = autopilot.get("application") or {}
+    ai = config.get("ai") or {}
+    cover_ai = ai.get("cover_letters") or {}
+    inherited_ai = {
+        key: value
+        for key, value in ai.items()
+        if key
+        in {
+            "backend",
+            "base_url",
+            "model",
+            "temperature",
+            "max_tokens",
+            "opencode_transport",
+            "opencode_command",
+            "opencode_model",
+            "opencode_agent",
+            "opencode_server_url",
+        }
+    }
+    nonsecret_cover_ai = {
+        key: value
+        for key, value in cover_ai.items()
+        if str(key).casefold()
+        not in {"api_key", "authorization", "cookie", "password", "secret", "token"}
+    }
+    material = {
+        "application": {
+            key: value
+            for key, value in application.items()
+            if str(key).startswith("cover_letter")
+            or key == "reuse_saved_cover_letter"
+        },
+        "ai": {**inherited_ai, **nonsecret_cover_ai},
+    }
+    return hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _render_spintax(template: str) -> str:
+    pattern = re.compile(r"\{([^{}]*\|[^{}]*)\}")
+    rendered = template
+    while match := pattern.search(rendered):
+        options = match.group(1).split("|")
+        rendered = (
+            rendered[: match.start()]
+            + random.choice(options)
+            + rendered[match.end() :]
+        )
+    return rendered
+
+
+def _bounded_cover_letter(text: str, maximum: int) -> str:
+    compact = str(text or "").strip()
+    if len(compact) <= maximum:
+        return compact
+    clipped = compact[:maximum].rstrip()
+    if " " in clipped and len(clipped.rsplit(" ", 1)[0]) >= int(maximum * 0.8):
+        clipped = clipped.rsplit(" ", 1)[0].rstrip()
+    return clipped
+
+
+class _ConfiguredHHCoverLetters:
+    def __init__(self, service: "WorkHunter") -> None:
+        self._service = service
 
     def render(self, context: Any) -> str:
-        row = self._storage.conn.execute(
+        from .hh_autopilot.challenge_ai import scoped_ai_config
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        settings = parse_autopilot_settings(copy.deepcopy(self._service.config))
+        application = settings.application
+        mode = str(application["cover_letter_mode"])
+        if mode != str(context.cover_letter_mode):
+            raise RuntimeError("cover-letter mode changed during rendering")
+        if mode == "none":
+            return ""
+
+        storage = self._service.storage
+        row = storage.conn.execute(
             "SELECT id FROM jobs WHERE source = 'hh' AND source_id = ?",
             (context.vacancy_id,),
         ).fetchone()
         if row is None:
-            return ""
-        draft = self._storage.get_latest_letter(int(row["id"]))
-        return "" if draft is None else draft.body
+            raise RuntimeError("HH vacancy is missing from local storage")
+        job_id = int(row["id"])
+        maximum = int(application["cover_letter_max_characters"])
+        if application["reuse_saved_cover_letter"]:
+            saved = storage.get_latest_letter(job_id)
+            if saved is not None and not saved.template_name.startswith(
+                "hh-autopilot:"
+            ):
+                return _bounded_cover_letter(saved.body, maximum)
+
+        policy_version = _hh_cover_letter_policy_version(self._service.config)
+        cache_name = f"hh-autopilot:{context.item_id}:{policy_version[:24]}"
+        cached = storage.get_latest_letter_by_template(job_id, cache_name)
+        if cached is not None:
+            return cached.body
+
+        job = storage.get_job(job_id)
+        if job is None:
+            raise RuntimeError("HH vacancy could not be loaded for cover letter")
+        account = next(
+            item
+            for item in settings.accounts
+            if item.profile_id.strip().casefold() == context.account_id
+        )
+        profiles = self._service.config.get("profiles") or {}
+        candidate = copy.deepcopy(
+            profiles.get(account.candidate_profile_id)
+            or active_profile(self._service.config)
+        )
+        about = copy.deepcopy(self._service.config.get("about") or {})
+        try:
+            resume = self._service._hh_client_for_account(
+                context.account_id
+            ).get_resume(context.resume_id)
+        except Exception:
+            resume = {"id": context.resume_id}
+        material = _hh_cover_letter_context(
+            job=job,
+            candidate=candidate,
+            about=about,
+            resume=resume,
+        )
+        template = str(application["cover_letter_template"])
+        if mode == "template":
+            body = _render_hh_cover_letter_template(
+                template,
+                material,
+                spintax=bool(application["cover_letter_spintax"]),
+            )
+        else:
+            ai_config = scoped_ai_config(
+                self._service.config.get("ai") or {},
+                "cover_letters",
+            )
+            failure_policy = str(
+                ai_config.get("failure_policy") or "template"
+            ).strip().casefold()
+            if failure_policy not in {"template", "empty", "retry"}:
+                raise ValueError(
+                    "ai.cover_letters.failure_policy must be template|empty|retry"
+                )
+            try:
+                body = _draft_hh_cover_letter_ai(material, ai_config)
+            except Exception:
+                if failure_policy == "retry":
+                    raise
+                if failure_policy == "empty":
+                    body = ""
+                else:
+                    body = _render_hh_cover_letter_template(
+                        template,
+                        material,
+                        spintax=bool(application["cover_letter_spintax"]),
+                    )
+
+        body = _bounded_cover_letter(body, maximum)
+        if mode == "template" and not body:
+            raise ValueError("cover-letter template rendered empty")
+        storage.save_letter(
+            LetterDraft(
+                job_id=job_id,
+                body=body,
+                template_name=cache_name,
+            )
+        )
+        return body
+
+
+def _hh_cover_letter_context(
+    *,
+    job: Job,
+    candidate: dict[str, Any],
+    about: dict[str, Any],
+    resume: dict[str, Any],
+) -> dict[str, str]:
+    skills = [
+        str(value).strip()
+        for value in (
+            list(candidate.get("must_have_skills") or [])
+            + list(candidate.get("nice_to_have_skills") or [])
+            + list(about.get("all_skills") or [])
+        )
+        if str(value).strip()
+    ]
+    skills = list(dict.fromkeys(skills))
+    resume_name = " ".join(
+        str(resume.get(key) or "").strip()
+        for key in ("first_name", "last_name")
+        if str(resume.get(key) or "").strip()
+    )
+    return {
+        "candidate_name": str(candidate.get("name") or resume_name or "Кандидат"),
+        "candidate_title": str(candidate.get("title") or ""),
+        "candidate_summary": str(about.get("summary") or ""),
+        "candidate_skills": ", ".join(skills[:12]) or "релевантные навыки",
+        "candidate_profile": json.dumps(candidate, ensure_ascii=False, default=str),
+        "candidate_about": json.dumps(about, ensure_ascii=False, default=str),
+        "vacancy_name": job.title,
+        "employer_name": job.company or "вашей компании",
+        "vacancy_description": (job.description or "")[:6_000],
+        "salary": job.salary_text,
+        "location": job.location,
+        "resume_title": str(resume.get("title") or candidate.get("title") or ""),
+    }
+
+
+def _render_hh_cover_letter_template(
+    template: str,
+    material: dict[str, str],
+    *,
+    spintax: bool,
+) -> str:
+    rendered = _render_spintax(template) if spintax else template
+    return rendered.format_map(_SafeFormatDict(material)).strip()
+
+
+def _draft_hh_cover_letter_ai(
+    material: dict[str, str],
+    ai_config: dict[str, Any],
+) -> str:
+    system_prompt = str(ai_config.get("system_prompt") or "").strip()
+    message_prompt = str(ai_config.get("message_prompt") or "").strip()
+    if not system_prompt or not message_prompt:
+        raise ValueError("AI cover-letter prompts are not configured")
+    prompt = message_prompt.format_map(_SafeFormatDict(material))
+    body = chat_completion(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        ai_config,
+    )
+    return str(body or "").strip()
 
 
 def _published_hh_resumes(client: HHApplyClient) -> list[dict[str, Any]]:
@@ -1260,10 +1494,10 @@ def _hh_policy_material(
             or ai_config.get("model")
             or ""
         )
-        for purpose in ("tests", "forms", "captcha")
+        for purpose in ("tests", "forms", "captcha", "cover_letters")
     }
     challenge_policy_versions: dict[str, str] = {}
-    for purpose in ("tests", "forms", "captcha"):
+    for purpose in ("tests", "forms", "captcha", "cover_letters"):
         section = ai_config.get(purpose) or {}
         if not isinstance(section, dict):
             continue
@@ -1300,7 +1534,7 @@ def _hh_policy_material(
             separators=(",", ":"),
         ),
         prompt_versions=challenge_policy_versions,
-        cover_letter_template_version="stored",
+        cover_letter_template_version=_hh_cover_letter_policy_version(config),
         transport_identity={"kind": "hh_api", "account_id": account.profile_id},
     )
 
@@ -1471,7 +1705,7 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
     executor = HHApplicationExecutor(
         repository,
         application_transport,
-        _StoredHHCoverLetters(service.storage),
+        _ConfiguredHHCoverLetters(service),
         settings_provider=settings_provider,
         policy_hash_provider=policy_provider,
     )

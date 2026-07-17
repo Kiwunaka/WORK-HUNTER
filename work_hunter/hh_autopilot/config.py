@@ -193,6 +193,15 @@ def default_autopilot_config() -> dict[str, Any]:
         "application": {
             "resume_policy": "best_resume_only",
             "cover_letter_mode": "template",
+            "cover_letter_template": (
+                "{Здравствуйте|Добрый день}! Меня зовут {candidate_name}. "
+                "Хочу откликнуться на вакансию «{vacancy_name}» в "
+                "{employer_name}. Мой опыт и навыки ({candidate_skills}) "
+                "соответствуют задачам позиции. Буду рад обсудить детали."
+            ),
+            "cover_letter_max_characters": 10_000,
+            "cover_letter_spintax": True,
+            "reuse_saved_cover_letter": False,
             "screening_mode": "ai",
             "form_mode": "ai",
             "captcha_mode": "vision_then_manual",
@@ -896,14 +905,40 @@ def _parse_lease(raw: Any) -> LeaseSettings:
 
 def _parse_application(raw: Any) -> dict[str, Any]:
     value = _mapping("application", raw, _APPLICATION_KEYS)
+    cover_letter_mode = _enum(
+        "application.cover_letter_mode",
+        value["cover_letter_mode"],
+        _COVER_LETTER_MODES,
+    )
+    cover_letter_template = _text(
+        "application.cover_letter_template",
+        value["cover_letter_template"],
+        low=0,
+        high=20_000,
+    )
+    if cover_letter_mode == "template" and not cover_letter_template:
+        raise AutopilotConfigError(
+            "application.cover_letter_template must not be empty in template mode"
+        )
     return {
         "resume_policy": _enum(
             "application.resume_policy", value["resume_policy"], _RESUME_POLICIES
         ),
-        "cover_letter_mode": _enum(
-            "application.cover_letter_mode",
-            value["cover_letter_mode"],
-            _COVER_LETTER_MODES,
+        "cover_letter_mode": cover_letter_mode,
+        "cover_letter_template": cover_letter_template,
+        "cover_letter_max_characters": _bounded(
+            "application.cover_letter_max_characters",
+            value["cover_letter_max_characters"],
+            1,
+            10_000,
+        ),
+        "cover_letter_spintax": _boolean(
+            "application.cover_letter_spintax",
+            value["cover_letter_spintax"],
+        ),
+        "reuse_saved_cover_letter": _boolean(
+            "application.reuse_saved_cover_letter",
+            value["reuse_saved_cover_letter"],
         ),
         "screening_mode": _enum(
             "application.screening_mode", value["screening_mode"], _GROUNDED_MODES

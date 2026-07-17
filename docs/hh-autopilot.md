@@ -206,6 +206,10 @@ Default search — `20 x 100`, но distinct cap остаётся `2000`. Pagina
 | `lease.renewal_margin_seconds` | `45` | 1..600 |
 | `application.resume_policy` | `best_resume_only` | `best_resume_only`, `per_resume` |
 | `application.cover_letter_mode` | `template` | `none`, `template`, `ai` |
+| `application.cover_letter_template` | встроенный RU-шаблон | строка до 20000 символов; placeholders + `{A|B}` spintax |
+| `application.cover_letter_max_characters` | `10000` | 1..10000 |
+| `application.cover_letter_spintax` | `true` | boolean |
+| `application.reuse_saved_cover_letter` | `false` | boolean; использовать вручную сохранённый draft для вакансии |
 | `application.screening_mode` | `ai` | `off`, `profile_grounded`, `ai` |
 | `application.form_mode` | `ai` | `off`, `profile_grounded`, `ai` |
 | `application.captcha_mode` | `vision_then_manual` | `manual_handoff`, `vision_then_manual` |
@@ -219,6 +223,10 @@ Default search — `20 x 100`, но distinct cap остаётся `2000`. Pagina
 | `retention.event_days` | `180` | 1..3650 |
 
 Lease требует `ttl_seconds >= request_timeout_seconds + renewal_margin_seconds`.
+
+При `cover_letter_mode=template` executor сам собирает письмо из вакансии, выбранного резюме и candidate profile; заранее создавать draft не нужно. Доступные placeholders: `candidate_name`, `candidate_title`, `candidate_summary`, `candidate_skills`, `vacancy_name`, `employer_name`, `vacancy_description`, `salary`, `location`, `resume_title`.
+
+При `cover_letter_mode=ai` используются настройки `ai.cover_letters`: наследуемые `backend/base_url/api_key/model`, собственные `model`, `temperature`, `max_tokens`, `timeout`, `system_prompt`, `message_prompt` и `failure_policy=template|empty|retry`. Сгенерированный результат сохраняется под конкретный autopilot item и policy version, поэтому retry не генерирует другой текст. Изменение шаблона, модели или prompts меняет policy hash.
 
 ### HH search presets
 

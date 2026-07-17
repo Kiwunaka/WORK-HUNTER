@@ -1040,6 +1040,29 @@ class Storage:
             created_at=row["created_at"],
         )
 
+    def get_latest_letter_by_template(
+        self,
+        job_id: int,
+        template_name: str,
+    ) -> LetterDraft | None:
+        row = self.conn.execute(
+            """
+            SELECT * FROM letters
+            WHERE job_id = ? AND template_name = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (job_id, template_name),
+        ).fetchone()
+        if row is None:
+            return None
+        return LetterDraft(
+            job_id=int(row["job_id"]),
+            template_name=row["template_name"],
+            body=row["body"],
+            created_at=row["created_at"],
+        )
+
     def record_source(
         self,
         source: str,

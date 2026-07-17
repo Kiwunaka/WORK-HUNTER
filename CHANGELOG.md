@@ -8,6 +8,12 @@
 - Fill supported redirect forms grounded-first, with configurable AI completion for remaining fields.
 - Solve application CAPTCHA through a Vision-capable OpenAI-compatible model in the persisted HH browser session, synchronize cookies back to the API transport, retry the original application, and retain manual fallback.
 
+### HH application and maintenance parity
+
+- Render configurable template or AI cover letters inside the production autopilot instead of requiring a pre-saved draft; cache each rendered letter for stable retries.
+- Run paginated employer replies, resume raising, recruiter follow-up, negotiation cleanup, and skipped-state maintenance through the configurable JSON runner.
+- Generate employer replies from full paginated chat history and suppress duplicate replies and email follow-ups.
+
 ### Apple HIG cockpit redesign
 
 - Replace the legacy navigation with eight canonical destinations and a deterministic **Today** dashboard.
