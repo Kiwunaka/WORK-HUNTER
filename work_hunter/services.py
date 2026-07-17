@@ -1341,14 +1341,359 @@ class WorkHunter:
             self._hh_autopilot_components = self._hh_autopilot_factory(self)
         return self._hh_autopilot_components
 
+    def _hh_autopilot_account_ids(
+        self,
+        accounts: list[str] | None = None,
+    ) -> list[str]:
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        settings = parse_autopilot_settings(copy.deepcopy(self.config))
+        configured = {
+            account.profile_id.strip().casefold(): account.profile_id.strip().casefold()
+            for account in settings.accounts
+        }
+        if accounts is None:
+            return list(configured)
+        if isinstance(accounts, (str, bytes)) or not isinstance(accounts, list):
+            raise TypeError("accounts must be a list or None")
+        selected: list[str] = []
+        for value in accounts:
+            account_id = str(value).strip().casefold()
+            if account_id not in configured:
+                raise ValueError(f"HH autopilot account '{value}' not found")
+            if account_id not in selected:
+                selected.append(account_id)
+        if not selected:
+            raise ValueError("accounts must not be empty")
+        return selected
+
+    def _hh_autopilot_authorizer(self) -> Any:
+        from .hh_autopilot.authorization import HHAutopilotAuthorizer
+
+        return HHAutopilotAuthorizer(
+            self._hh_autopilot().repository,
+            self.config_path,
+            policy_material_resolver=lambda config, account: _hh_policy_material(
+                self, config, account
+            ),
+        )
+
     def tick_hh_autopilot(self) -> dict[str, Any]:
         return _result_dict(self._hh_autopilot().scheduler.tick())
+
+    def validate_hh_autopilot(
+        self,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        settings = parse_autopilot_settings(copy.deepcopy(self.config))
+        selected = self._hh_autopilot_account_ids(
+            None if account is None else [account]
+        )
+        return {
+            "status": "ok",
+            "accounts": selected,
+            "timezone": settings.timezone,
+            "valid": True,
+        }
+
+    def enable_hh_autopilot(
+        self,
+        *,
+        accounts: list[str] | None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        selected = self._hh_autopilot_account_ids(accounts)
+        result = self._hh_autopilot_authorizer().enable(
+            selected,
+            copy.deepcopy(self.config),
+            confirm=confirm,
+            actor="cli",
+            source="hh autopilot enable",
+        )
+        self._accept_config(result.config)
+        return {
+            "status": "ok",
+            "accounts": selected,
+            "generations": result.generations,
+            "policy_hashes": result.policy_hashes,
+        }
+
+    def disable_hh_autopilot(
+        self,
+        *,
+        accounts: list[str] | None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        selected = self._hh_autopilot_account_ids(accounts)
+        result = self._hh_autopilot_authorizer().disable(
+            selected,
+            copy.deepcopy(self.config),
+            confirm=confirm,
+            actor="cli",
+        )
+        self._accept_config(result.config)
+        return {"status": "ok", "accounts": selected}
+
+    def shadow_hh_autopilot(
+        self,
+        *,
+        account: str,
+        resume_id: str | None = None,
+        preset: str | None = None,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.types import RunRequest
+
+        account_id = self._hh_autopilot_account_ids([account])[0]
+        return _result_dict(
+            self._hh_autopilot().engine.run(
+                RunRequest(
+                    account_id,
+                    trigger="shadow",
+                    resume_id=resume_id,
+                    preset_name=preset,
+                )
+            )
+        )
+
+    def canary_hh_autopilot(
+        self,
+        *,
+        account: str,
+        resume_id: str,
+        vacancy_id: str,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.authorization import AuthorizationDenied
+        from .hh_autopilot.types import LiteralConfirmation, RunRequest, canary_reference
+
+        if confirm is not True:
+            raise AuthorizationDenied("literal_confirmation_required")
+        account_id = self._hh_autopilot_account_ids([account])[0]
+        reference = canary_reference(account_id, resume_id, vacancy_id)
+        self._hh_autopilot().repository.create_one_shot_authorization(
+            reference,
+            authorization_type="canary",
+            account_id=account_id,
+            targets=((resume_id, vacancy_id),),
+            max_success=1,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        return _result_dict(
+            self._hh_autopilot().engine.run(
+                RunRequest(
+                    account_id,
+                    trigger="canary",
+                    authorization=LiteralConfirmation(account_id, reference),
+                    resume_id=resume_id,
+                    vacancy_id=vacancy_id,
+                )
+            )
+        )
+
+    def run_hh_autopilot(
+        self,
+        *,
+        accounts: list[str] | None,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.types import RunRequest
+
+        selected = self._hh_autopilot_account_ids(accounts)
+        return {
+            "status": "ok",
+            "runs": [
+                _result_dict(
+                    self._hh_autopilot().engine.run(
+                        RunRequest(account_id, trigger="schedule")
+                    )
+                )
+                for account_id in selected
+            ],
+        }
 
     def recover_hh_autopilot(self, account: str | None = None) -> dict[str, Any]:
         return _result_dict(self._hh_autopilot().recovery.run(account_id=account))
 
+    def _set_hh_autopilot_pause(
+        self,
+        *,
+        accounts: list[str] | None,
+        paused: bool,
+    ) -> dict[str, Any]:
+        selected = self._hh_autopilot_account_ids(accounts)
+        authorizer = self._hh_autopilot_authorizer()
+        for account_id in selected:
+            result = authorizer.set_pause(
+                "account",
+                account_id,
+                copy.deepcopy(self.config),
+                paused=paused,
+                confirm=True,
+                actor="cli",
+            )
+            self._accept_config(result.config)
+        return {"status": "ok", "accounts": selected, "paused": paused}
+
+    def pause_hh_autopilot(
+        self,
+        *,
+        accounts: list[str] | None,
+    ) -> dict[str, Any]:
+        return self._set_hh_autopilot_pause(accounts=accounts, paused=True)
+
+    def resume_hh_autopilot(
+        self,
+        *,
+        accounts: list[str] | None,
+    ) -> dict[str, Any]:
+        return self._set_hh_autopilot_pause(accounts=accounts, paused=False)
+
+    def stop_hh_autopilot(self, *, account: str, run_id: int) -> dict[str, Any]:
+        account_id = self._hh_autopilot_account_ids([account])[0]
+        run = self._hh_autopilot().repository.get_run(run_id)
+        if run is None or run.account_id != account_id:
+            raise ValueError("HH autopilot run does not belong to the selected account")
+        self._hh_autopilot().repository.request_stop([account_id])
+        return {"status": "ok", "account": account_id, "run_id": run_id}
+
+    def _set_hh_autopilot_kill_switch(
+        self,
+        *,
+        accounts: list[str] | None,
+        global_scope: bool,
+        confirm: bool,
+        active: bool,
+    ) -> dict[str, Any]:
+        selected = self._hh_autopilot_account_ids(accounts)
+        authorizer = self._hh_autopilot_authorizer()
+        scopes = [("global", "global")] if global_scope else [
+            ("account", account_id) for account_id in selected
+        ]
+        for scope_type, scope_id in scopes:
+            method = (
+                authorizer.set_kill_switch
+                if active
+                else authorizer.clear_kill_switch
+            )
+            result = method(
+                scope_type,
+                scope_id,
+                copy.deepcopy(self.config),
+                confirm=confirm,
+                actor="cli",
+            )
+            self._accept_config(result.config)
+        return {
+            "status": "ok",
+            "accounts": selected,
+            "global": global_scope,
+            "active": active,
+        }
+
+    def kill_hh_autopilot(
+        self,
+        *,
+        accounts: list[str] | None,
+        global_scope: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        return self._set_hh_autopilot_kill_switch(
+            accounts=accounts,
+            global_scope=global_scope,
+            confirm=confirm,
+            active=True,
+        )
+
+    def clear_hh_autopilot_kill_switch(
+        self,
+        *,
+        accounts: list[str] | None,
+        global_scope: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        return self._set_hh_autopilot_kill_switch(
+            accounts=accounts,
+            global_scope=global_scope,
+            confirm=confirm,
+            active=False,
+        )
+
+    def retry_hh_autopilot(self, *, account: str, item_id: int) -> dict[str, Any]:
+        from .hh_autopilot.types import RunRequest
+
+        account_id = self._hh_autopilot_account_ids([account])[0]
+        item = self._hh_autopilot().repository.get_item(item_id)
+        if item is None or item.account_id != account_id:
+            raise ValueError("HH autopilot item does not belong to the selected account")
+        report = self._hh_autopilot().engine.run(
+            RunRequest(
+                account_id,
+                trigger="retry",
+                resume_id=item.resume_id,
+                vacancy_id=item.vacancy_id,
+            )
+        )
+        result = _result_dict(report)
+        result["item_id"] = item_id
+        return result
+
+    def resolve_hh_autopilot_challenge(
+        self,
+        *,
+        account: str,
+        challenge_id: int,
+        action: str,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        account_id = self._hh_autopilot_account_ids([account])[0]
+        repository = self._hh_autopilot().repository
+        challenge = repository.get_challenge(challenge_id)
+        if challenge is None or challenge.account_id != account_id:
+            raise ValueError("HH challenge does not belong to the selected account")
+        settings = parse_autopilot_settings(copy.deepcopy(self.config))
+        lease = repository.acquire_lease(
+            account_id,
+            f"work-hunter-cli:{uuid.uuid4().hex}",
+            ttl_seconds=settings.lease.ttl_seconds,
+        )
+        if lease is None:
+            return {"status": "busy", "account": account_id, "challenge_id": challenge_id}
+        try:
+            if action in {"completed", "dismissed", "auth_restored"}:
+                resolved = repository.resolve_manual_challenge(
+                    challenge_id,
+                    action="dismiss" if action == "dismissed" else "completed",
+                    actor="cli",
+                    fencing_token=lease.fencing_token,
+                )
+            else:
+                resolved = repository.resolve_challenge(
+                    challenge_id,
+                    action=action,
+                    actor="cli",
+                    fencing_token=lease.fencing_token,
+                )
+            return {
+                "status": "ok",
+                "account": account_id,
+                "challenge_id": challenge_id,
+                "action": action,
+                "item": _result_dict(resolved),
+            }
+        finally:
+            repository.release_lease(lease)
+
     def hh_autopilot_status(self, account: str | None = None) -> dict[str, Any]:
-        account_id = self._hh_account_id(account)
+        if account is None:
+            return {
+                "accounts": {
+                    account_id: self.hh_autopilot_status(account_id)
+                    for account_id in self._hh_autopilot_account_ids()
+                }
+            }
+        account_id = self._hh_autopilot_account_ids([account])[0]
         repository = self._hh_autopilot().repository
         custom = getattr(repository, "status", None)
         if callable(custom):
@@ -1403,7 +1748,18 @@ class WorkHunter:
         vacancy_id: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
-        account_id = self._hh_account_id(account)
+        if account is None:
+            return {
+                "accounts": {
+                    account_id: self.hh_autopilot_history(
+                        account=account_id,
+                        vacancy_id=vacancy_id,
+                        limit=limit,
+                    )
+                    for account_id in self._hh_autopilot_account_ids()
+                }
+            }
+        account_id = self._hh_autopilot_account_ids([account])[0]
         limit = max(1, min(500, int(limit)))
         repository = self._hh_autopilot().repository
         custom = getattr(repository, "history", None)
@@ -1438,7 +1794,17 @@ class WorkHunter:
         account: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
-        account_id = self._hh_account_id(account)
+        if account is None:
+            return {
+                "accounts": {
+                    account_id: self.hh_autopilot_challenges(
+                        account=account_id,
+                        limit=limit,
+                    )
+                    for account_id in self._hh_autopilot_account_ids()
+                }
+            }
+        account_id = self._hh_autopilot_account_ids([account])[0]
         limit = max(1, min(500, int(limit)))
         repository = self._hh_autopilot().repository
         custom = getattr(repository, "challenges", None)
@@ -2897,8 +3263,18 @@ class WorkHunter:
         except Exception as exc:
             return _hh_error_payload(exc)
 
-    def hh_auth_status(self) -> dict[str, Any]:
-        hh_config = self.hh_config()
+    def hh_auth_status(self, account: str | None = None) -> dict[str, Any]:
+        if account is None:
+            account_id = str(
+                self.config.get("hh_account_profile") or "default"
+            ).strip().casefold()
+            hh_config = self.hh_config()
+            client = self._hh_client()
+        else:
+            account_id = self._hh_account_id(account)
+            client = self._hh_client_for_account(account_id)
+            hh_config = client.config
+        browser_status = self._hh_browser_authorizer().diagnostics(account_id)
         has_access_token = bool(str(hh_config.get("access_token") or ""))
         has_refresh_token = bool(str(hh_config.get("refresh_token") or ""))
         client_credentials_configured = bool(
@@ -2910,6 +3286,8 @@ class WorkHunter:
             actions.append("Set sources.hh.access_token")
             return {
                 "status": "missing_access_token",
+                "account": account_id,
+                "browser": browser_status,
                 "authorized": False,
                 "refresh_ready": has_refresh_token,
                 "client_credentials_configured": client_credentials_configured,
@@ -2917,7 +3295,6 @@ class WorkHunter:
                 "actions": actions,
             }
 
-        client = self._hh_client()
         try:
             me_payload = client.whoami()
             me = me_payload.get("me") if me_payload.get("status") == "ok" else me_payload
@@ -2930,6 +3307,8 @@ class WorkHunter:
                 actions.append("Refresh or replace sources.hh.access_token.")
             return {
                 "status": "invalid_access_token",
+                "account": account_id,
+                "browser": browser_status,
                 "authorized": False,
                 "refresh_ready": has_refresh_token,
                 "client_credentials_configured": client_credentials_configured,
@@ -2942,6 +3321,8 @@ class WorkHunter:
             actions.append("Add sources.hh.refresh_token to enable automatic token refresh.")
         return {
             "status": "ok",
+            "account": account_id,
+            "browser": browser_status,
             "authorized": True,
             "refresh_ready": has_refresh_token,
             "client_credentials_configured": client_credentials_configured,
@@ -2949,6 +3330,80 @@ class WorkHunter:
             "me": me,
             "actions": actions,
         }
+
+    def _hh_browser_authorizer(self, browser: Any = None) -> Any:
+        from .hh_transport.authorize import HHBrowserAuthorizer
+
+        return HHBrowserAuthorizer(
+            browser,
+            private_root=self.root / ".work-hunter" / "private",
+        )
+
+    def login_hh_account(self, *, account: str) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return {
+                "status": "blocked",
+                "code": "playwright_not_installed",
+                "account": account_id,
+                "next_actions": ['python -m pip install -e ".[browser]"'],
+            }
+        with sync_playwright() as playwright:
+            return self._hh_browser_authorizer(playwright.chromium).login(account_id)
+
+    def import_hh_account_cookies(
+        self,
+        *,
+        account: str,
+        path: str | Path,
+    ) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        cookie_file = Path(path)
+        if not cookie_file.is_absolute():
+            cookie_file = self.root / cookie_file
+        cookies = cookie_file.read_text(encoding="utf-8")
+        result = self._hh_browser_authorizer().import_cookies(account_id, cookies)
+        result["source_file"] = str(cookie_file)
+        return result
+
+    def logout_hh_account(
+        self,
+        *,
+        account: str,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        blocked = require_mutation_confirmation(
+            confirm,
+            code="hh_logout_requires_confirmation",
+            message="HH logout requires explicit confirmation.",
+            risk_flags=("authentication_mutation",),
+        )
+        if blocked is not None:
+            return blocked
+        return self._hh_browser_authorizer().logout(
+            account_id,
+            confirmation=f"LOGOUT {account_id}",
+        )
+
+    def select_hh_account_profile(
+        self,
+        *,
+        account: str,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        blocked = require_mutation_confirmation(
+            confirm,
+            code="hh_profile_selection_requires_confirmation",
+            message="Changing the active HH profile requires explicit confirmation.",
+            risk_flags=("authentication_profile_change",),
+        )
+        if blocked is not None:
+            return blocked
+        return self.use_hh_account_profile(account_id)
 
     def import_hh_token(
         self,
@@ -3095,6 +3550,16 @@ class WorkHunter:
 
     def refresh_hh_token(self) -> dict[str, Any]:
         client = self._hh_client()
+        return self._refresh_hh_client(client)
+
+    def refresh_hh_account(self, *, account: str) -> dict[str, Any]:
+        account_id = self._hh_account_id(account)
+        result = self._refresh_hh_client(self._hh_client_for_account(account_id))
+        result["account"] = account_id
+        return result
+
+    @staticmethod
+    def _refresh_hh_client(client: HHApplyClient) -> dict[str, Any]:
         token = client.refresh_token()
         access_token = str(token.get("access_token") or "")
         if not access_token:

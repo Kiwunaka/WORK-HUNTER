@@ -24,6 +24,47 @@ from .sources import PUBLIC_BOARD_SOURCE_NAMES
 
 SYNC_SOURCE_CHOICES = ["all", "hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
 LIST_SOURCE_CHOICES = ["hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
+HH_CHALLENGE_ACTIONS = (
+    "completed",
+    "dismissed",
+    "confirmed_applied",
+    "confirmed_not_applied_retry",
+    "confirmed_not_applied_skip",
+    "retry_reconciliation",
+    "auth_restored",
+)
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def _positive_text_id(value: str) -> str:
+    if not value.isdecimal() or int(value) < 1:
+        raise argparse.ArgumentTypeError("ID must be a positive integer")
+    return value
+
+
+def add_account_scope(
+    parser: argparse.ArgumentParser,
+    *,
+    allow_all: bool,
+    required: bool,
+) -> None:
+    group = parser.add_mutually_exclusive_group(required=required)
+    group.add_argument("--account")
+    if allow_all:
+        group.add_argument("--all", action="store_true", dest="all_accounts")
+
+
+def selected_accounts(args: argparse.Namespace) -> list[str] | None:
+    if getattr(args, "all_accounts", False):
+        return None
+    account = getattr(args, "account", None)
+    return [account] if account else None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -271,9 +312,11 @@ def main(argv: list[str] | None = None) -> None:
     hh_sub.add_parser("whoami")
     hh_auth = hh_sub.add_parser("auth")
     hh_auth_sub = hh_auth.add_subparsers(dest="hh_auth_command", required=True)
-    hh_auth_sub.add_parser("status")
+    hh_auth_status = hh_auth_sub.add_parser("status")
+    hh_auth_status.add_argument("--account")
     hh_auth_sub.add_parser("whoami")
-    hh_auth_sub.add_parser("refresh")
+    hh_auth_refresh = hh_auth_sub.add_parser("refresh")
+    hh_auth_refresh.add_argument("--account", required=True)
     hh_auth_import = hh_auth_sub.add_parser("import-token")
     hh_auth_import.add_argument("--access-token", required=True)
     hh_auth_import.add_argument("--refresh-token", default="")
@@ -283,6 +326,75 @@ def main(argv: list[str] | None = None) -> None:
     hh_auth_import.add_argument("--profile")
     hh_auth_sub.add_parser("oauth-start")
     hh_auth_sub.add_parser("oauth-callback")
+
+    hh_auth_login = hh_auth_sub.add_parser("login")
+    hh_auth_login.add_argument("--account", required=True)
+    hh_auth_cookies = hh_auth_sub.add_parser("import-cookies")
+    hh_auth_cookies.add_argument("--account", required=True)
+    hh_auth_cookies.add_argument("--file", type=Path, required=True)
+    hh_auth_logout = hh_auth_sub.add_parser("logout")
+    hh_auth_logout.add_argument("--account", required=True)
+    hh_auth_logout.add_argument("--confirm", action="store_true")
+    hh_auth_select = hh_auth_sub.add_parser("select-profile")
+    hh_auth_select.add_argument("--account", required=True)
+    hh_auth_select.add_argument("--confirm", action="store_true")
+
+    hh_autopilot = hh_sub.add_parser("autopilot")
+    hh_autopilot_sub = hh_autopilot.add_subparsers(
+        dest="hh_autopilot_command", required=True
+    )
+    hh_autopilot_validate = hh_autopilot_sub.add_parser("validate")
+    hh_autopilot_validate.add_argument("--account")
+    for command in ("enable", "disable"):
+        command_parser = hh_autopilot_sub.add_parser(command)
+        add_account_scope(command_parser, allow_all=True, required=True)
+        command_parser.add_argument("--confirm", action="store_true")
+    hh_autopilot_status = hh_autopilot_sub.add_parser("status")
+    hh_autopilot_status.add_argument("--account")
+    hh_autopilot_shadow = hh_autopilot_sub.add_parser("shadow")
+    hh_autopilot_shadow.add_argument("--account", required=True)
+    hh_autopilot_shadow.add_argument("--resume", dest="resume_id")
+    hh_autopilot_shadow.add_argument("--preset")
+    hh_autopilot_canary = hh_autopilot_sub.add_parser("canary")
+    hh_autopilot_canary.add_argument("--account", required=True)
+    hh_autopilot_canary.add_argument("--resume", dest="resume_id", required=True)
+    hh_autopilot_canary.add_argument(
+        "--vacancy", dest="vacancy_id", type=_positive_text_id, required=True
+    )
+    hh_autopilot_canary.add_argument("--confirm", action="store_true")
+    hh_autopilot_run = hh_autopilot_sub.add_parser("run-now")
+    add_account_scope(hh_autopilot_run, allow_all=True, required=True)
+    hh_autopilot_recover = hh_autopilot_sub.add_parser("recover-now")
+    hh_autopilot_recover.add_argument("--account")
+    for command in ("pause", "resume"):
+        command_parser = hh_autopilot_sub.add_parser(command)
+        add_account_scope(command_parser, allow_all=True, required=True)
+    hh_autopilot_stop = hh_autopilot_sub.add_parser("stop")
+    hh_autopilot_stop.add_argument("--account", required=True)
+    hh_autopilot_stop.add_argument("--run-id", type=_positive_int, required=True)
+    for command in ("kill-switch", "clear-kill-switch"):
+        command_parser = hh_autopilot_sub.add_parser(command)
+        scope = command_parser.add_mutually_exclusive_group(required=True)
+        scope.add_argument("--account")
+        scope.add_argument("--all", action="store_true", dest="all_accounts")
+        scope.add_argument("--global", action="store_true", dest="global_scope")
+        command_parser.add_argument("--confirm", action="store_true")
+    hh_autopilot_retry = hh_autopilot_sub.add_parser("retry")
+    hh_autopilot_retry.add_argument("--account", required=True)
+    hh_autopilot_retry.add_argument("--item-id", type=_positive_int, required=True)
+    hh_autopilot_challenges = hh_autopilot_sub.add_parser("challenges")
+    hh_autopilot_challenges.add_argument("--account")
+    hh_autopilot_resolve = hh_autopilot_sub.add_parser("resolve-challenge")
+    hh_autopilot_resolve.add_argument("--account", required=True)
+    hh_autopilot_resolve.add_argument(
+        "--challenge-id", type=_positive_int, required=True
+    )
+    hh_autopilot_resolve.add_argument(
+        "--action", choices=HH_CHALLENGE_ACTIONS, required=True
+    )
+    hh_autopilot_history = hh_autopilot_sub.add_parser("history")
+    hh_autopilot_history.add_argument("--account")
+    hh_autopilot_history.add_argument("--limit", type=_positive_int, default=100)
 
     hh_account_nested = hh_sub.add_parser("account")
     hh_account_nested_sub = hh_account_nested.add_subparsers(dest="hh_account_command", required=True)
@@ -516,11 +628,11 @@ def main(argv: list[str] | None = None) -> None:
             print_json(app.hh_whoami())
         elif args.hh_command == "auth":
             if args.hh_auth_command == "status":
-                print_json(app.hh_auth_status())
+                print_json(mask_secrets(app.hh_auth_status(account=args.account)))
             elif args.hh_auth_command == "whoami":
                 print_json(app.hh_whoami())
             elif args.hh_auth_command == "refresh":
-                print_json(mask_secrets(app.refresh_hh_token()))
+                print_json(mask_secrets(app.refresh_hh_account(account=args.account)))
             elif args.hh_auth_command == "import-token":
                 print_json(
                     mask_secrets(
@@ -534,15 +646,119 @@ def main(argv: list[str] | None = None) -> None:
                         )
                     )
                 )
+            elif args.hh_auth_command == "login":
+                print_json(mask_secrets(app.login_hh_account(account=args.account)))
+            elif args.hh_auth_command == "import-cookies":
+                print_json(
+                    mask_secrets(
+                        app.import_hh_account_cookies(
+                            account=args.account,
+                            path=args.file,
+                        )
+                    )
+                )
+            elif args.hh_auth_command == "logout":
+                print_json(
+                    mask_secrets(
+                        app.logout_hh_account(
+                            account=args.account,
+                            confirm=args.confirm,
+                        )
+                    )
+                )
+            elif args.hh_auth_command == "select-profile":
+                print_json(
+                    mask_secrets(
+                        app.select_hh_account_profile(
+                            account=args.account,
+                            confirm=args.confirm,
+                        )
+                    )
+                )
             elif args.hh_auth_command in {"oauth-start", "oauth-callback"}:
                 print_json(
                     {
                         "status": "blocked",
                         "code": "oauth_flow_not_configured",
-                        "message": "Local HH OAuth flow is not configured yet. Use hh auth import-token for now.",
+                        "message": "Configure your own HH OAuth client before starting the local OAuth flow.",
+                        "required_configuration": [
+                            "client_id",
+                            "client_secret",
+                            "redirect_uri",
+                        ],
                         "next_actions": ["work-hunter hh auth import-token --access-token ..."],
                     }
                 )
+        elif args.hh_command == "autopilot":
+            command = args.hh_autopilot_command
+            if command == "validate":
+                result = app.validate_hh_autopilot(account=args.account)
+            elif command == "enable":
+                result = app.enable_hh_autopilot(
+                    accounts=selected_accounts(args), confirm=args.confirm
+                )
+            elif command == "disable":
+                result = app.disable_hh_autopilot(
+                    accounts=selected_accounts(args), confirm=args.confirm
+                )
+            elif command == "status":
+                result = app.hh_autopilot_status(account=args.account)
+            elif command == "shadow":
+                result = app.shadow_hh_autopilot(
+                    account=args.account,
+                    resume_id=args.resume_id,
+                    preset=args.preset,
+                )
+            elif command == "canary":
+                result = app.canary_hh_autopilot(
+                    account=args.account,
+                    resume_id=args.resume_id,
+                    vacancy_id=args.vacancy_id,
+                    confirm=args.confirm,
+                )
+            elif command == "run-now":
+                result = app.run_hh_autopilot(accounts=selected_accounts(args))
+            elif command == "recover-now":
+                result = app.recover_hh_autopilot(account=args.account)
+            elif command == "pause":
+                result = app.pause_hh_autopilot(accounts=selected_accounts(args))
+            elif command == "resume":
+                result = app.resume_hh_autopilot(accounts=selected_accounts(args))
+            elif command == "stop":
+                result = app.stop_hh_autopilot(
+                    account=args.account, run_id=args.run_id
+                )
+            elif command == "kill-switch":
+                result = app.kill_hh_autopilot(
+                    accounts=selected_accounts(args),
+                    global_scope=args.global_scope,
+                    confirm=args.confirm,
+                )
+            elif command == "clear-kill-switch":
+                result = app.clear_hh_autopilot_kill_switch(
+                    accounts=selected_accounts(args),
+                    global_scope=args.global_scope,
+                    confirm=args.confirm,
+                )
+            elif command == "retry":
+                result = app.retry_hh_autopilot(
+                    account=args.account, item_id=args.item_id
+                )
+            elif command == "challenges":
+                result = app.hh_autopilot_challenges(account=args.account)
+            elif command == "resolve-challenge":
+                result = app.resolve_hh_autopilot_challenge(
+                    account=args.account,
+                    challenge_id=args.challenge_id,
+                    action=args.action,
+                )
+            elif command == "history":
+                result = app.hh_autopilot_history(
+                    account=args.account, limit=args.limit
+                )
+            else:  # pragma: no cover - argparse owns the command choices
+                raise AssertionError(f"unhandled HH autopilot command: {command}")
+            print_json(mask_secrets(result))
         elif args.hh_command == "account":
             if args.hh_account_command == "list":
                 print_json(app.list_hh_account_profiles())
