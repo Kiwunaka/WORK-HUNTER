@@ -9,7 +9,7 @@ import requests
 
 
 def chat_completion(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     ai_config: dict[str, Any],
 ) -> str:
     backend = str(ai_config.get("backend") or "direct").lower()
@@ -18,7 +18,7 @@ def chat_completion(
     return _direct_completion(messages, ai_config)
 
 
-def _direct_completion(messages: list[dict[str, str]], ai_config: dict[str, Any]) -> str:
+def _direct_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]) -> str:
     api_key = ai_config.get("api_key", "")
     base_url = ai_config.get("base_url", "")
     model = ai_config.get("model", "")
@@ -41,7 +41,12 @@ def _direct_completion(messages: list[dict[str, str]], ai_config: dict[str, Any]
         "max_tokens": ai_config.get("max_tokens", 1500),
     }
 
-    response = requests.post(base_url, headers=headers, json=payload, timeout=60)
+    response = requests.post(
+        base_url,
+        headers=headers,
+        json=payload,
+        timeout=float(ai_config.get("timeout", 60)),
+    )
     response.raise_for_status()
     data = response.json()
     content = (
@@ -54,7 +59,7 @@ def _direct_completion(messages: list[dict[str, str]], ai_config: dict[str, Any]
     return str(content).strip()
 
 
-def _opencode_completion(messages: list[dict[str, str]], ai_config: dict[str, Any]) -> str:
+def _opencode_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]) -> str:
     transport = str(ai_config.get("opencode_transport") or "cli").lower()
     if transport == "server":
         try:
@@ -64,7 +69,7 @@ def _opencode_completion(messages: list[dict[str, str]], ai_config: dict[str, An
     return _opencode_cli_completion(messages, ai_config)
 
 
-def _opencode_cli_completion(messages: list[dict[str, str]], ai_config: dict[str, Any]) -> str:
+def _opencode_cli_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]) -> str:
     command = [str(ai_config.get("opencode_command") or "opencode"), "run", "--format", "json"]
     agent = str(ai_config.get("opencode_agent") or "work-hunter-ai")
     if agent:
@@ -90,7 +95,7 @@ def _opencode_cli_completion(messages: list[dict[str, str]], ai_config: dict[str
     return _extract_opencode_text(stdout)
 
 
-def _opencode_server_completion(messages: list[dict[str, str]], ai_config: dict[str, Any]) -> str:
+def _opencode_server_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]) -> str:
     base_url = str(ai_config.get("opencode_server_url") or "http://127.0.0.1:4096").rstrip("/")
     auth = _server_auth(ai_config)
     health = requests.get(f"{base_url}/global/health", timeout=5, auth=auth)
@@ -146,7 +151,7 @@ def _server_auth(ai_config: dict[str, Any]):
     return (username, password)
 
 
-def _messages_to_prompt(messages: list[dict[str, str]]) -> str:
+def _messages_to_prompt(messages: list[dict[str, Any]]) -> str:
     parts = [
         "You are the Work Hunter AI backend.",
         "Return only the requested answer. If the prompt requests JSON, return valid JSON without markdown fences.",

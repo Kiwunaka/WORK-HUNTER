@@ -2,6 +2,12 @@
 
 ## Unreleased - 2026-07-13
 
+### HH native challenge resolution
+
+- Submit current HH `vacancyTests` through the native `task_*` web payload with configurable AI answers.
+- Fill supported redirect forms grounded-first, with configurable AI completion for remaining fields.
+- Solve application CAPTCHA through a Vision-capable OpenAI-compatible model in the persisted HH browser session, synchronize cookies back to the API transport, retry the original application, and retain manual fallback.
+
 ### Apple HIG cockpit redesign
 
 - Replace the legacy navigation with eight canonical destinations and a deterministic **Today** dashboard.

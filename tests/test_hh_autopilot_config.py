@@ -80,6 +80,10 @@ def test_autopilot_defaults_are_disabled_and_bounded() -> None:
     assert settings.limits.daily_success == 50
     assert settings.search.per_page == 100
     assert settings.search.max_pages == 20
+    assert settings.application["screening_mode"] == "ai"
+    assert settings.application["form_mode"] == "ai"
+    assert settings.application["captcha_mode"] == "vision_then_manual"
+    assert settings.application["challenge_attempts"] == 3
 
 
 def test_invalid_lease_window_is_rejected() -> None:
@@ -129,6 +133,7 @@ def test_filter_change_invalidates_policy_hash() -> None:
         (("retry", "jitter_ratio"), 1.01),
         (("retry", "reconciliation_checks"), 0),
         (("lease", "ttl_seconds"), 601),
+        (("application", "challenge_attempts"), 11),
         (("application", "challenge_expiry_hours"), 721),
         (("browser", "navigation_timeout_seconds"), 0),
         (("retention", "event_days"), 3651),
@@ -170,7 +175,7 @@ def test_boolean_fields_require_json_booleans(group: str, key: str, value: objec
         ("ranking", "ai_failure_policy", "allow"),
         ("application", "resume_policy", "all"),
         ("application", "cover_letter_mode", "manual"),
-        ("application", "screening_mode", "ai"),
+        ("application", "screening_mode", "manual"),
         ("application", "form_mode", "manual"),
         ("application", "captcha_mode", "solve"),
     ],

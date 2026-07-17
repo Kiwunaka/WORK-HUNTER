@@ -308,7 +308,10 @@ def _field_mapping(value: Any) -> Mapping[str, Any]:
         return value
     fields = getattr(value, "__dict__", None)
     if isinstance(fields, Mapping):
-        return fields
+        normalized = dict(fields)
+        if "type" not in normalized and "kind" in normalized:
+            normalized["type"] = normalized["kind"]
+        return normalized
     raise TypeError("form fields must be mappings or dataclass-like objects")
 
 

@@ -8,7 +8,7 @@
 
 Build a single production path that continuously performs:
 
-`multi-page search -> hard filters -> ranking -> quotas -> application -> supported screening/form handling -> journal -> retry -> scheduler`
+`multi-page search -> hard filters -> ranking -> quotas -> application -> test/form/CAPTCHA handling -> journal -> retry -> scheduler`
 
 Once the operator enables an entry in `sources.hh.autopilot.accounts[]` through the confirmed enable command, the scheduler may execute this path for that account without per-run or per-vacancy confirmation. The enable command atomically records a scoped durable authorization grant; directly editing the account flag does not create a grant. Every account defaults to `enabled=false`. Every autonomous live mutation must honor the active grant, kill switch, account lease, quotas, configured time window, and current policy immediately before dispatch; one-shot manual mutations follow the separate safety matrix below.
 
@@ -25,8 +25,8 @@ This specification is the first delivery slice of the approved parity program. I
 - Unknown required application data: skip only that vacancy, record the exact missing fields, and continue the run.
 - All defaults, filters, weights, quotas, delays, schedules, retry rules, notification channels, and optional operations are configurable and validated before enablement.
 - One vacancy is sent from at most one resume per account by default. The best-scoring resume wins. This policy is configurable but cannot bypass HH's own duplicate-application response.
-- CAPTCHA is detected and handed to the operator in the authenticated browser context. After the operator resolves it, the original operation is retried automatically. Work Hunter does not implement Vision-based CAPTCHA bypass.
-- Profile-grounded screening questions may be completed automatically. Knowledge assessments, unknown task types, and questions that cannot be answered truthfully from stored candidate data become manual challenges; the system does not guess or fabricate.
+- Application CAPTCHA follows the reference tool's flow: capture the HH CAPTCHA element, recognize it through a configurable OpenAI-compatible Vision model, submit it in the same authenticated browser session, persist refreshed cookies, and continue the original application. `vision_then_manual` falls back to an operator handoff only after bounded automatic attempts fail. Login OTP remains an operator action, matching the reference flow.
+- Profile-grounded screening answers are preferred. With `screening_mode=ai`, vacancy tests and knowledge questions are answered by the configured model and submitted through HH's native vacancy-response form; there is no random/middle-option fallback. Unsupported or failed flows become typed per-vacancy outcomes and do not stop the run.
 - Functional behavior is implemented natively. Source code from the reference repository is not copied.
 - Enabling applications does not authorize resume mutations, employer replies, recruiter email, cleanup, or any other live operation. Each follow-up operation requires its own scope and opt-in.
 
@@ -41,7 +41,7 @@ Add a focused `HHAutopilot` orchestrator. It owns run coordination and state tra
 | `HHEligibilityPolicy` | Apply deterministic hard filters and return stable reason codes | Profile, preset, employer blacklist |
 | `HHVacancyRanker` | Produce deterministic score and optional structured AI decision | Existing scoring and AI backends |
 | `HHApplicationExecutor` | Send one locally guarded application attempt and classify delivery certainty/result | Existing HH API/web transport |
-| `HHChallengeHandler` | Handle supported screening/forms or create a manual challenge | Authenticated browser session, profile data |
+| `HHChallengeHandler` | Resolve tests/forms/Vision CAPTCHA or create a manual fallback challenge | Authenticated browser session, profile/resume data, AI backend |
 | `HHRetryPolicy` | Decide terminal versus retryable outcomes and calculate `next_attempt_at` | Typed outcome only |
 | `HHApplicationReconciler` | Resolve ambiguous or duplicate remote outcomes against HH negotiations/history | Read-only HH negotiation transport |
 | `HHAutopilotAuthorizer` | Create, validate, scope, and revoke durable application grants | Existing safety guard and `Storage` |
@@ -287,9 +287,10 @@ Finalizing a successful or reconciled application is one SQLite transaction that
   "application": {
     "resume_policy": "best_resume_only",
     "cover_letter_mode": "template",
-    "screening_mode": "profile_grounded",
-    "form_mode": "profile_grounded",
-    "captcha_mode": "manual_handoff",
+    "screening_mode": "ai",
+    "form_mode": "ai",
+    "captcha_mode": "vision_then_manual",
+    "challenge_attempts": 3,
     "challenge_expiry_hours": 24
   },
   "browser": {
@@ -309,9 +310,9 @@ Finalizing a successful or reconciled application is one SQLite transaction that
 
 `profile_id` identifies the HH authentication account. `candidate_profile_id` identifies the Work Hunter candidate facts/scoring profile used for truthful answers and ranking. `authorization_generation` is a service-managed nullable integer written only by confirmed enable/disable flows; user configuration updates cannot set it. `preset_names` exclusively reference existing top-level `hh_campaign_presets`; there is no second inline preset collection or precedence rule. Presets contain the actual HH query, specialization, area, schedule, employment, experience, salary, and other supported search parameters. An empty `preset_names` list is valid only when recommendations are enabled. `published:*` expands to every published resume in the account; explicit resume IDs are also accepted. The same resume cannot appear twice for one preset after expansion.
 
-Enums are fixed as follows: `remote` is `any|only|exclude`; `unknown_salary` is `allow|reject`; `ai_mode` is `off|borderline|all`; `ai_detail` is `light|heavy`; `ai_failure_policy` is `retry|deterministic|skip`; `resume_policy` is `best_resume_only|per_resume`; `cover_letter_mode` is `none|template|ai`; screening and form modes are `off|profile_grounded`; CAPTCHA mode is only `manual_handoff` in this specification.
+Enums are fixed as follows: `remote` is `any|only|exclude`; `unknown_salary` is `allow|reject`; `ai_mode` is `off|borderline|all`; `ai_detail` is `light|heavy`; `ai_failure_policy` is `retry|deterministic|skip`; `resume_policy` is `best_resume_only|per_resume`; `cover_letter_mode` is `none|template|ai`; screening and form modes are `off|profile_grounded|ai`; CAPTCHA mode is `manual_handoff|vision_then_manual`.
 
-All numeric values have explicit bounds: page size `1..100`, pages `1..100`, run search results `1..10000`, interval minutes `1..1440`, salary `0..1000000000`, daily and per-run success `1..administrative_max_daily_success`, administrative maximum `1..200`, send delays `0..3600`, retry and reconciliation checks `1..20`, retry/reconciliation delays `1..86400`, jitter ratio `0..1`, lease/request/navigation times `1..600`, challenge expiry `1..720` hours, and retention `1..3650` days. The fixed role, skills, experience, salary, work-format, area, and industry weights are non-negative finite numbers with a positive sum and are normalized at runtime. Arbitrary custom signal names are not accepted in this slice.
+All numeric values have explicit bounds: page size `1..100`, pages `1..100`, run search results `1..10000`, interval minutes `1..1440`, salary `0..1000000000`, daily and per-run success `1..administrative_max_daily_success`, administrative maximum `1..200`, send delays `0..3600`, retry and reconciliation checks `1..20`, retry/reconciliation delays `1..86400`, jitter ratio `0..1`, lease/request/navigation times `1..600`, automatic challenge attempts `1..10`, challenge expiry `1..720` hours, and retention `1..3650` days. The fixed role, skills, experience, salary, work-format, area, and industry weights are non-negative finite numbers with a positive sum and are normalized at runtime. Arbitrary custom signal names are not accepted in this slice.
 
 Array and identifier domains are also fixed: accounts `1..100`; resume mappings `1..500` per account; preset names `0..100` per mapping; keyword and role lists `0..1000` strings of `1..200` characters; areas/citizenships `0..500` HH ID strings; schedules, employment types, and experience levels `0..100` values from the current HH dictionaries; languages `0..100` BCP-47 tags; and required application capabilities from `direct|screening|form`. All arrays reject duplicates after normalization. Query preset fields are validated by the existing HH search schema before hashing or execution. Boolean fields accept JSON booleans only.
 
@@ -398,11 +399,11 @@ Every POST outcome includes delivery certainty: `definitely_not_sent`, `possibly
 - Authentication expiry schedules token refresh once, then retries the original item. Repeated authentication failure becomes a manual account challenge instead of a tight loop.
 - Redirects, required screening, forms, assessments, and CAPTCHA enter `HHChallengeHandler`.
 
-With `screening_mode=profile_grounded`, supported screening fields are mapped from explicit candidate profile fields and resume data; unknown required fields produce `missing_required_data` and skip only the vacancy. With `screening_mode=off`, any vacancy requiring screening terminates as `screening_disabled` without opening or submitting it.
+With `screening_mode=profile_grounded`, supported screening fields are mapped from explicit candidate profile fields and resume data; knowledge tests become `manual_assessment`. With `screening_mode=ai`, the same grounded mapping runs first and the configured text model answers remaining HH vacancy-test tasks. Multiple-choice answers must resolve to one supplied solution ID; free-text answers are bounded text. With `screening_mode=off`, any vacancy requiring screening terminates as `screening_disabled` without opening or submitting it.
 
-With `form_mode=profile_grounded`, supported forms are filled in the authenticated browser session using the same mapping; unknown required fields produce `missing_required_data`. With `form_mode=off`, any redirect to a required form terminates as `form_disabled`. Neither `off` mode silently creates a manual challenge or sends a partial response.
+With `form_mode=profile_grounded`, supported forms are filled in the authenticated browser session using the same mapping; unknown required fields produce `missing_required_data`. With `form_mode=ai`, grounded values are retained and remaining fields are answered by the configured model using their labels and supplied options. With `form_mode=off`, any redirect to a required form terminates as `form_disabled`. Neither `off` mode silently creates a manual challenge or sends a partial response.
 
-Knowledge assessments and unsupported task types produce `manual_assessment`. CAPTCHA produces `manual_captcha`. The challenge stores enough sanitized context to reopen the same authenticated browser flow. Successful CAPTCHA/assessment resolution moves the item back to `ready`; ambiguous and authentication challenges follow their type-specific transitions defined in persistence.
+Vacancies with `has_test=true` use the HH web protocol used by the reference tool: parse embedded `vacancyTests`, build `task_*` fields, and POST the native `/applicant/vacancy_response/popup` payload with the browser XSRF token and cookies. Application CAPTCHA is solved inline from `account-captcha-picture` into `account-captcha-input`; after success the original API/web mutation is retried within the configured bound. `manual_captcha` is created only when automatic solving is disabled or all Vision attempts fail. The challenge stores only sanitized context. Ambiguous and authentication challenges follow their type-specific transitions defined in persistence.
 
 Contact discovery and employer snapshots use the existing storage tables. Scheduled recruiter email is outside this core specification and remains an existing separately confirmed operation until the maintenance slice defines its grant and durable scheduler.
 
@@ -449,7 +450,7 @@ The default attempts are bounded and persisted. Delay is exponential with bounde
 
 ## Authentication And Session Lifecycle
 
-Work Hunter provides browser-assisted login by password or one-time code, cookie import, token refresh, logout, profile selection, and session diagnostics through the existing HH account profile boundary. CAPTCHA during login is manual in the same browser session. Refreshed tokens and cookies are written atomically to the active profile and reused by API and browser transports.
+Work Hunter provides browser-assisted login by password or one-time code, cookie import, token refresh, logout, profile selection, and session diagnostics through the existing HH account profile boundary. Login OTP and login CAPTCHA remain interactive, matching the reference authorization operation. Application CAPTCHA is automatic when `captcha_mode=vision_then_manual`. Refreshed tokens and cookies are written atomically to the active profile and reused by API and browser transports.
 
 The implementation does not depend on undeclared or decompiled third-party client credentials. Required OAuth client configuration must be user-provided or otherwise legally distributable.
 
@@ -463,8 +464,8 @@ The finished system must expose or preserve the following reference behaviors th
 | Multiple accounts and resumes | Profile-scoped runs, leases, quotas, and mappings |
 | AI light/heavy filtering | Configurable structured ranker modes |
 | Template and AI cover letters | Existing letter service used by executor |
-| Profile-grounded screening/forms | Challenge handler with typed outcomes |
-| CAPTCHA continuity | Manual handoff, session persistence, automatic retry |
+| Vacancy tests and forms | Grounded-first AI challenge resolver using HH native payloads |
+| CAPTCHA continuity | Vision solve in the persisted authenticated session, automatic retry, manual fallback |
 | Recruiter email | Existing confirmed operation preserved; durable scheduling is parity slice 2 |
 | Employer contact/history persistence | Existing employer, contact, application, and event tables |
 | Employer chat replies | Existing confirmed operation preserved; durable scheduling is parity slice 2 |
@@ -476,7 +477,7 @@ The finished system must expose or preserve the following reference behaviors th
 | Raw API diagnostics | Existing guarded API Lab preserved |
 | SQLite, masked logs, CLI, UI, Docker | Existing Work Hunter facilities extended for autopilot status/control |
 
-Random test answers, fabricated candidate claims, Vision CAPTCHA solving, undeclared client secrets, and deliberate duplicate spam are not parity targets.
+Random/middle-option test guesses, fabricated candidate claims, undeclared client secrets, and deliberate duplicate spam are not parity targets. Vision CAPTCHA solving is a parity target and uses only the operator-configured AI backend.
 
 ## Parity Program Sequencing
 
@@ -599,7 +600,7 @@ The fake server can accept a POST and close the connection before returning its 
 
 ### Browser integration tests
 
-Local HTML fixtures exercise authenticated form filling, unknown required fields, manual CAPTCHA handoff creation, session-cookie persistence, challenge resolution, and automatic continuation. They do not solve a CAPTCHA.
+Local fixtures exercise authenticated form filling, native vacancy-test payloads, Vision CAPTCHA element capture/fill, session-cookie persistence, manual fallback, and automatic continuation. No live CAPTCHA is part of the default suite.
 
 ### Restart and concurrency tests
 
@@ -641,7 +642,7 @@ The work is complete only when:
 - HH rate/daily-limit cooldown blocks every ready item for the affected account until reset;
 - retryable failures resume after persisted backoff;
 - permanent and missing-data outcomes do not retry;
-- a CAPTCHA or unsupported assessment creates one manual challenge, leaves other vacancies running, and automatically retries after resolution;
+- supported tests/forms and application CAPTCHA resolve inline; exhausted/disabled CAPTCHA or unsupported assessment creates one manual challenge without stopping other vacancies;
 - application authorization is durable, account/scope/policy-bound, immediately revocable, and cannot be created by editing configuration directly;
 - manual literal confirmation, autonomous dispatch, read-only reconciliation, and local finalization obey their distinct safety-check matrix;
 - shadow runs cannot create live queue/guard/quota state, and a canary can authorize exactly one named vacancy only;

@@ -193,9 +193,10 @@ def default_autopilot_config() -> dict[str, Any]:
         "application": {
             "resume_policy": "best_resume_only",
             "cover_letter_mode": "template",
-            "screening_mode": "profile_grounded",
-            "form_mode": "profile_grounded",
-            "captcha_mode": "manual_handoff",
+            "screening_mode": "ai",
+            "form_mode": "ai",
+            "captcha_mode": "vision_then_manual",
+            "challenge_attempts": 3,
             "challenge_expiry_hours": 24,
         },
         "browser": {"headless": True, "navigation_timeout_seconds": 30},
@@ -238,8 +239,8 @@ _AI_DETAILS = frozenset({"light", "heavy"})
 _AI_FAILURE_POLICIES = frozenset({"retry", "deterministic", "skip"})
 _RESUME_POLICIES = frozenset({"best_resume_only", "per_resume"})
 _COVER_LETTER_MODES = frozenset({"none", "template", "ai"})
-_GROUNDED_MODES = frozenset({"off", "profile_grounded"})
-_CAPTCHA_MODES = frozenset({"manual_handoff"})
+_GROUNDED_MODES = frozenset({"off", "profile_grounded", "ai"})
+_CAPTCHA_MODES = frozenset({"manual_handoff", "vision_then_manual"})
 _APPLICATION_CAPABILITIES = frozenset({"direct", "screening", "form"})
 
 _HH_SEARCH_PRESET_KEYS = frozenset(
@@ -912,6 +913,9 @@ def _parse_application(raw: Any) -> dict[str, Any]:
         ),
         "captcha_mode": _enum(
             "application.captcha_mode", value["captcha_mode"], _CAPTCHA_MODES
+        ),
+        "challenge_attempts": _bounded(
+            "application.challenge_attempts", value["challenge_attempts"], 1, 10
         ),
         "challenge_expiry_hours": _bounded(
             "application.challenge_expiry_hours",

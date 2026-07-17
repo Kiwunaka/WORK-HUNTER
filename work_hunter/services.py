@@ -2,6 +2,7 @@
 
 import copy
 import csv
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import importlib.metadata
@@ -1158,13 +1159,55 @@ def _hh_policy_material(
     profiles = config.get("profiles") or {}
     candidate = copy.deepcopy(profiles.get(account.candidate_profile_id) or active_profile(config))
     available = resumes or _published_hh_resumes(service._hh_client_for_account(account.profile_id))
+    ai_config = config.get("ai") or {}
+    if not isinstance(ai_config, dict):
+        ai_config = {}
+    challenge_models = {
+        purpose: str(
+            ((ai_config.get(purpose) or {}).get("model") if isinstance(ai_config.get(purpose), dict) else "")
+            or ai_config.get("model")
+            or ""
+        )
+        for purpose in ("tests", "forms", "captcha")
+    }
+    challenge_policy_versions: dict[str, str] = {}
+    for purpose in ("tests", "forms", "captcha"):
+        section = ai_config.get(purpose) or {}
+        if not isinstance(section, dict):
+            continue
+        nonsecret = {
+            "inherited_backend": ai_config.get("backend"),
+            "inherited_base_url": ai_config.get("base_url"),
+            **{
+                key: value
+                for key, value in section.items()
+                if str(key).casefold() not in {"api_key", "token", "password"}
+            },
+        }
+        challenge_policy_versions[purpose] = hashlib.sha256(
+            json.dumps(
+                nonsecret,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
     return PolicyMaterial(
         effective_auth_profile_id=account.profile_id,
         candidate_profile=candidate,
         candidate_profile_version="config",
         resumes=available,
         presets=copy.deepcopy(config.get("hh_campaign_presets") or {}),
-        model_id=str((config.get("ai") or {}).get("model") or ""),
+        model_id=json.dumps(
+            {
+                "ranking": str(ai_config.get("model") or ""),
+                **challenge_models,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        prompt_versions=challenge_policy_versions,
         cover_letter_template_version="stored",
         transport_identity={"kind": "hh_api", "account_id": account.profile_id},
     )
@@ -1251,9 +1294,15 @@ def _hh_engine_context(
 
 def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
     from .hh_autopilot.authorization import HHAutopilotAuthorizer
+    from .hh_autopilot.browser import HHBrowserApplicationAdapter
+    from .hh_autopilot.challenge_ai import HHChallengeAI
     from .hh_autopilot.config import parse_autopilot_settings
     from .hh_autopilot.engine import HHAutopilot
     from .hh_autopilot.executor import HHApplicationExecutor
+    from .hh_autopilot.native_transport import (
+        HHNativeApplicationTransport,
+        HHVacancyTestTransport,
+    )
     from .hh_autopilot.policy import HardFilter
     from .hh_autopilot.ranking import DeterministicRanker, RankingPolicy, StructuredAIRanker
     from .hh_autopilot.reconcile import HHApplicationReconciler
@@ -1271,6 +1320,55 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
             wanted,
             service._hh_client_for_account(wanted),
         ).policy_hash
+    browser_authorizer = service._hh_browser_authorizer()
+    browser_session = browser_authorizer.session(account_id)
+
+    @contextmanager
+    def browser_context():
+        from playwright.sync_api import sync_playwright
+
+        current = settings_provider()
+        profile_dir = browser_authorizer.profile_dir(account_id)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=bool(current.browser["headless"]),
+            )
+            try:
+                yield browser
+            finally:
+                browser.close()
+
+    challenge_ai = HHChallengeAI(
+        lambda: copy.deepcopy(service.config.get("ai") or {})
+    )
+    browser_adapter = HHBrowserApplicationAdapter(
+        browser_context,
+        session=browser_session,
+        navigation_timeout_ms=(
+            int(context.settings.browser["navigation_timeout_seconds"]) * 1000
+        ),
+    )
+    client_config = getattr(client, "config", {})
+    if not isinstance(client_config, dict):
+        client_config = {}
+    test_transport = HHVacancyTestTransport(
+        browser_session,
+        challenge_ai,
+        base_url=str(client_config.get("web_base_url") or "https://hh.ru"),
+        user_agent=str(client_config.get("web_user_agent") or ""),
+        timeout_seconds=context.settings.lease.request_timeout_seconds,
+    )
+    application_transport = HHNativeApplicationTransport(
+        client,
+        browser_adapter,
+        test_transport,
+        challenge_ai,
+        settings_provider=settings_provider,
+        candidate_provider=lambda: copy.deepcopy(context.candidate_profile),
+        resume_provider=lambda resume_id: client.get_resume(resume_id),
+    )
     authorizer = HHAutopilotAuthorizer(
         repository,
         service.config_path,
@@ -1280,7 +1378,7 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
     )
     executor = HHApplicationExecutor(
         repository,
-        client,
+        application_transport,
         _StoredHHCoverLetters(service.storage),
         settings_provider=settings_provider,
         policy_hash_provider=policy_provider,

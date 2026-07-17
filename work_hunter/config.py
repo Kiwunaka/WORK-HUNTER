@@ -130,6 +130,60 @@ def default_config() -> dict[str, Any]:
             "opencode_agent": "work-hunter-ai",
             "opencode_server_url": "http://127.0.0.1:4096",
             "opencode_timeout": 300,
+            "tests": {
+                "model": "",
+                "temperature": 0.0,
+                "max_tokens": 512,
+                "max_retries": 2,
+                "retry_base_seconds": 1.0,
+                "timeout": 60,
+                "system_prompt": (
+                    "Отвечай на тест вакансии кратко и профессионально. "
+                    "Для вопроса с вариантами выбери только один переданный ID."
+                ),
+                "selection_prompt": (
+                    "Вопрос: {question}\nВарианты:\n{options}\n"
+                    "Верни только ID лучшего ответа."
+                ),
+                "text_prompt": "Дай краткий профессиональный ответ: {question}",
+                "external_link_answer": (
+                    "Готов обсудить задание и предоставить ответ внутри HH."
+                ),
+            },
+            "forms": {
+                "model": "",
+                "temperature": 0.0,
+                "max_tokens": 512,
+                "max_retries": 2,
+                "retry_base_seconds": 1.0,
+                "timeout": 60,
+                "system_prompt": (
+                    "Заполняй поле отклика правдиво по данным кандидата и резюме. "
+                    "Отвечай только значением поля."
+                ),
+                "selection_prompt": (
+                    "Поле: {question}\nВарианты:\n{options}\n"
+                    "Данные кандидата:\n{facts}\nВерни только ID варианта."
+                ),
+                "text_prompt": (
+                    "Поле: {question}\nДанные кандидата:\n{facts}\n"
+                    "Верни только краткий ответ для поля."
+                ),
+            },
+            "captcha": {
+                "backend": "direct",
+                "model": "",
+                "temperature": 0.0,
+                "max_tokens": 20,
+                "max_retries": 3,
+                "retry_base_seconds": 1.0,
+                "timeout": 60,
+                "system_prompt": (
+                    "Распознай текст на изображении. Верни только текст "
+                    "без объяснений и дополнительных символов."
+                ),
+                "prompt": "Распознай текст CAPTCHA и верни только результат.",
+            },
         },
         "research": {
             "max_results": 200,

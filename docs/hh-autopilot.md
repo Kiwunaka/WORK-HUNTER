@@ -1,6 +1,6 @@
 # HH Autopilot: запуск и эксплуатация
 
-HH Autopilot проходит полный цикл: многостраничный поиск, жёсткие фильтры, ранжирование, лимиты, отклик, формы, ручная CAPTCHA, журнал, retry и scheduler.
+HH Autopilot проходит полный цикл: многостраничный поиск, жёсткие фильтры, ранжирование, лимиты, отклик, тест/форма/Vision-CAPTCHA, журнал, retry и scheduler.
 
 По умолчанию автопилот выключен. Новый grant на отклики появляется только после `enable --confirm`. Устаревший `sources.hh.allow_broad_apply` ничего не разрешает.
 
@@ -40,7 +40,8 @@ HH search/recommendations
   -> hard filters
   -> deterministic/AI ranking + best resume
   -> quota reservation + account lease
-  -> application POST or grounded form
+  -> application POST or native test/form
+  -> inline Vision-CAPTCHA solve when HH requests it
   -> applied | skipped | retry_wait | reconciling | manual_challenge | dead
   -> journal + scheduler recovery
 ```
@@ -83,7 +84,7 @@ Browser-образ включается отдельно:
 docker build --build-arg INSTALL_PLAYWRIGHT=true -t work-hunter-browser .
 ```
 
-Интерактивный login/CAPTCHA в контейнере требует видимую browser-среду либо импорт cookies из host-сессии. Headless-решения CAPTCHA нет.
+Первичный login, OTP и login-CAPTCHA в контейнере требуют видимую browser-среду либо импорт cookies из host-сессии. CAPTCHA, возникшая при отклике, решается headless через настроенную Vision-модель.
 
 ## 3. HH login, import, status и logout
 
@@ -205,9 +206,10 @@ Default search — `20 x 100`, но distinct cap остаётся `2000`. Pagina
 | `lease.renewal_margin_seconds` | `45` | 1..600 |
 | `application.resume_policy` | `best_resume_only` | `best_resume_only`, `per_resume` |
 | `application.cover_letter_mode` | `template` | `none`, `template`, `ai` |
-| `application.screening_mode` | `profile_grounded` | `off`, `profile_grounded` |
-| `application.form_mode` | `profile_grounded` | `off`, `profile_grounded` |
-| `application.captcha_mode` | `manual_handoff` | только `manual_handoff` |
+| `application.screening_mode` | `ai` | `off`, `profile_grounded`, `ai` |
+| `application.form_mode` | `ai` | `off`, `profile_grounded`, `ai` |
+| `application.captcha_mode` | `vision_then_manual` | `manual_handoff`, `vision_then_manual` |
+| `application.challenge_attempts` | `3` | 1..10 |
 | `application.challenge_expiry_hours` | `24` | 1..720 |
 | `browser.headless` | `true` | boolean; auth/handoff всё равно требует visible browser |
 | `browser.navigation_timeout_seconds` | `30` | 1..600 |
@@ -408,30 +410,34 @@ work-hunter --root . hh autopilot retry --account default --item-id ITEM_ID
 
 ## 9. Screening и формы
 
-`profile_grounded` заполняет только явно сохранённые факты: имя, город, телефон, email, citizenship/work permit, salary и подготовленное cover letter. Значения проверяются против field type/options.
+`profile_grounded` заполняет только явно сохранённые факты: имя, город, телефон, email, citizenship/work permit, salary и подготовленное cover letter. Значения проверяются против field type/options. `ai` сначала сохраняет все grounded-ответы, затем отвечает на оставшиеся поля.
 
-Автопилот не ищет ответы в произвольной подписи поля и не придумывает опыт. Результаты:
+Для вакансии с `has_test=true` автопилот повторяет нативный протокол текущего оригинала: читает `vacancyTests`, выбирает только существующий `candidateSolutions[].id`, формирует `task_*`/`task_*_text` и отправляет `/applicant/vacancy_response/popup` с browser cookies и XSRF. Случайного ответа, первого варианта или "середины" нет. Результаты:
 
 - неизвестное обязательное поле -> `missing_required_data`, vacancy пропускается;
-- обязательный test/assessment/file/неподдерживаемый тип -> `manual_assessment` challenge;
+- тест при `screening_mode: ai` -> автоматический ответ и отклик;
+- тест при `screening_mode: profile_grounded` -> `manual_assessment` challenge;
 - `screening_mode: off` -> `screening_disabled`;
 - `form_mode: off` -> `form_disabled`;
 - поддерживаемая форма с полными grounded answers может быть отправлена normal executor.
 
 Другие vacancies продолжают run, пока одна ждёт пользователя.
 
-## 10. CAPTCHA и assessment: только manual handoff
+Настройки `ai.tests` и `ai.forms` наследуют `ai.api_key`, `ai.base_url`, `ai.model` и `ai.backend`. В каждой секции отдельно переопределяются `model`, `temperature`, `max_tokens`, `max_retries`, `retry_base_seconds`, `timeout`, `system_prompt`, а также шаблоны `selection_prompt`/`text_prompt`. Для внешней ссылки в тесте настраивается `ai.tests.external_link_answer`.
 
-Автоматического CAPTCHA solver нет. Режим только один: `application.captcha_mode: manual_handoff`.
+## 10. Application CAPTCHA: Vision с manual fallback
+
+По умолчанию используется `application.captcha_mode: vision_then_manual`. Реализован тот же алгоритм, что в актуальном оригинале: screenshot элемента `account-captcha-picture`, Vision-запрос, ввод в `account-captcha-input`, Enter, сохранение cookies и повтор исходного отклика. Отличие в плюс: браузер стартует с сохранёнными cookies/profile, тогда как в оригинальном обработчике application-CAPTCHA на текущем main оставлен комментарий о незагруженных cookies.
 
 При CAPTCHA автопилот:
 
-1. не кликает CAPTCHA и не отправляет случайный ответ;
-2. создаёт один idempotent `manual_captcha` challenge с URL без query/fragment;
-3. освобождает обычную dispatch reservation;
-4. сохраняет HH cookies в приватной browser session;
-5. ждёт ручного решения в видимом Chromium;
-6. после `completed` возвращает item в `ready` или `reconciling` по исходной стадии.
+1. открывает runtime URL в том же account browser profile;
+2. делает screenshot CAPTCHA только в памяти и отправляет его Vision-модели;
+3. повторяет распознавание до `application.challenge_attempts`;
+4. сохраняет обновлённые HH cookies и повторяет исходный API/web отклик;
+5. только при исчерпании попыток создаёт `manual_captcha` challenge.
+
+`ai.captcha` наследует endpoint/key/model из `ai` и отдельно настраивает `backend`, `model`, `temperature`, `max_tokens`, `max_retries`, `retry_base_seconds`, `timeout`, `system_prompt`, `prompt`. Endpoint должен быть OpenAI-compatible и модель должна принимать `image_url`. Для полного отключения авторешения установите `application.captcha_mode: manual_handoff`.
 
 ```powershell
 work-hunter --root . hh autopilot challenges --account default
@@ -444,7 +450,7 @@ work-hunter --root . hh autopilot resolve-challenge --account default --challeng
 work-hunter --root . hh autopilot resolve-challenge --account default --challenge-id CHALLENGE_ID --action dismissed
 ```
 
-`dismissed`/expiry переводит обычный CAPTCHA/assessment item в `skipped`. Login CAPTCHA также остаётся ручной в browser profile. Cookie continuity не равна CAPTCHA solving.
+`dismissed`/expiry переводит оставшийся manual CAPTCHA/assessment item в `skipped`. Login CAPTCHA и OTP остаются ручными в browser profile — автоматический Vision-контур относится к CAPTCHA во время отклика, как в оригинале.
 
 ## 11. Ambiguous application и held quota
 
@@ -489,7 +495,7 @@ rg.exe -n "access_token|refresh_token|Authorization|cookie|proxy" .work-hunter\r
 
 Совпадение имени masked-поля или имени файла допустимо. Реальное secret value — нет.
 
-Browser cookies/profile хранятся в `.work-hunter/private/`. Core не делает CAPTCHA screenshot автоматически. Если сохраняете screenshot вручную, кладите его только под `private/`, не в reports и не в git.
+Browser cookies/profile хранятся в `.work-hunter/private/`. Application-CAPTCHA screenshot передаётся модели из памяти и на диск не пишется. Если сохраняете screenshot вручную, кладите его только под `private/`, не в reports и не в git.
 
 `retention.challenge_artifact_days` и `retention.event_days` валидируются как policy values. В текущем core нет отдельного automatic purge job. Эти значения не являются доказательством удаления; чистите старые artifacts/events вручную до parity-maintenance cleanup.
 
@@ -514,7 +520,7 @@ Journal использует стабильные outcome codes. Filter/ranking 
 | `ambiguous_remote_result`, `ambiguous_application`, `unresolved_ambiguity` | Не requeue; классифицировать challenge |
 | `vacancy_closed`, `forbidden`, `invalid_request` | Permanent skip; исправить target/policy, не retry вслепую |
 | `missing_required_data`, `screening_disabled`, `form_disabled`, `ai_unavailable` | Дополнить profile/config либо оставить skip |
-| `manual_assessment`, `manual_captcha`, `form_required` | Открыть challenges, выполнить ручной шаг |
+| `manual_assessment`, `manual_captcha`, `form_required` | Автоконтур выключен/исчерпан; открыть challenges и выполнить ручной шаг |
 | `hh_daily_limit`, `rate_limited` | Ждать account cooldown/reset |
 | `auth_expired`, `manual_auth` | `hh auth login/refresh`, затем `auth_restored` или `completed` |
 | `challenge_expired`, `challenge_dismissed` | Item завершён; ambiguity всё ещё требует явной классификации |
@@ -552,7 +558,7 @@ Deterministic gates проверяют локальный контракт, fake
 | fake HH POST и safe journal | `test_real_hh_client_creates_application_and_journals_only_safe_fields` |
 | accepted-then-disconnected restart без второго POST | `test_socket_close_after_accept_reconciles_without_a_second_post` |
 | account lease/concurrency | `test_account_lease_allows_one_owner_and_keeps_other_account_independent` |
-| grounded form и manual CAPTCHA cookie continuity | `tests/test_hh_autopilot_challenges.py` |
+| native vacancy test, Vision CAPTCHA и cookie continuation | `tests/test_hh_native_challenges.py` |
 | exact account scope и literal UI/API confirmation | `tests/test_hh_autopilot_web.py` |
 
 Fake-HH и local browser contracts **не доказывают текущий live HH**. Такое доказательство даёт только успешный opt-in named canary:

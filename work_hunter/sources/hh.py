@@ -472,6 +472,23 @@ class HHApplyClient:
         *,
         timeout_seconds: int | None = None,
     ) -> DispatchOutcome:
+        outcome, _runtime_location = self.apply_outcome_with_runtime_location(
+            vacancy_id,
+            resume_id,
+            message,
+            timeout_seconds=timeout_seconds,
+        )
+        return outcome
+
+    def apply_outcome_with_runtime_location(
+        self,
+        vacancy_id: str,
+        resume_id: str,
+        message: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> tuple[DispatchOutcome, str]:
+        """Return a classified result plus an in-memory-only challenge URL."""
         try:
             response = self.session.apply(
                 vacancy_id,
@@ -481,14 +498,20 @@ class HHApplyClient:
             )
             raw = _response_json_for_dispatch(response)
         except HHTransportError as exc:
-            return DispatchOutcome(
-                code=_dispatch_error_code(exc),
-                certainty=exc.delivery_certainty,
-                status_code=exc.status_code,
-                retry_after_seconds=_retry_after_seconds(exc.payload),
-                payload=_sanitized_dispatch_payload(exc.payload),
+            return (
+                DispatchOutcome(
+                    code=_dispatch_error_code(exc),
+                    certainty=exc.delivery_certainty,
+                    status_code=exc.status_code,
+                    retry_after_seconds=_retry_after_seconds(exc.payload),
+                    payload=_sanitized_dispatch_payload(exc.payload),
+                ),
+                "",
             )
-        return _dispatch_outcome_from_response(response, raw)
+        runtime_location = str(
+            getattr(response, "headers", {}).get("Location", "") or ""
+        )
+        return _dispatch_outcome_from_response(response, raw), runtime_location
 
     def submit_vacancy_test(
         self,

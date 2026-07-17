@@ -149,7 +149,7 @@ Real job actions must be treated as sensitive.
 - Real HH apply/reply/cleanup requires explicit user intent and an auditable path.
 - MCP must not silently send real applications.
 - Never print access tokens, refresh tokens, cookies, client secrets, Telegram bot tokens, SMTP passwords, or full auth headers.
-- Unknown forms, tests, captcha/challenge states, duplicate companies, blacklist hits, and suspicious failures should block or escalate.
+- HH vacancy tests, supported forms, and application CAPTCHA resolve automatically when AI/browser settings are present; exhausted or unknown challenge states escalate per vacancy.
 
 Relevant tests:
 
