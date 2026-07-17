@@ -7,6 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -337,6 +338,24 @@ class ChallengeRecord:
     @property
     def metadata_json(self) -> dict[str, Any]:
         return _json_copy(self.metadata)
+
+
+@dataclass(frozen=True)
+class NotificationDeliveryRecord:
+    id: int
+    event_key: str
+    sink_key: str
+    event_type: str
+    account_id: str
+    reference_id: str
+    payload: dict[str, Any]
+    status: str
+    attempt_count: int
+    next_attempt_at: str
+    last_error: str
+    created_at: str
+    sent_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -6730,6 +6749,351 @@ class AutopilotRepository:
         ).fetchall()
         return tuple(self._challenge_from_row(row) for row in rows)
 
+    def prune_retention(
+        self,
+        *,
+        event_days: int,
+        challenge_artifact_days: int,
+        artifact_root: str | Path | None,
+        now: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        """Delete expired journal rows and closed challenge screenshot files."""
+        event_days = _integer(event_days, field="event_days", minimum=1)
+        challenge_artifact_days = _integer(
+            challenge_artifact_days,
+            field="challenge_artifact_days",
+            minimum=1,
+        )
+        instant = _instant(now, field="now")
+        event_cutoff = instant - timedelta(days=event_days)
+        artifact_cutoff = instant - timedelta(days=challenge_artifact_days)
+        with self.immediate():
+            cursor = self.conn.execute(
+                """
+                DELETE FROM hh_autopilot_events
+                WHERE created_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM hh_autopilot_challenges AS challenge
+                    WHERE challenge.item_id = hh_autopilot_events.item_id
+                      AND challenge.status IN ('open','in_progress')
+                  )
+                """,
+                (event_cutoff.isoformat(),),
+            )
+            events_deleted = int(cursor.rowcount)
+            artifact_rows = self.conn.execute(
+                """
+                SELECT id, screenshot_path
+                FROM hh_autopilot_challenges
+                WHERE screenshot_path <> ''
+                  AND status NOT IN ('open','in_progress')
+                  AND created_at < ?
+                ORDER BY id
+                """,
+                (artifact_cutoff.isoformat(),),
+            ).fetchall()
+
+        artifacts_deleted = 0
+        cleared: list[tuple[int, str]] = []
+        errors: list[dict[str, Any]] = []
+        root = None if artifact_root is None else Path(artifact_root).resolve()
+        for row in artifact_rows:
+            challenge_id = int(row["id"])
+            stored_path = str(row["screenshot_path"])
+            if root is None:
+                errors.append(
+                    {"challenge_id": challenge_id, "error": "artifact_root_unavailable"}
+                )
+                continue
+            raw_path = Path(stored_path)
+            candidate = (
+                raw_path if raw_path.is_absolute() else root / raw_path
+            ).resolve()
+            if candidate == root or not candidate.is_relative_to(root):
+                errors.append(
+                    {"challenge_id": challenge_id, "error": "artifact_path_outside_root"}
+                )
+                continue
+            try:
+                if candidate.is_symlink() or candidate.is_file():
+                    candidate.unlink(missing_ok=True)
+                    artifacts_deleted += 1
+                elif candidate.exists():
+                    errors.append(
+                        {"challenge_id": challenge_id, "error": "artifact_not_a_file"}
+                    )
+                    continue
+                cleared.append((challenge_id, stored_path))
+            except OSError as exc:
+                errors.append(
+                    {"challenge_id": challenge_id, "error": type(exc).__name__}
+                )
+
+        if cleared:
+            with self.immediate():
+                self.conn.executemany(
+                    """
+                    UPDATE hh_autopilot_challenges
+                    SET screenshot_path = ''
+                    WHERE id = ? AND screenshot_path = ?
+                      AND status NOT IN ('open','in_progress')
+                    """,
+                    cleared,
+                )
+        return {
+            "events_deleted": events_deleted,
+            "artifacts_deleted": artifacts_deleted,
+            "artifact_paths_cleared": len(cleared),
+            "artifact_errors": errors,
+        }
+
+    def enqueue_notification_candidates(
+        self,
+        sink_keys: Sequence[str],
+        *,
+        challenge_enabled: bool,
+        run_failure_enabled: bool,
+        now: datetime | str | None = None,
+        limit: int = 100,
+    ) -> int:
+        if type(challenge_enabled) is not bool or type(run_failure_enabled) is not bool:
+            raise TypeError("notification flags must be booleans")
+        if isinstance(sink_keys, (str, bytes)) or not isinstance(sink_keys, Sequence):
+            raise TypeError("sink_keys must be a sequence of strings")
+        limit = _integer(limit, field="limit", minimum=1)
+        if limit > 1000:
+            raise ValueError("limit must not exceed 1000")
+        normalized_sinks = tuple(
+            _required_text(value, field="sink_key") for value in sink_keys
+        )
+        if len(set(normalized_sinks)) != len(normalized_sinks):
+            raise ValueError("sink keys must be unique")
+        if not normalized_sinks:
+            return 0
+        instant = _instant(now, field="now")
+        candidates: list[tuple[str, str, str, str, dict[str, Any]]] = []
+        sink_placeholders = ",".join("?" for _ in normalized_sinks)
+        if challenge_enabled:
+            rows = self.conn.execute(
+                f"""
+                SELECT challenge.id, challenge.challenge_type,
+                       challenge.account_profile_id, challenge.item_id,
+                       challenge.status, challenge.expires_at,
+                       challenge.sanitized_url
+                FROM hh_autopilot_challenges AS challenge
+                WHERE challenge.status IN ('open','in_progress')
+                  AND (
+                    SELECT COUNT(*)
+                    FROM hh_autopilot_notification_deliveries AS delivery
+                    WHERE delivery.event_key = 'challenge:' || challenge.id
+                      AND delivery.sink_key IN ({sink_placeholders})
+                  ) < ?
+                ORDER BY challenge.id
+                LIMIT ?
+                """,
+                (*normalized_sinks, len(normalized_sinks), limit),
+            ).fetchall()
+            for row in rows:
+                challenge_id = int(row["id"])
+                account_id = str(row["account_profile_id"])
+                candidates.append(
+                    (
+                        f"challenge:{challenge_id}",
+                        "challenge",
+                        account_id,
+                        str(challenge_id),
+                        {
+                            "account_id": account_id,
+                            "challenge_id": challenge_id,
+                            "challenge_type": str(row["challenge_type"]),
+                            "item_id": (
+                                None if row["item_id"] is None else int(row["item_id"])
+                            ),
+                            "status": str(row["status"]),
+                            "expires_at": str(row["expires_at"]),
+                            "url": str(row["sanitized_url"]),
+                        },
+                    )
+                )
+        if run_failure_enabled:
+            rows = self.conn.execute(
+                f"""
+                SELECT run.id, run.account_profile_id, run.trigger,
+                       run.status, run.error
+                FROM hh_autopilot_runs AS run
+                WHERE run.status = 'failed'
+                  AND (
+                    SELECT COUNT(*)
+                    FROM hh_autopilot_notification_deliveries AS delivery
+                    WHERE delivery.event_key = 'run_failure:' || run.id
+                      AND delivery.sink_key IN ({sink_placeholders})
+                  ) < ?
+                ORDER BY run.id
+                LIMIT ?
+                """,
+                (*normalized_sinks, len(normalized_sinks), limit),
+            ).fetchall()
+            for row in rows:
+                run_id = int(row["id"])
+                account_id = str(row["account_profile_id"])
+                try:
+                    error = sanitize_text(
+                        str(row["error"]),
+                        field="run failure",
+                        maximum=200,
+                        allow_empty=True,
+                        markup="strip",
+                        sensitive="redact",
+                        overflow="truncate",
+                    )
+                except (TypeError, ValueError):
+                    error = "redacted"
+                candidates.append(
+                    (
+                        f"run_failure:{run_id}",
+                        "run_failure",
+                        account_id,
+                        str(run_id),
+                        {
+                            "account_id": account_id,
+                            "run_id": run_id,
+                            "trigger": str(row["trigger"]),
+                            "status": str(row["status"]),
+                            "error": error,
+                        },
+                    )
+                )
+        inserted = 0
+        with self.immediate():
+            for event_key, event_type, account_id, reference_id, payload in candidates:
+                payload_json = _json_dumps(payload, field="notification payload")
+                for sink_key in normalized_sinks:
+                    cursor = self.conn.execute(
+                        """
+                        INSERT INTO hh_autopilot_notification_deliveries (
+                            event_key, sink_key, event_type, account_profile_id,
+                            reference_id, payload_json, status, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                        ON CONFLICT(event_key, sink_key) DO NOTHING
+                        """,
+                        (
+                            event_key,
+                            sink_key,
+                            event_type,
+                            account_id,
+                            reference_id,
+                            payload_json,
+                            instant.isoformat(),
+                            instant.isoformat(),
+                        ),
+                    )
+                    inserted += int(cursor.rowcount)
+        return inserted
+
+    def due_notification_deliveries(
+        self,
+        sink_keys: Sequence[str],
+        *,
+        now: datetime | str | None = None,
+        limit: int = 100,
+    ) -> tuple[NotificationDeliveryRecord, ...]:
+        instant = _instant(now, field="now")
+        limit = _integer(limit, field="limit", minimum=1)
+        if limit > 1000:
+            raise ValueError("limit must not exceed 1000")
+        if isinstance(sink_keys, (str, bytes)) or not isinstance(sink_keys, Sequence):
+            raise TypeError("sink_keys must be a sequence of strings")
+        normalized_sinks = tuple(
+            _required_text(value, field="sink_key") for value in sink_keys
+        )
+        if len(set(normalized_sinks)) != len(normalized_sinks):
+            raise ValueError("sink keys must be unique")
+        if not normalized_sinks:
+            return ()
+        placeholders = ",".join("?" for _ in normalized_sinks)
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM hh_autopilot_notification_deliveries
+            WHERE status = 'pending'
+              AND sink_key IN ({placeholders})
+              AND (next_attempt_at = '' OR next_attempt_at <= ?)
+            ORDER BY id
+            LIMIT ?
+            """,
+            (*normalized_sinks, instant.isoformat(), limit),
+        ).fetchall()
+        return tuple(self._notification_delivery_from_row(row) for row in rows)
+
+    def mark_notification_sent(
+        self,
+        delivery_id: int,
+        *,
+        now: datetime | str | None = None,
+    ) -> NotificationDeliveryRecord:
+        delivery_id = _integer(delivery_id, field="delivery_id", minimum=1)
+        instant = _instant(now, field="now")
+        with self.immediate():
+            self.conn.execute(
+                """
+                UPDATE hh_autopilot_notification_deliveries
+                SET status = 'sent', sent_at = ?, updated_at = ?, last_error = ''
+                WHERE id = ? AND status = 'pending'
+                """,
+                (instant.isoformat(), instant.isoformat(), delivery_id),
+            )
+            row = self.conn.execute(
+                "SELECT * FROM hh_autopilot_notification_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"notification delivery {delivery_id} does not exist")
+            return self._notification_delivery_from_row(row)
+
+    def mark_notification_failed(
+        self,
+        delivery_id: int,
+        error: str,
+        *,
+        now: datetime | str | None = None,
+    ) -> NotificationDeliveryRecord:
+        delivery_id = _integer(delivery_id, field="delivery_id", minimum=1)
+        error = _optional_text(error, field="notification error", maximum=200)
+        instant = _instant(now, field="now")
+        with self.immediate():
+            row = self.conn.execute(
+                "SELECT * FROM hh_autopilot_notification_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"notification delivery {delivery_id} does not exist")
+            current = self._notification_delivery_from_row(row)
+            if current.status == "sent":
+                return current
+            attempt_count = current.attempt_count + 1
+            delay_seconds = min(3600, 60 * (2 ** min(attempt_count - 1, 6)))
+            next_attempt = instant + timedelta(seconds=delay_seconds)
+            self.conn.execute(
+                """
+                UPDATE hh_autopilot_notification_deliveries
+                SET attempt_count = ?, next_attempt_at = ?, last_error = ?,
+                    updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (
+                    attempt_count,
+                    next_attempt.isoformat(),
+                    error,
+                    instant.isoformat(),
+                    delivery_id,
+                ),
+            )
+            updated = self.conn.execute(
+                "SELECT * FROM hh_autopilot_notification_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._notification_delivery_from_row(updated)
+
     def dispatch_reservation(self, item_id: int) -> QuotaReservationRecord | None:
         """Return the reservation attached to an item's latest dispatch attempt."""
         item_id = _integer(item_id, field="item_id", minimum=1)
@@ -8737,6 +9101,36 @@ class AutopilotRepository:
         )
 
     @staticmethod
+    def _notification_delivery_from_row(
+        row: sqlite3.Row,
+    ) -> NotificationDeliveryRecord:
+        event_type = str(row["event_type"])
+        if event_type not in {"challenge", "run_failure"}:
+            raise ValueError(f"invalid notification event type: {event_type}")
+        status = str(row["status"])
+        if status not in {"pending", "sent"}:
+            raise ValueError(f"invalid notification delivery status: {status}")
+        return NotificationDeliveryRecord(
+            id=int(row["id"]),
+            event_key=str(row["event_key"]),
+            sink_key=str(row["sink_key"]),
+            event_type=event_type,
+            account_id=str(row["account_profile_id"]),
+            reference_id=str(row["reference_id"]),
+            payload=_json_loads(row["payload_json"], field="payload_json"),
+            status=status,
+            attempt_count=_persisted_integer(
+                row["attempt_count"],
+                field="notification attempt_count",
+            ),
+            next_attempt_at=str(row["next_attempt_at"]),
+            last_error=str(row["last_error"]),
+            created_at=str(row["created_at"]),
+            sent_at=str(row["sent_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
     def _grant_from_row(row: sqlite3.Row) -> GrantRecord:
         scope = str(row["scope"])
         if scope != APPLICATION_SCOPE:
@@ -8881,6 +9275,7 @@ __all__ = [
     "LiveAuthorizationSnapshot",
     "KillSwitchActive",
     "LostLease",
+    "NotificationDeliveryRecord",
     "QuotaExceeded",
     "QuotaReservationRecord",
     "RunRecord",

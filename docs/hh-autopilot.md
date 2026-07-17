@@ -510,7 +510,9 @@ rg.exe -n "access_token|refresh_token|Authorization|cookie|proxy" .work-hunter\r
 
 Browser cookies/profile хранятся в `.work-hunter/private/`. Application-CAPTCHA screenshot передаётся модели из памяти и на диск не пишется. Если сохраняете screenshot вручную, кладите его только под `private/`, не в reports и не в git.
 
-`retention.challenge_artifact_days` и `retention.event_days` валидируются как policy values. В текущем core нет отдельного automatic purge job. Эти значения не являются доказательством удаления; чистите старые artifacts/events вручную до parity-maintenance cleanup.
+Каждый scheduler tick применяет `retention.event_days` к журналу и `retention.challenge_artifact_days` к файлам закрытых challenge. Events и artifacts, связанные с `open`/`in_progress` challenge, не удаляются. Автоматическая очистка работает только внутри `.work-hunter/private/hh-challenges/`; посторонние пути scheduler не трогает.
+
+При `notifications.challenge=true` и `notifications.run_failure=true` события пишутся в `.work-hunter/reports/hh-autopilot-notifications.jsonl`. Если включён `hh_agent.telegram` и заданы `bot_token` плюс `allowed_user_ids`, те же события отправляются каждому разрешённому Telegram user ID. Доставка хранится в SQLite: успешный канал не дублируется, упавший канал повторяется отдельно с exponential backoff и не меняет состояние отклика.
 
 Для backup сначала остановите scheduled task/UI/runner, затем копируйте весь private state:
 

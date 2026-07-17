@@ -1768,6 +1768,11 @@ class _ConfiguredHHAutopilotEngine:
 
 
 def build_hh_autopilot_components(service: "WorkHunter") -> HHAutopilotComponents:
+    from .config import data_dir
+    from .hh_agent.notifications import (
+        FileNotificationSink,
+        TelegramNotificationSink,
+    )
     from .hh_autopilot.challenges import HHChallengeHandler
     from .hh_autopilot.config import parse_autopilot_settings
     from .hh_autopilot.reconcile import HHApplicationReconciler, HHRecoverySweep
@@ -1788,6 +1793,28 @@ def build_hh_autopilot_components(service: "WorkHunter") -> HHAutopilotComponent
         settings_provider=settings_provider,
         owner_token_factory=lambda: f"work-hunter-recovery:{uuid.uuid4().hex}",
     )
+    runtime_dir = data_dir(service.root)
+    notification_sinks: dict[str, Any] = {
+        "file:hh-autopilot": FileNotificationSink(
+            runtime_dir / "reports" / "hh-autopilot-notifications.jsonl"
+        )
+    }
+    telegram = (service.config.get("hh_agent") or {}).get("telegram") or {}
+    bot_token = str(telegram.get("bot_token") or "").strip()
+    if bool(telegram.get("enabled")) and bot_token:
+        chat_ids = sorted(
+            {
+                str(value).strip()
+                for value in telegram.get("allowed_user_ids") or []
+                if str(value).strip()
+            }
+        )
+        for chat_id in chat_ids:
+            key_hash = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:12]
+            notification_sinks[f"telegram:{key_hash}"] = TelegramNotificationSink(
+                bot_token=bot_token,
+                chat_id=chat_id,
+            )
     scheduler = HHAutopilotScheduler(
         repository=repository,
         config_loader=settings_provider,
@@ -1803,6 +1830,8 @@ def build_hh_autopilot_components(service: "WorkHunter") -> HHAutopilotComponent
                 f"work-hunter-challenge-expiry:{uuid.uuid4().hex}"
             ),
         ),
+        retention_root=runtime_dir / "private" / "hh-challenges",
+        notification_sinks=notification_sinks,
     )
     return HHAutopilotComponents(repository, engine, scheduler, recovery)
 
