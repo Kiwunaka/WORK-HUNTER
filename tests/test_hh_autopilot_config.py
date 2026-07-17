@@ -451,6 +451,46 @@ def test_runtime_preset_accepts_dotted_hh_industry_identifier() -> None:
     assert expanded["default"][0]["preset"]["industry"] == ["7.540"]
 
 
+def test_runtime_preset_preserves_original_hh_geo_and_label_filters() -> None:
+    config = default_config()
+    _autopilot(config)["accounts"][0]["resume_queries"] = [
+        {"resume_id": "published:*", "preset_names": ["backend"]}
+    ]
+    context = _runtime_context(config)
+    context.config["hh_campaign_presets"]["backend"].update(
+        {
+            "metro": ["1.9"],
+            "label": ["With_Address"],
+            "top_lat": 56,
+            "bottom_lat": 55.5,
+            "left_lng": 37.2,
+            "right_lng": 38,
+            "sort_point_lat": 55.75,
+            "sort_point_lng": 37.62,
+        }
+    )
+
+    expanded = validate_runtime_dependencies(
+        parse_autopilot_settings(config), context
+    )
+
+    assert expanded["default"][0]["preset"] == {
+        "text": "python",
+        "area": ["1"],
+        "metro": ["1.9"],
+        "schedule": "remote",
+        "employment": ["full"],
+        "experience": "between1and3",
+        "label": ["with_address"],
+        "top_lat": 56.0,
+        "bottom_lat": 55.5,
+        "left_lng": 37.2,
+        "right_lng": 38.0,
+        "sort_point_lat": 55.75,
+        "sort_point_lng": 37.62,
+    }
+
+
 def test_validate_run_modes_enforce_their_authorization_boundaries() -> None:
     disabled = parse_autopilot_settings(default_config())
     with pytest.raises(AutopilotConfigError, match="enabled.*grant"):

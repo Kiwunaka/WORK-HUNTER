@@ -238,7 +238,8 @@ Preset хранится рядом, в root-объекте `hh_campaign_presets`
 |---|---|
 | `text` | строка 1..200 |
 | `area`, `professional_role`, `employer_id`, `excluded_employer_id` | 1..500 HH numeric ID strings |
-| `industry` | 1..500 composite HH IDs, например `7.540` |
+| `metro`, `industry` | 1..500 composite HH IDs, например `1.9` или `7.540` |
+| `label` | 1..100 HH vacancy label strings |
 | `schedule` | один current HH dictionary value |
 | `employment` | 1..100 current HH dictionary values |
 | `experience` | один current HH dictionary value |
@@ -249,6 +250,8 @@ Preset хранится рядом, в root-объекте `hh_campaign_presets`
 | `order_by` | `publication_time`, `salary_desc`, `salary_asc`, `relevance`, `distance` |
 | `period` | 1..30 days |
 | `currency` | три ASCII letter, uppercase |
+| `top_lat`, `bottom_lat`, `sort_point_lat` | latitude от -90 до 90 |
+| `left_lng`, `right_lng`, `sort_point_lng` | longitude от -180 до 180 |
 
 ### Пример: два аккаунта, три резюме, два preset
 

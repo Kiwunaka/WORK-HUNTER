@@ -256,6 +256,7 @@ _HH_SEARCH_PRESET_KEYS = frozenset(
     {
         "text",
         "area",
+        "metro",
         "professional_role",
         "industry",
         "salary",
@@ -267,12 +268,19 @@ _HH_SEARCH_PRESET_KEYS = frozenset(
         "search_field",
         "employer_id",
         "excluded_employer_id",
+        "label",
         "only_with_salary",
         "order_by",
         "period",
         "currency",
         "no_magic",
         "premium",
+        "top_lat",
+        "bottom_lat",
+        "left_lng",
+        "right_lng",
+        "sort_point_lat",
+        "sort_point_lng",
     }
 )
 _HH_SEARCH_FIELDS = frozenset({"name", "company_name", "description"})
@@ -1176,6 +1184,14 @@ def _validate_hh_search_preset(
                 high=maximum,
                 normalize=_hh_id,
             )
+    if "metro" in value:
+        normalized["metro"] = _normalized_array(
+            f"{path}.metro",
+            value["metro"],
+            low=1,
+            high=500,
+            normalize=lambda item_name, item: _composite_hh_id(item_name, item),
+        )
     if "industry" in value:
         normalized["industry"] = _normalized_array(
             f"{path}.industry",
@@ -1183,6 +1199,14 @@ def _validate_hh_search_preset(
             low=1,
             high=500,
             normalize=lambda item_name, item: _composite_hh_id(item_name, item),
+        )
+    if "label" in value:
+        normalized["label"] = _normalized_array(
+            f"{path}.label",
+            value["label"],
+            low=1,
+            high=100,
+            normalize=lambda item_name, item: _text(item_name, item, casefold=True),
         )
     schedules = _dictionary_values(context, "schedules", "schedule")
     employment = _dictionary_values(
@@ -1250,6 +1274,19 @@ def _validate_hh_search_preset(
         if not re.fullmatch(r"[A-Za-z]{3}", currency):
             raise AutopilotConfigError(f"{path}.currency must be a three-letter code")
         normalized["currency"] = currency.upper()
+    coordinate_ranges = {
+        "top_lat": (-90.0, 90.0),
+        "bottom_lat": (-90.0, 90.0),
+        "left_lng": (-180.0, 180.0),
+        "right_lng": (-180.0, 180.0),
+        "sort_point_lat": (-90.0, 90.0),
+        "sort_point_lng": (-180.0, 180.0),
+    }
+    for field_name, (low, high) in coordinate_ranges.items():
+        if field_name in value:
+            normalized[field_name] = _number(
+                f"{path}.{field_name}", value[field_name], low, high
+            )
     return normalized
 
 
@@ -1478,12 +1515,14 @@ _UNORDERED_ARRAY_KEYS = frozenset(
         "skills",
         "professional_roles",
         "area",
+        "metro",
         "professional_role",
         "industry",
         "employment",
         "search_field",
         "employer_id",
         "excluded_employer_id",
+        "label",
         "no_proxy",
     }
 )
@@ -1507,6 +1546,7 @@ _CASEFOLD_ARRAY_KEYS = frozenset(
         "professional_roles",
         "employment",
         "search_field",
+        "label",
     }
 )
 _CASEFOLD_VALUE_KEYS = frozenset(
@@ -1530,7 +1570,7 @@ _HH_ID_ARRAY_KEYS = frozenset(
         "excluded_employer_id",
     }
 )
-_COMPOSITE_HH_ID_ARRAY_KEYS = frozenset({"industry"})
+_COMPOSITE_HH_ID_ARRAY_KEYS = frozenset({"industry", "metro"})
 _NORMALIZED_MAPPING_KEY_PARENTS = frozenset(
     {"presets", "prompt_versions", "secret_versions"}
 )
