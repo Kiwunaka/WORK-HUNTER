@@ -859,12 +859,19 @@ def test_web_actions_build_xsrf_headers():
     actions = HHWebActions(user_agent="ua", xsrf_token="xsrf")
 
     request = actions.response_popup_request(vacancy_id="vac-1", resume_id="res-1", message="Hi")
+    hide_request = actions.hide_negotiation_chat_request("neg-1")
 
     assert request.method == "POST"
     assert request.url.endswith("/applicant/vacancy_response/popup")
     assert request.headers["X-Xsrftoken"] == "xsrf"
     assert request.headers["User-Agent"] == "ua"
     assert request.data["vacancy_id"] == "vac-1"
+    assert hide_request.url.endswith("/applicant/negotiations/trash")
+    assert hide_request.data == {
+        "topic": "neg-1",
+        "query": "?hhtmFrom=main&hhtmFromLabel=header",
+        "substate": "HIDE",
+    }
 
 
 @pytest.mark.parametrize(

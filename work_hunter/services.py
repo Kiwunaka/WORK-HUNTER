@@ -5002,6 +5002,7 @@ class WorkHunter:
         max_pages: int = 25,
         blacklist: bool = False,
         block_ats: bool = False,
+        delete_chat: bool = False,
         ats_max_response_minutes: int = 16,
         decline_message: str = "",
         now: str | None = None,
@@ -5032,6 +5033,16 @@ class WorkHunter:
                     message=decline_message,
                 )
                 result = {**action, "cancel_result": cancel_result}
+                if delete_chat:
+                    try:
+                        result["chat_hide_result"] = self._hide_hh_negotiation_chat(
+                            str(action["negotiation_id"])
+                        )
+                    except Exception as exc:
+                        result["chat_hide_result"] = {
+                            "status": "error",
+                            "error": str(exc),
+                        }
                 employer_id = str(action.get("employer_id") or "")
                 should_blacklist = bool(
                     blacklist or (block_ats and action.get("ats_detected"))
@@ -5074,6 +5085,47 @@ class WorkHunter:
             "count": len(completed),
             "completed": completed,
             "errors": errors,
+        }
+
+    def _hide_hh_negotiation_chat(self, negotiation_id: str) -> dict[str, Any]:
+        import requests
+
+        from .hh_transport import HHWebActions
+
+        account_id = self._hh_account_id()
+        browser_session = self._hh_browser_authorizer().session(account_id)
+        browser_session.load()
+        if not browser_session.cookies:
+            raise RuntimeError("HH browser cookies are required to hide a chat")
+        if not browser_session.xsrf_token:
+            raise RuntimeError("HH browser XSRF token is required to hide a chat")
+
+        client_config = self._hh_client_for_account(account_id).config
+        request = HHWebActions(
+            base_url=str(client_config.get("web_base_url") or "https://hh.ru"),
+            user_agent=str(client_config.get("web_user_agent") or ""),
+            xsrf_token=browser_session.xsrf_token,
+        ).hide_negotiation_chat_request(negotiation_id)
+        http = requests.Session()
+        for cookie in browser_session.cookies:
+            http.cookies.set(
+                str(cookie.get("name") or ""),
+                str(cookie.get("value") or ""),
+                domain=str(cookie.get("domain") or ".hh.ru"),
+                path=str(cookie.get("path") or "/"),
+            )
+        response = http.request(
+            request.method,
+            request.url,
+            headers=request.headers,
+            data=request.data,
+            timeout=float(client_config.get("timeout") or 30),
+        )
+        response.raise_for_status()
+        return {
+            "status": "hidden",
+            "status_code": int(response.status_code),
+            "negotiation_id": str(negotiation_id),
         }
 
     def _save_hh_negotiation_payload(self, payload: dict[str, Any]) -> None:

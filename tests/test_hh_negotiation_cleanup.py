@@ -89,11 +89,19 @@ def test_hh_negotiation_cleanup_confirm_cancels_and_blacklists(monkeypatch, tmp_
     FakeHHCleanupClient.blacklisted = []
     app = WorkHunter(root=tmp_path)
     app.config["sources"]["hh"]["access_token"] = "token"
+    hidden: list[str] = []
+    monkeypatch.setattr(
+        app,
+        "_hide_hh_negotiation_chat",
+        lambda negotiation_id: hidden.append(negotiation_id)
+        or {"status": "hidden"},
+    )
 
     result = app.confirm_hh_negotiation_cleanup(
         status="active",
         max_age_days=7,
         blacklist=True,
+        delete_chat=True,
         decline_message="Спасибо, не актуально",
         now="2026-06-09T00:00:00+03:00",
         confirm=True,
@@ -106,6 +114,7 @@ def test_hh_negotiation_cleanup_confirm_cancels_and_blacklists(monkeypatch, tmp_
         ("neg-old", "Спасибо, не актуально"),
     ]
     assert FakeHHCleanupClient.blacklisted == ["emp-1", "emp-2"]
+    assert hidden == ["neg-discard", "neg-old"]
     events = app.storage.list_hh_cleanup_events()
     assert [(event["negotiation_id"], event["status"]) for event in events] == [
         ("neg-discard", "completed"),
@@ -113,6 +122,7 @@ def test_hh_negotiation_cleanup_confirm_cancels_and_blacklists(monkeypatch, tmp_
     ]
     assert events[0]["raw_result"]["cancel_result"]["status"] == "cancelled"
     assert events[0]["raw_result"]["blacklist_result"]["status"] == "blacklisted"
+    assert events[0]["raw_result"]["chat_hide_result"]["status"] == "hidden"
 
 
 def test_hh_negotiation_cleanup_cli_dry_run(monkeypatch, tmp_path, capsys):

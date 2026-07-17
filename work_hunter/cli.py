@@ -190,6 +190,7 @@ def main(argv: list[str] | None = None) -> None:
     hh_negotiation_cleanup.add_argument("--decline-message", default="")
     hh_negotiation_cleanup.add_argument("--blacklist", action="store_true")
     hh_negotiation_cleanup.add_argument("--block-ats", action="store_true")
+    hh_negotiation_cleanup.add_argument("--delete-chat", action="store_true")
     hh_negotiation_cleanup.add_argument("--ats-max-response-minutes", type=int, default=16)
     hh_negotiation_cleanup.add_argument("--confirm", action="store_true")
     hh_negotiation_cleanup.add_argument("--now")
@@ -978,6 +979,7 @@ def main(argv: list[str] | None = None) -> None:
                     max_pages=args.max_pages,
                     blacklist=args.blacklist,
                     block_ats=args.block_ats,
+                    delete_chat=args.delete_chat,
                     ats_max_response_minutes=args.ats_max_response_minutes,
                     decline_message=args.decline_message,
                     now=args.now,

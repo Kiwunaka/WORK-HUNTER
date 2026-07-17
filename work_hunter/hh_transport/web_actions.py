@@ -44,6 +44,33 @@ class HHWebActions:
             data={"with_decline_message": message},
         )
 
+    def hide_negotiation_chat_request(self, negotiation_id: str) -> WebActionRequest:
+        topic = str(negotiation_id or "").strip()
+        if not topic or "\0" in topic:
+            raise ValueError("negotiation_id is required")
+        headers = self.headers()
+        headers.update(
+            {
+                "X-Hhtmfrom": "main",
+                "X-Hhtmsource": "negotiation_list",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": (
+                    f"{self.base_url}/applicant/negotiations"
+                    "?hhtmFrom=main&hhtmFromLabel=header"
+                ),
+            }
+        )
+        return WebActionRequest(
+            method="POST",
+            url=f"{self.base_url}/applicant/negotiations/trash",
+            headers=headers,
+            data={
+                "topic": topic,
+                "query": "?hhtmFrom=main&hhtmFromLabel=header",
+                "substate": "HIDE",
+            },
+        )
+
     def headers(self) -> dict[str, str]:
         headers = {
             "Accept": "application/json",

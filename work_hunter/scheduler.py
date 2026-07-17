@@ -208,6 +208,7 @@ class SafeTaskRunner:
                         **params,
                         blacklist=bool(task.get("blacklist", False)),
                         block_ats=bool(task.get("block_ats", False)),
+                        delete_chat=bool(task.get("delete_chat", False)),
                         decline_message=str(task.get("decline_message") or ""),
                         confirm=True,
                     )

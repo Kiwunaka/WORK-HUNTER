@@ -36,6 +36,7 @@
       "max_age_days": 60,
       "blacklist": false,
       "block_ats": false,
+      "delete_chat": false,
       "ats_max_response_minutes": 16,
       "decline_message": ""
     }
