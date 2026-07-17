@@ -3488,7 +3488,7 @@ class WorkHunter:
                 self.config.get("hh_account_profile") or "default"
             ).strip().casefold()
             hh_config = self.hh_config()
-            client = self._hh_client()
+            client = None
         else:
             account_id = self._hh_account_id(account)
             client = self._hh_client_for_account(account_id)
@@ -3514,6 +3514,8 @@ class WorkHunter:
                 "actions": actions,
             }
 
+        if client is None:
+            client = self._hh_client()
         try:
             me_payload = client.whoami()
             me = me_payload.get("me") if me_payload.get("status") == "ok" else me_payload
