@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from .config import AutopilotSettings
@@ -10,6 +11,7 @@ from .repository import CooldownActive, LostLease, RepositoryAuthorizationDenied
 from .types import (
     AutopilotState,
     ExecutionResult,
+    FilterDecision,
     LiteralConfirmation,
     LiveAuthorization,
     NormalizedVacancy,
@@ -102,6 +104,7 @@ class HHAutopilot:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleeper: Callable[[float], None] = lambda _seconds: None,
         delay_source: Callable[[float, float], float] = lambda low, _high: low,
+        retry_random_source: Callable[[], float] = random.random,
     ) -> None:
         callables = {
             "context_provider": context_provider,
@@ -110,6 +113,7 @@ class HHAutopilot:
             "clock": clock,
             "sleeper": sleeper,
             "delay_source": delay_source,
+            "retry_random_source": retry_random_source,
         }
         for name, value in callables.items():
             if not callable(value):
@@ -128,6 +132,7 @@ class HHAutopilot:
         self.clock = clock
         self.sleeper = sleeper
         self.delay_source = delay_source
+        self.retry_random_source = retry_random_source
 
     def run(self, request: RunRequest) -> RunReport:
         if not isinstance(request, RunRequest):
@@ -270,12 +275,18 @@ class HHAutopilot:
             now=now,
             limit=context.settings.limits.per_run_success,
         )
+        eligibility_items = []
+        previous_eligibility_decisions = {}
         for item in due:
             target = {
                 RetryStage.ELIGIBILITY: AutopilotState.ELIGIBLE,
                 RetryStage.APPLICATION: AutopilotState.READY,
                 RetryStage.RECONCILIATION: AutopilotState.RECONCILING,
             }[item.retry_stage]
+            if item.retry_stage is RetryStage.ELIGIBILITY:
+                previous_eligibility_decisions[item.id] = (
+                    self.repository.item_ranking_decision(item.id)
+                )
             if hasattr(self.repository, "activate_due_retry"):
                 activated = self.repository.activate_due_retry(
                     item.id,
@@ -303,6 +314,174 @@ class HHAutopilot:
                     lease,
                     now=now,
                 )
+            elif activated.state is AutopilotState.ELIGIBLE:
+                eligibility_items.append(activated)
+        if eligibility_items:
+            self._retry_eligibility(
+                eligibility_items,
+                context,
+                run,
+                lease,
+                counters,
+                now=now,
+                previous_decisions=previous_eligibility_decisions,
+            )
+
+    def _retry_eligibility(
+        self,
+        items,
+        context,
+        run,
+        lease,
+        counters: _Counters,
+        *,
+        now: datetime,
+        previous_decisions,
+    ) -> None:
+        touched: set[str] = set()
+        for item in items:
+            touched.add(item.vacancy_id)
+            mapping = next(
+                (
+                    value
+                    for value in context.mappings
+                    if value.resume_id.strip().casefold() == item.resume_id
+                ),
+                None,
+            )
+            if mapping is None:
+                self.repository.transition_item(
+                    item.id,
+                    item.version,
+                    AutopilotState.DEAD,
+                    "retry_resume_unavailable",
+                    run_id=run.id,
+                    fencing_token=lease.fencing_token,
+                )
+                counters.skipped += 1
+                continue
+            try:
+                vacancy = self.vacancy_loader(item.vacancy_id)
+                if (
+                    not isinstance(vacancy, NormalizedVacancy)
+                    or vacancy.id != item.vacancy_id
+                ):
+                    raise ValueError("vacancy loader returned a different vacancy")
+                filter_decision = FilterDecision(
+                    passed=item.filter_data["passed"],
+                    reason=item.filter_data["reason"],
+                    evidence=item.filter_data["evidence"],
+                )
+                score = self.deterministic_ranker.score(
+                    vacancy,
+                    mapping.resume,
+                    context.candidate_profile,
+                    context.settings.ranking["weights"],
+                )
+                decision = self.ranking_policy.decide(
+                    filter_decision,
+                    score,
+                    vacancy,
+                    mapping.resume,
+                    context.candidate_profile,
+                )
+            except Exception:
+                decision = previous_decisions.get(item.id)
+                if decision is None or not decision.retry:
+                    self.repository.transition_item(
+                        item.id,
+                        item.version,
+                        AutopilotState.DEAD,
+                        "eligibility_retry_context_unavailable",
+                        run_id=run.id,
+                        fencing_token=lease.fencing_token,
+                    )
+                    counters.skipped += 1
+                    continue
+            if decision.retry:
+                self._schedule_eligibility_retry(
+                    item,
+                    decision,
+                    context,
+                    run,
+                    lease,
+                    counters,
+                    now=now,
+                )
+                continue
+            ranked = self.repository.record_ranking_decision(
+                item.id,
+                expected_version=item.version,
+                decision=decision,
+                run_id=run.id,
+                fencing_token=lease.fencing_token,
+            )
+            if not decision.ready:
+                self.repository.transition_item(
+                    ranked.id,
+                    ranked.version,
+                    AutopilotState.SKIPPED,
+                    decision.reason,
+                    run_id=run.id,
+                    fencing_token=lease.fencing_token,
+                )
+                counters.skipped += 1
+
+        for vacancy_id in sorted(touched):
+            candidates = self.repository.adopt_ranked_candidates_for_retry(
+                run.account_id,
+                vacancy_id,
+                run_id=run.id,
+                fencing_token=lease.fencing_token,
+                now=now,
+            )
+            if candidates:
+                self._finalize_ranked(
+                    {vacancy_id: list(candidates)},
+                    set(),
+                    context,
+                    run,
+                    lease,
+                )
+
+    def _schedule_eligibility_retry(
+        self,
+        item,
+        decision,
+        context,
+        run,
+        lease,
+        counters: _Counters,
+        *,
+        now: datetime,
+    ):
+        attempt_number = self.repository.eligibility_retry_count(item.id) + 1
+        retry = context.settings.retry
+        base = min(
+            int(retry["max_delay_seconds"]),
+            int(retry["base_delay_seconds"]) * (2 ** max(0, attempt_number - 1)),
+        )
+        jitter = float(retry["jitter_ratio"])
+        sample = float(self.retry_random_source())
+        if not 0.0 <= sample <= 1.0:
+            raise ValueError("retry_random_source must return a value in 0..1")
+        delay = base * ((1.0 - jitter) + 2.0 * jitter * sample)
+        updated = self.repository.schedule_eligibility_retry(
+            item.id,
+            expected_version=item.version,
+            decision=decision,
+            attempt_number=attempt_number,
+            max_attempts=int(retry["max_attempts"]),
+            next_attempt_at=now + timedelta(seconds=delay),
+            run_id=run.id,
+            fencing_token=lease.fencing_token,
+            now=now,
+        )
+        if updated.state is AutopilotState.RETRY_WAIT:
+            counters.retry_wait += 1
+        else:
+            counters.skipped += 1
+        return updated
 
     def _discover(self, request, context, run, lease, counters, *, shadow: bool) -> None:
         remaining = context.settings.search.max_results_per_run
@@ -451,6 +630,17 @@ class HHAutopilot:
             counters.skipped += 1
             return None, False
         assert ranking_decision is not None
+        if ranking_decision.retry:
+            self._schedule_eligibility_retry(
+                item,
+                ranking_decision,
+                context,
+                run,
+                lease,
+                counters,
+                now=self._now(),
+            )
+            return None, True
         item = self.repository.record_ranking_decision(
             item.id,
             expected_version=item.version,
@@ -458,17 +648,6 @@ class HHAutopilot:
             run_id=run.id,
             fencing_token=lease.fencing_token,
         )
-        if ranking_decision.retry:
-            self.repository.transition_item(
-                item.id,
-                item.version,
-                AutopilotState.RETRY_WAIT,
-                ranking_decision.reason,
-                run_id=run.id,
-                fencing_token=lease.fencing_token,
-            )
-            counters.retry_wait += 1
-            return None, True
         if not ranking_decision.ready:
             self.repository.transition_item(
                 item.id,

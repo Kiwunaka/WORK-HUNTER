@@ -54,15 +54,21 @@ class SchedulePolicy:
 
     def is_due(self, account: ScheduledAccount, now: datetime) -> bool:
         instant = _utc(now)
-        local = instant.astimezone(ZoneInfo(account.timezone))
-        local_time = local.timetz().replace(tzinfo=None)
-        if local.isoweekday() not in account.days:
-            return False
-        if not account.start <= local_time <= account.end:
+        if not self.is_window_open(account, instant):
             return False
         last = self.repository.last_scheduled_at(account.profile_id)
         return last is None or instant >= last + timedelta(
             minutes=account.interval_minutes
+        )
+
+    @staticmethod
+    def is_window_open(account: ScheduledAccount, now: datetime) -> bool:
+        instant = _utc(now)
+        local = instant.astimezone(ZoneInfo(account.timezone))
+        local_time = local.timetz().replace(tzinfo=None)
+        return bool(
+            local.isoweekday() in account.days
+            and account.start <= local_time <= account.end
         )
 
     def next_due(self, account: ScheduledAccount, now: datetime) -> datetime:
@@ -137,20 +143,31 @@ class HHAutopilotScheduler:
         runs: list[RunReport] = []
         for raw_account in settings.accounts:
             account = ScheduledAccount.from_settings(raw_account, settings)
-            if not self.policy.is_due(account, instant):
-                continue
             if not self._dispatchable(account):
                 continue
-            next_due = self.policy.next_due(account, instant)
-            if not self.repository.claim_schedule_slot(
-                account.profile_id,
+            trigger = ""
+            if self.policy.is_due(account, instant):
+                next_due = self.policy.next_due(account, instant)
+                if not self.repository.claim_schedule_slot(
+                    account.profile_id,
+                    instant,
+                    next_due,
+                    interval_minutes=account.interval_minutes,
+                ):
+                    continue
+                trigger = "schedule"
+            elif self.policy.is_window_open(
+                account,
                 instant,
-                next_due,
-                interval_minutes=account.interval_minutes,
+            ) and self.repository.has_due_dispatch_work(
+                account.profile_id,
+                now=instant,
             ):
+                trigger = "retry"
+            if not trigger:
                 continue
             report = self.engine.run(
-                RunRequest(account.profile_id, trigger="schedule")
+                RunRequest(account.profile_id, trigger=trigger)
             )
             if not isinstance(report, RunReport):
                 raise TypeError("engine returned an invalid run report")

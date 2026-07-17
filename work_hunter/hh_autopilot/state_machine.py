@@ -9,6 +9,7 @@ ALLOWED_TRANSITIONS = {
     AutopilotState.ELIGIBLE: {
         AutopilotState.RANKED,
         AutopilotState.RETRY_WAIT,
+        AutopilotState.DEAD,
     },
     AutopilotState.RANKED: {
         AutopilotState.READY,

@@ -16,6 +16,7 @@ from work_hunter.hh_autopilot.engine import (
 from work_hunter.hh_autopilot.repository import LeaseRecord, RunRecord
 from work_hunter.hh_autopilot.search import normalize_vacancy
 from work_hunter.hh_autopilot.types import (
+    AIDecision,
     AutopilotState,
     ExecutionResult,
     FilterDecision,
@@ -23,6 +24,7 @@ from work_hunter.hh_autopilot.types import (
     LiveAuthorization,
     NormalizedVacancy,
     RankScore,
+    RankedCandidate,
     RankingDecision,
     RetryStage,
     RunRequest,
@@ -45,6 +47,9 @@ class FakeItem:
     deterministic_score: float | None = None
     published_at: str = "2026-07-16T08:00:00+00:00"
     active_attempt_id: int | None = None
+    filter_data: dict | None = None
+    ranking_decision: RankingDecision | None = None
+    eligibility_retries: int = 0
 
 
 class FakeRepository:
@@ -180,6 +185,7 @@ class FakeRepository:
         item.state = AutopilotState.ELIGIBLE if decision.passed else AutopilotState.SKIPPED
         item.version += 1
         item.published_at = published_at
+        item.filter_data = decision.to_dict()
         return item
 
     def record_ranking_decision(
@@ -195,8 +201,77 @@ class FakeRepository:
         assert item is not None and item.version == expected_version
         item.state = AutopilotState.RANKED
         item.deterministic_score = decision.score
+        item.ranking_decision = decision
         item.version += 1
         return item
+
+    def eligibility_retry_count(self, item_id):
+        item = self.get_item(item_id)
+        assert item is not None
+        return item.eligibility_retries
+
+    def schedule_eligibility_retry(
+        self,
+        item_id,
+        *,
+        expected_version,
+        decision,
+        attempt_number,
+        max_attempts,
+        next_attempt_at,
+        run_id,
+        fencing_token,
+        now,
+    ):
+        item = self.get_item(item_id)
+        assert item is not None and item.version == expected_version
+        item.eligibility_retries = attempt_number
+        item.ranking_decision = decision
+        item.state = (
+            AutopilotState.DEAD
+            if attempt_number >= max_attempts
+            else AutopilotState.RETRY_WAIT
+        )
+        item.version += 1
+        return item
+
+    def item_ranking_decision(self, item_id):
+        item = self.get_item(item_id)
+        assert item is not None
+        return item.ranking_decision
+
+    def adopt_ranked_candidates_for_retry(
+        self,
+        account_id,
+        vacancy_id,
+        *,
+        run_id,
+        fencing_token,
+        now,
+    ):
+        if any(
+            item.account_id == account_id
+            and item.vacancy_id == vacancy_id
+            and item.state in {AutopilotState.ELIGIBLE, AutopilotState.RETRY_WAIT}
+            for item in self.items
+        ):
+            return ()
+        return tuple(
+            RankedCandidate(
+                account_id=item.account_id,
+                vacancy_id=item.vacancy_id,
+                resume_id=item.resume_id,
+                published_at=item.published_at,
+                decision=item.ranking_decision,
+                item_id=item.id,
+                expected_version=item.version,
+            )
+            for item in self.items
+            if item.account_id == account_id
+            and item.vacancy_id == vacancy_id
+            and item.state is AutopilotState.RANKED
+            and item.ranking_decision is not None
+        )
 
     def finalize_ranked_candidates(
         self,
@@ -334,7 +409,24 @@ class FakeRanker:
 
 
 class FakeRankingPolicy:
+    def __init__(self, retries: int = 0) -> None:
+        self.retries = retries
+
     def decide(self, filter_decision, rank_score, vacancy, resume, candidate):
+        if self.retries:
+            self.retries -= 1
+            return RankingDecision(
+                False,
+                True,
+                "ai_unavailable",
+                rank_score,
+                AIDecision(
+                    available=False,
+                    suitable=None,
+                    confidence=None,
+                    reason="ai_unavailable",
+                ),
+            )
         return RankingDecision(True, False, "deterministic_score", rank_score)
 
 
@@ -409,6 +501,7 @@ def make_case(
     vacancies: list[NormalizedVacancy] | None = None,
     *,
     rejected: set[str] | None = None,
+    ranking_retries: int = 0,
 ) -> EngineCase:
     trace: list[str] = []
     repo = FakeRepository(trace)
@@ -442,7 +535,7 @@ def make_case(
         search_provider=search,
         hard_filter=hard_filter,
         deterministic_ranker=FakeRanker(trace),
-        ranking_policy=FakeRankingPolicy(),
+        ranking_policy=FakeRankingPolicy(ranking_retries),
         executor=executor,
         reconciler=FakeReconciler(),
         context_provider=lambda _account_id: context,
@@ -453,6 +546,7 @@ def make_case(
         clock=lambda: NOW,
         sleeper=lambda _seconds: None,
         delay_source=lambda low, high: low,
+        retry_random_source=lambda: 0.5,
     )
     return EngineCase(trace, repo, search, hard_filter, executor, context, engine)
 
@@ -471,6 +565,18 @@ def test_live_run_orders_retry_search_filter_rank_and_post() -> None:
     assert case.trace.index("rank:v-pass") < case.trace.index("post:v-pass")
     assert report.applied == 2
     assert next(item for item in case.repo.items if item.vacancy_id == "v-filtered").state is AutopilotState.SKIPPED
+
+
+def test_ai_ranking_retry_is_reranked_and_dispatched() -> None:
+    case = make_case([vacancy("v-ai-retry")], ranking_retries=1)
+
+    first = case.engine.run(case.live_request())
+    second = case.engine.run(RunRequest("default", "retry"))
+
+    assert first.retry_wait == 1
+    assert second.applied == 1
+    assert case.executor.posted == ["v-ai-retry"]
+    assert case.trace.count("rank:v-ai-retry") == 2
 
 
 def test_manual_captcha_does_not_abort_unrelated_vacancy() -> None:

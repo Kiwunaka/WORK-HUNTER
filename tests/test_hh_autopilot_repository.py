@@ -507,6 +507,65 @@ def test_transition_updates_item_and_event_in_one_commit(repo) -> None:
     assert "secret" not in repo.list_events(item.id)[-1]["metadata_json"]
 
 
+def test_eligibility_retry_persists_backoff_and_exhaustion(repo) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    lease = repo.acquire_lease("default", "retry-owner", ttl_seconds=300, now=now)
+    assert lease is not None
+    run = repo.create_run(
+        "default",
+        trigger="retry",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+    item = repo.create_item(run.id, "default", "v-ai", "r-1", "preset")
+    eligible = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+        fencing_token=lease.fencing_token,
+    )
+
+    waiting = repo.schedule_eligibility_retry(
+        eligible.id,
+        expected_version=eligible.version,
+        decision=_retryable_ranking_decision(),
+        attempt_number=1,
+        max_attempts=2,
+        next_attempt_at=now + timedelta(seconds=60),
+        run_id=run.id,
+        fencing_token=lease.fencing_token,
+        now=now,
+    )
+
+    assert waiting.state is AutopilotState.RETRY_WAIT
+    assert waiting.next_attempt_at == (now + timedelta(seconds=60)).isoformat()
+    assert repo.eligibility_retry_count(waiting.id) == 1
+
+    eligible_again = repo.activate_due_retry(
+        waiting.id,
+        waiting.version,
+        run_id=run.id,
+        fencing_token=lease.fencing_token,
+        now=now + timedelta(seconds=60),
+    )
+    exhausted = repo.schedule_eligibility_retry(
+        eligible_again.id,
+        expected_version=eligible_again.version,
+        decision=_retryable_ranking_decision(),
+        attempt_number=2,
+        max_attempts=2,
+        next_attempt_at=now + timedelta(seconds=120),
+        run_id=run.id,
+        fencing_token=lease.fencing_token,
+        now=now + timedelta(seconds=60),
+    )
+
+    assert exhausted.state is AutopilotState.DEAD
+    assert exhausted.next_attempt_at == ""
+    assert exhausted.last_outcome_code == "retry_exhausted"
+
+
 def test_stale_version_cannot_write_or_append_an_event(repo) -> None:
     run = repo.create_run("default", trigger="manual", policy_hash="hash")
     item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")

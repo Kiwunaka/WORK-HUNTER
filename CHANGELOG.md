@@ -14,6 +14,7 @@
 - Feed the production hard filter with the persisted employer blacklist and the application capabilities actually enabled by `screening_mode` and `form_mode`.
 - Optionally hide cleaned negotiation chats through the authenticated HH web endpoint, matching the original tool's `--delete-chat` flow.
 - Expire due CAPTCHA/form/ambiguity challenges from the production scheduler under the account lease instead of leaving items stuck indefinitely.
+- Dispatch due application and AI-ranking retries between full search intervals with configured exponential backoff, jitter, and bounded exhaustion.
 - Run paginated employer replies, resume raising, recruiter follow-up, negotiation cleanup, and skipped-state maintenance through the configurable JSON runner.
 - Generate employer replies from full paginated chat history and suppress duplicate replies and email follow-ups.
 

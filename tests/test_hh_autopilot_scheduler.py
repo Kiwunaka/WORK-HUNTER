@@ -146,6 +146,38 @@ def test_restart_claims_at_most_one_run_without_catch_up_burst(repo) -> None:
     assert state.next_scheduled_at == (restart + timedelta(hours=1)).isoformat()
 
 
+def test_due_retry_runs_between_search_intervals(repo) -> None:
+    settings = _settings(("default", True))
+    repo.create_grants([("default", "policy", "test", "test")])
+    scheduled = datetime(2026, 7, 15, 5, 0, tzinfo=UTC)
+    retry_due = scheduled + timedelta(minutes=30)
+    repo.claim_schedule_slot(
+        "default",
+        scheduled,
+        scheduled + timedelta(hours=1),
+        interval_minutes=60,
+    )
+    run = repo.create_run("default", trigger="schedule", policy_hash="policy")
+    item = repo.create_item(run.id, "default", "v-retry", "r-1", "preset")
+    repo.conn.execute(
+        """
+        UPDATE hh_autopilot_items
+        SET state = 'retry_wait', retry_stage = 'application',
+            next_attempt_at = ?
+        WHERE id = ?
+        """,
+        (retry_due.isoformat(), item.id),
+    )
+    repo.conn.commit()
+    trace: list[str] = []
+    scheduler, _engine = _scheduler(repo, settings, trace)
+
+    report = scheduler.tick(now=retry_due)
+
+    assert [run.trigger for run in report.runs] == ["retry"]
+    assert repo.last_scheduled_at("default") == scheduled
+
+
 def test_disabled_and_killed_account_still_runs_recovery_first(repo) -> None:
     settings = _settings(("default", False))
     repo.set_kill_switch("account", "default", actor="test")

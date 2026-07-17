@@ -28,6 +28,7 @@ from .types import (
     PreparedDispatch,
     QuotaReservationState,
     RankScore,
+    RankedCandidate,
     RankingDecision,
     RecoveryProvenance,
     RetryDecision,
@@ -1481,6 +1482,226 @@ class AutopilotRepository:
             )
             return self._item_for_update(item_id)
 
+    def eligibility_retry_count(self, item_id: int) -> int:
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM hh_autopilot_events
+            WHERE item_id = ? AND next_state = 'retry_wait'
+              AND previous_state IN ('eligible','ranked')
+            """,
+            (item_id,),
+        ).fetchone()
+        return _persisted_integer(row["total"], field="eligibility retry count")
+
+    def item_ranking_decision(self, item_id: int) -> RankingDecision | None:
+        item = self.get_item(item_id)
+        if item is None:
+            raise KeyError(f"item {item_id} does not exist")
+        if not item.ai_data:
+            return None
+        return _ranking_decision_from_data(
+            item.ai_data,
+            field="item ranking decision",
+        )
+
+    def schedule_eligibility_retry(
+        self,
+        item_id: int,
+        *,
+        expected_version: int,
+        decision: RankingDecision,
+        attempt_number: int,
+        max_attempts: int,
+        next_attempt_at: datetime | str,
+        run_id: int,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        expected_version = _integer(expected_version, field="expected_version")
+        if not isinstance(decision, RankingDecision) or not decision.retry:
+            raise ValueError("eligibility retry requires a retry ranking decision")
+        attempt_number = _integer(
+            attempt_number,
+            field="attempt_number",
+            minimum=1,
+        )
+        max_attempts = _integer(max_attempts, field="max_attempts", minimum=1)
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        fencing_token = _integer(
+            fencing_token,
+            field="fencing_token",
+            minimum=1,
+        )
+        instant = _instant(now, field="now")
+        due = _instant(next_attempt_at, field="next_attempt_at")
+        payload = decision.to_dict()
+        ai_json = _json_dumps(payload, field="ranking AI decision")
+        target = (
+            AutopilotState.DEAD
+            if attempt_number >= max_attempts
+            else AutopilotState.RETRY_WAIT
+        )
+        reason = "retry_exhausted" if target is AutopilotState.DEAD else decision.reason
+        next_value = "" if target is AutopilotState.DEAD else due.isoformat()
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            if current.version != expected_version:
+                raise StaleWrite(f"item {item_id} version changed")
+            if current.state is not AutopilotState.ELIGIBLE:
+                raise StaleWrite("eligibility retry requires an eligible item")
+            self._assert_active_owned_run_for_update(
+                current,
+                run_id=run_id,
+                fencing_token=fencing_token,
+                instant=instant,
+                operation="eligibility retry",
+            )
+            self._assert_candidate_set_unsealed_for_update(
+                account_id=current.account_id,
+                vacancy_id=current.vacancy_id,
+                run_id=run_id,
+                operation="eligibility retry",
+            )
+            assert_transition(current.state, target)
+            cursor = self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = ?, retry_stage = 'eligibility',
+                    version = version + 1, last_run_id = ?,
+                    deterministic_score = ?, ai_json = ?,
+                    next_attempt_at = ?, last_outcome_code = ?, updated_at = ?
+                WHERE id = ? AND version = ? AND state = 'eligible'
+                """,
+                (
+                    target.value,
+                    run_id,
+                    decision.rank_score.score,
+                    ai_json,
+                    next_value,
+                    reason,
+                    instant.isoformat(),
+                    item_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("eligibility retry compare-and-swap failed")
+            self._insert_event(
+                item_id=item_id,
+                run_id=run_id,
+                previous=current.state,
+                target=target,
+                reason=reason,
+                metadata={
+                    **payload,
+                    "attempt_number": attempt_number,
+                    "max_attempts": max_attempts,
+                    "source_reason": decision.reason,
+                },
+                created_at=instant,
+            )
+            return self._item_for_update(item_id)
+
+    def adopt_ranked_candidates_for_retry(
+        self,
+        account_id: str,
+        vacancy_id: str,
+        *,
+        run_id: int,
+        fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> tuple[RankedCandidate, ...]:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        vacancy_id = _required_text(vacancy_id, field="vacancy_id")
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        fencing_token = _integer(
+            fencing_token,
+            field="fencing_token",
+            minimum=1,
+        )
+        instant = _instant(now, field="now")
+        with self.immediate():
+            run = self._run_for_update(run_id)
+            if (
+                run.account_id != account_id
+                or run.status != "running"
+                or run.fencing_token != fencing_token
+            ):
+                raise LostLease("retry candidate run is not current")
+            self._assert_fence(account_id, fencing_token, instant)
+            pending = self.conn.execute(
+                """
+                SELECT 1 FROM hh_autopilot_items
+                WHERE account_profile_id = ? AND vacancy_id = ?
+                  AND application_attempt_count = 0
+                  AND active_attempt_id IS NULL
+                  AND state IN ('discovered','eligible','retry_wait')
+                LIMIT 1
+                """,
+                (account_id, vacancy_id),
+            ).fetchone()
+            if pending is not None:
+                return ()
+            rows = self.conn.execute(
+                """
+                SELECT * FROM hh_autopilot_items
+                WHERE account_profile_id = ? AND vacancy_id = ?
+                  AND state = 'ranked' AND application_attempt_count = 0
+                  AND active_attempt_id IS NULL
+                ORDER BY id ASC
+                """,
+                (account_id, vacancy_id),
+            ).fetchall()
+            candidates: list[RankedCandidate] = []
+            for row in rows:
+                current = self._item_from_row(row)
+                if current.last_run_id != run_id:
+                    cursor = self.conn.execute(
+                        """
+                        UPDATE hh_autopilot_items
+                        SET last_run_id = ?, version = version + 1, updated_at = ?
+                        WHERE id = ? AND version = ? AND state = 'ranked'
+                        """,
+                        (
+                            run_id,
+                            instant.isoformat(),
+                            current.id,
+                            current.version,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleWrite("ranked retry adoption changed")
+                    self._insert_event(
+                        item_id=current.id,
+                        run_id=run_id,
+                        previous=current.state,
+                        target=current.state,
+                        reason="retry_candidate_adopted",
+                        metadata={},
+                        created_at=instant,
+                    )
+                    current = self._item_for_update(current.id)
+                decision = _ranking_decision_from_data(
+                    current.ai_data,
+                    field="retry candidate ranking decision",
+                )
+                if decision.ready and not decision.retry:
+                    candidates.append(
+                        RankedCandidate(
+                            account_id=current.account_id,
+                            vacancy_id=current.vacancy_id,
+                            resume_id=current.resume_id,
+                            published_at=current.published_at,
+                            decision=decision,
+                            item_id=current.id,
+                            expected_version=current.version,
+                        )
+                    )
+            return tuple(candidates)
+
     def finalize_ranked_candidates(
         self,
         expected_versions: Mapping[int, int],
@@ -2792,6 +3013,28 @@ class AutopilotRepository:
         ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
+    def has_due_dispatch_work(
+        self,
+        account_id: str,
+        *,
+        now: datetime | str,
+    ) -> bool:
+        account_id = _canonical_identifier(account_id, field="account_id")
+        instant = _instant(now, field="now").isoformat()
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM hh_autopilot_items
+            WHERE account_profile_id = ?
+              AND (
+                state = 'ready'
+                OR (state = 'retry_wait' AND next_attempt_at <= ?)
+              )
+            LIMIT 1
+            """,
+            (account_id, instant),
+        ).fetchone()
+        return row is not None
+
     def ready_items(self, account_id: str, *, limit: int) -> list[ItemRecord]:
         """Return dispatchable work in the same stable order used by ranking."""
         account_id = _canonical_identifier(account_id, field="account_id")
@@ -2857,12 +3100,16 @@ class AutopilotRepository:
                 UPDATE hh_autopilot_items
                 SET state = ?, last_run_id = ?, next_attempt_at = '',
                     version = version + 1, last_outcome_code = 'retry_due',
+                    deterministic_score = CASE WHEN ? THEN NULL ELSE deterministic_score END,
+                    ai_json = CASE WHEN ? THEN '{}' ELSE ai_json END,
                     updated_at = ?
                 WHERE id = ? AND version = ? AND state = 'retry_wait'
                 """,
                 (
                     target.value,
                     run_id,
+                    int(target is AutopilotState.ELIGIBLE),
+                    int(target is AutopilotState.ELIGIBLE),
                     instant.isoformat(),
                     current.id,
                     expected_version,

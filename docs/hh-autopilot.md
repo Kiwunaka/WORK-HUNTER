@@ -50,6 +50,8 @@ HH search/recommendations
 
 Состояния item: `discovered`, `eligible`, `ranked`, `ready`, `applying`, `reconciling`, `retry_wait`, `manual_challenge`, `applied`, `skipped`, `dead`. Search checkpoint фиксирует следующую страницу. Lease с fencing token не даёт старому runner записать результат после takeover.
 
+Scheduler запускает отдельный `retry` run, как только наступил `next_attempt_at`, даже если следующий полный поиск по интервалу ещё не наступил. Это работает только внутри настроенного окна расписания. Ошибки AI-ранжирования повторяются с теми же `retry.max_attempts`, exponential backoff и jitter; после исчерпания item становится `dead`, а соседнее подходящее резюме для той же вакансии не остаётся заблокированным.
+
 Shadow использует реальный read-only поиск и пишет изолированные результаты. Он не создаёт live queue, application guard или quota reservation.
 
 ## 2. Установка browser/UI и приватный data root
