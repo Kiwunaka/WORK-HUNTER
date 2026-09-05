@@ -4,7 +4,9 @@ from typing import Any
 
 from mcp.types import Tool
 
+from ..models import Job
 from ..safety import is_literal_confirmation
+from ..sources.common import clean_text
 
 
 class HHMCPToolHandlers:
@@ -17,6 +19,11 @@ class HHMCPToolHandlers:
         "hh_research_vacancies",
         "hh_apply_vacancy",
         "hh_research_and_apply",
+        "hh_list_chats",
+        "hh_reply_chats",
+        "hh_web_profile",
+        "hh_touch_resumes",
+        "hh_set_job_search_active",
     }
 
     def __init__(self, service: Any):
@@ -62,7 +69,7 @@ class HHMCPToolHandlers:
             ),
             Tool(
                 name="hh_analyze_vacancy",
-                description="Analyze one HH vacancy. Current implementation records an audited placeholder until LLM service is wired into MCP.",
+                description="Load and analyze one HH vacancy with the configured AI backend.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -86,7 +93,7 @@ class HHMCPToolHandlers:
             ),
             Tool(
                 name="hh_apply_vacancy",
-                description="Plan an HH vacancy application. Real apply is blocked unless explicitly enabled later through approval/confirm flow.",
+                description="Plan or send one HH vacancy application with literal confirm_apply=true.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -107,6 +114,76 @@ class HHMCPToolHandlers:
                         "limit": {"type": "integer", "default": 20},
                         "resume_id": {"type": "string"},
                         "confirm_apply": {"type": "boolean", "default": False},
+                    },
+                },
+            ),
+            Tool(
+                name="hh_list_chats",
+                description="List HH applicant Chatik conversations awaiting a reply.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "account": {"type": "string"},
+                        "max_pages": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "max_age_hours": {"type": "number", "minimum": 1},
+                        "awaiting_only": {"type": "boolean", "default": True},
+                        "limit": {"type": "integer", "minimum": 1},
+                    },
+                },
+            ),
+            Tool(
+                name="hh_reply_chats",
+                description=(
+                    "Plan or send grounded AI/template replies through HH Chatik. "
+                    "Sending and leaving discarded chats require literal confirm=true."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "account": {"type": "string"},
+                        "template": {"type": "string"},
+                        "use_ai": {"type": "boolean", "default": True},
+                        "max_pages": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "max_age_hours": {"type": "number", "minimum": 1},
+                        "history_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "message_limit": {"type": "integer", "minimum": 1},
+                        "limit": {"type": "integer", "minimum": 1},
+                        "leave_discarded": {"type": "boolean", "default": True},
+                        "confirm": {"type": "boolean", "default": False},
+                    },
+                },
+            ),
+            Tool(
+                name="hh_web_profile",
+                description="Read the HH applicant profile and resume hashes through browser cookies.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"account": {"type": "string"}},
+                },
+            ),
+            Tool(
+                name="hh_touch_resumes",
+                description="Plan or raise HH resumes through the applicant web transport.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "account": {"type": "string"},
+                        "resume_hashes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "confirm": {"type": "boolean", "default": False},
+                    },
+                },
+            ),
+            Tool(
+                name="hh_set_job_search_active",
+                description="Plan or set the HH profile status to looking_for_offers.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "account": {"type": "string"},
+                        "confirm": {"type": "boolean", "default": False},
                     },
                 },
             ),
@@ -139,12 +216,33 @@ class HHMCPToolHandlers:
         if name == "hh_get_vacancy":
             return self.service.hh_call_api("GET", f"/vacancies/{args['vacancy_id']}")
         if name == "hh_analyze_vacancy":
-            return {
-                "status": "planned",
-                "vacancy_id": str(args["vacancy_id"]),
-                "resume_id": str(args.get("resume_id") or ""),
-                "message": "LLM-backed MCP analysis is wired in the next implementation slice.",
-            }
+            vacancy_id = str(args["vacancy_id"])
+            row = self.service.storage.conn.execute(
+                "SELECT id FROM jobs WHERE source = 'hh' AND source_id = ?",
+                (vacancy_id,),
+            ).fetchone()
+            if row is None:
+                fetched = self.service.hh_call_api("GET", f"/vacancies/{vacancy_id}")
+                payload = fetched.get("result") if fetched.get("status") == "ok" else None
+                if not isinstance(payload, dict):
+                    return fetched
+                employer = payload.get("employer") or {}
+                job_id = self.service.storage.upsert_job(
+                    Job(
+                        source="hh",
+                        source_id=vacancy_id,
+                        url=str(payload.get("alternate_url") or ""),
+                        title=str(payload.get("name") or vacancy_id),
+                        company=str(employer.get("name") or ""),
+                        description=clean_text(str(payload.get("description") or "")),
+                    )
+                )
+            else:
+                job_id = int(row["id"])
+            result = self.service.ai_fit(job_id)
+            result["vacancy_id"] = vacancy_id
+            result["resume_id"] = str(args.get("resume_id") or "")
+            return result
         if name == "hh_research_vacancies":
             return self.service.run_hh_research_operation(
                 text=str(args.get("text") or ""),
@@ -155,17 +253,28 @@ class HHMCPToolHandlers:
                 confirm_apply=False,
             )
         if name == "hh_apply_vacancy":
-            if args.get("confirm_apply"):
-                return {
-                    "status": "blocked",
-                    "vacancy_id": str(args["vacancy_id"]),
-                    "message": "MCP real apply is blocked until approval/confirm flow is enabled.",
-                }
+            vacancy_id = str(args["vacancy_id"])
+            row = self.service.storage.conn.execute(
+                "SELECT id FROM jobs WHERE source = 'hh' AND source_id = ?",
+                (vacancy_id,),
+            ).fetchone()
+            if row is not None:
+                job_id = int(row["id"])
+                if is_literal_confirmation(args.get("confirm_apply")):
+                    return self.service.confirm_apply(
+                        job_id,
+                        resume_id=str(args.get("resume_id") or "") or None,
+                        confirm=True,
+                    )
+                return self.service.prepare_apply_plan(
+                    job_id,
+                    resume_id=str(args.get("resume_id") or "") or None,
+                )
             return {
-                "status": "planned",
-                "vacancy_id": str(args["vacancy_id"]),
+                "status": "blocked",
+                "vacancy_id": vacancy_id,
                 "resume_id": str(args.get("resume_id") or ""),
-                "dry_run": True,
+                "message": "Vacancy is not in local storage. Sync or import it first.",
             }
         if name == "hh_research_and_apply":
             return self.service.run_hh_research_operation(
@@ -175,6 +284,53 @@ class HHMCPToolHandlers:
                 run_id=run_id,
                 plan_apply=True,
                 confirm_apply=is_literal_confirmation(args.get("confirm_apply")),
+            )
+        if name == "hh_list_chats":
+            return self.service.list_hh_chatik(
+                account=str(args.get("account") or "") or None,
+                max_pages=_optional_int(args.get("max_pages")),
+                max_age_hours=_optional_float(args.get("max_age_hours")),
+                awaiting_only=bool(args.get("awaiting_only", True)),
+                limit=_optional_int(args.get("limit")),
+            )
+        if name == "hh_reply_chats":
+            confirm = is_literal_confirmation(args.get("confirm"))
+            return self.service.reply_hh_chatik(
+                account=str(args.get("account") or "") or None,
+                template=str(args.get("template") or ""),
+                use_ai=bool(args.get("use_ai", True)),
+                max_pages=_optional_int(args.get("max_pages")),
+                max_age_hours=_optional_float(args.get("max_age_hours")),
+                history_limit=_optional_int(args.get("history_limit")),
+                message_limit=_optional_int(args.get("message_limit")),
+                limit=_optional_int(args.get("limit")),
+                leave_discarded=bool(args.get("leave_discarded", True)),
+                dry_run=not confirm,
+                confirm=confirm,
+            )
+        if name == "hh_web_profile":
+            return self.service.hh_applicant_web_profile(
+                account=str(args.get("account") or "") or None,
+            )
+        if name == "hh_touch_resumes":
+            confirm = is_literal_confirmation(args.get("confirm"))
+            hashes = args.get("resume_hashes")
+            return self.service.touch_hh_resumes_web(
+                account=str(args.get("account") or "") or None,
+                resume_hashes=(
+                    [str(value) for value in hashes]
+                    if isinstance(hashes, list)
+                    else None
+                ),
+                dry_run=not confirm,
+                confirm=confirm,
+            )
+        if name == "hh_set_job_search_active":
+            confirm = is_literal_confirmation(args.get("confirm"))
+            return self.service.set_hh_job_search_active(
+                account=str(args.get("account") or "") or None,
+                dry_run=not confirm,
+                confirm=confirm,
             )
         raise KeyError(name)
 
@@ -188,3 +344,15 @@ def _search_params(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("area"):
         params["area"] = str(args["area"])
     return params
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)

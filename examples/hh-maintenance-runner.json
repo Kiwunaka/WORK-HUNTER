@@ -3,6 +3,7 @@
     {"task": "hh-autopilot-recover"},
     {"task": "hh-autopilot-tick"},
     {"task": "hh-update-resumes", "confirm": false},
+    {"task": "hh-job-search-active", "confirm": false},
     {"task": "hh-sync-negotiations", "status": "active", "max_pages": 25},
     {
       "task": "hh-reply-employers",
@@ -16,6 +17,19 @@
       "only_invitations": false,
       "include_unviewed": true,
       "history_limit": 10,
+      "send_delay_min_seconds": 1,
+      "send_delay_max_seconds": 3
+    },
+    {
+      "task": "hh-chatik-reply",
+      "confirm": false,
+      "use_ai": true,
+      "limit": 10,
+      "max_pages": 10,
+      "max_age_hours": 72,
+      "history_limit": 20,
+      "message_limit": 20,
+      "leave_discarded": true,
       "send_delay_min_seconds": 1,
       "send_delay_max_seconds": 3
     },

@@ -14,13 +14,13 @@
 - Every account defaults to `enabled=false`; autonomous dispatch requires an account-scoped durable application grant.
 - Defaults are 50 successful applications per local account day, 10 per run, 45–120 seconds between sends, 08:00–21:00 in `Europe/Moscow`, one run every 60 minutes, 100 results per page, and 20 pages.
 - All defaults, filters, weights, limits, delays, schedules, retry rules, and browser settings remain configurable within the validated bounds from the design.
-- Unknown required candidate data skips only that vacancy with a stable reason.
-- CAPTCHA is manual handoff in the authenticated browser context; no Vision-based CAPTCHA bypass is added.
-- Knowledge assessments are manual; only profile-grounded screening fields/forms are completed automatically.
+- Unknown required candidate data is answered from explicit facts or AI; unresolved fields pause only that vacancy with a stable reason.
+- CAPTCHA uses the configured Vision model with authenticated-browser handoff as fallback.
+- Screening fields and assessments use grounded AI answers with browser handoff when confidence is insufficient.
 - Possibly-sent POST failures reconcile before another POST. No local key is represented as remote idempotency.
 - Manual confirmation, autonomous dispatch, read-only reconciliation, and local finalization use the distinct safety matrix from the design.
-- Existing MCP agent calls remain unable to authorize live applications.
-- Implementation is native; do not copy source from the reference repository.
+- MCP agent calls may authorize live applications only with literal `confirm=true`.
+- Compatible reference source may be reused under its license; local reverse-engineering artifacts remain ignored.
 - Use test-first RED/GREEN cycles for every production change.
 
 ## File Structure
@@ -2718,7 +2718,7 @@ class GroundedAnswerMapper:
         return MappingResult.from_values(answers, unknown)
 ```
 
-Do not use the LLM as a fallback for an unknown required field. `work_hunter.hh_agent.forms.draft_form_review()` may be reused for display, but only this registry authorizes automatic answers. Persist field identifiers and masked source labels, not raw full answer payloads, in journal metadata.
+Use grounded LLM answers as a fallback for unknown required fields, using candidate/profile facts and explicit configured answers. If the model returns unknown or cannot match an allowed option, pause the vacancy for browser review. Persist field identifiers and masked source labels, not raw full answer payloads, in journal metadata.
 
 - [ ] **Step 6: Implement challenge transitions and reservation rules**
 

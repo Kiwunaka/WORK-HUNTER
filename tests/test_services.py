@@ -668,4 +668,11 @@ def test_sync_sources_default_includes_public_board_sources(monkeypatch, tmp_pat
 
     app.sync_sources(sources=None, limit=0)
 
-    assert collected == ["hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
+    assert collected == [
+        "hh",
+        "linkedin",
+        "habr",
+        "geekjob",
+        "telegram",
+        *PUBLIC_BOARD_SOURCE_NAMES,
+    ]

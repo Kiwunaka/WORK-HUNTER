@@ -43,6 +43,7 @@ from .config import (
     update_config,
 )
 from .letters import chat_completion, draft_cover_letter, draft_cover_letter_ai
+from .external_apply import ExternalApplyDispatcher, ExternalApplyRequest
 from .models import (
     ApplyPlan,
     HHCampaignItem,
@@ -83,6 +84,7 @@ from .sources import (
     GetmatchSource,
     HHSource,
     HabrSource,
+    LinkedInSource,
     PublicJobBoardSource,
     RelocateMeSource,
     TelegramSource,
@@ -424,59 +426,71 @@ SOURCE_CAPABILITIES: dict[str, dict[str, str]] = {
         "apply": "official_api",
         "auth": "oauth",
     },
+    "linkedin": {
+        "search": "public_guest_api",
+        "detail": "browser",
+        "apply": "browser",
+        "auth": "browser_session",
+    },
     "habr": {
         "search": "frontend_json",
         "detail": "listing_payload",
-        "apply": "external_page",
+        "apply": "browser",
         "auth": "none",
     },
     "geekjob": {
         "search": "public_json",
         "detail": "listing_payload",
-        "apply": "external_page",
+        "apply": "browser",
         "auth": "none",
     },
     "getmatch": {
         "search": "public_json",
         "detail": "public_json",
-        "apply": "personal_auth_recon",
+        "apply": "session_or_browser",
         "auth": "browser_session",
     },
     "relocate_me": {
         "search": "html_listing",
         "detail": "html_detail",
-        "apply": "external_page",
+        "apply": "browser",
         "auth": "none",
     },
     "rvc": {
         "search": "personal_auth_recon",
         "detail": "personal_auth_recon",
-        "apply": "personal_auth_recon",
+        "apply": "session_or_browser",
         "auth": "browser_session",
     },
     "hirehi": {
         "search": "public_html",
         "detail": "public_html",
-        "apply": "external_page",
+        "apply": "browser",
         "auth": "none",
     },
     "careerspace": {
         "search": "public_html_or_browser",
         "detail": "public_html_or_browser",
-        "apply": "external_page",
+        "apply": "browser",
         "auth": "none",
     },
     "another_it": {
         "search": "public_html",
         "detail": "public_html",
-        "apply": "external_page",
+        "apply": "browser",
         "auth": "none",
     },
     "jabka": {
         "search": "public_html",
         "detail": "public_html",
-        "apply": "external_page",
+        "apply": "browser",
         "auth": "none",
+    },
+    "indeed": {
+        "search": "browser",
+        "detail": "browser",
+        "apply": "browser",
+        "auth": "browser_session",
     },
     "telegram": {
         "search": "public_channels",
@@ -487,7 +501,14 @@ SOURCE_CAPABILITIES: dict[str, dict[str, str]] = {
 }
 
 
-DEFAULT_SYNC_SOURCE_NAMES = ["hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
+DEFAULT_SYNC_SOURCE_NAMES = [
+    "hh",
+    "linkedin",
+    "habr",
+    "geekjob",
+    "telegram",
+    *PUBLIC_BOARD_SOURCE_NAMES,
+]
 
 
 def _safe_preset_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -1296,8 +1317,13 @@ class _ConfiguredHHCoverLetters:
             raise RuntimeError("HH vacancy is missing from local storage")
         job_id = int(row["id"])
         maximum = int(application["cover_letter_max_characters"])
+        saved = storage.get_latest_letter(job_id)
+        manual_template = (
+            f"manual-confirmation:{context.account_id}:{context.resume_id}"
+        )
+        if saved is not None and saved.template_name == manual_template:
+            return _bounded_cover_letter(saved.body, maximum)
         if application["reuse_saved_cover_letter"]:
-            saved = storage.get_latest_letter(job_id)
             if saved is not None and not saved.template_name.startswith(
                 "hh-autopilot:"
             ):
@@ -2622,6 +2648,25 @@ class WorkHunter:
             "beautifulsoup4": importlib.util.find_spec("bs4") is not None,
             "uvicorn": importlib.util.find_spec("uvicorn") is not None,
         }
+        external_config = self.config.get("external_apply") or {}
+        required_application_fields = ("name", "email", "phone", "resume_path")
+        missing_application_fields = [
+            field
+            for field in required_application_fields
+            if not str(profile_data.get(field) or "").strip()
+        ]
+        resume_path_text = str(profile_data.get("resume_path") or "").strip()
+        resume_exists = bool(resume_path_text) and Path(resume_path_text).expanduser().is_file()
+        if resume_path_text and not resume_exists:
+            missing_application_fields.append("resume_path_file")
+        if not bool(external_config.get("enabled", True)):
+            external_status = "disabled"
+        elif not optional_deps["playwright"]:
+            external_status = "missing_playwright"
+        elif missing_application_fields:
+            external_status = "profile_incomplete"
+        else:
+            external_status = "ready"
         try:
             self.storage.conn.execute("SELECT 1").fetchone()
             db_status = "ok"
@@ -2656,8 +2701,20 @@ class WorkHunter:
             warnings.append("hh_web_not_ready")
         if ui_host not in {"127.0.0.1", "localhost", "::1"}:
             warnings.append("ui_host_not_local")
+        if missing_application_fields:
+            warnings.append("external_application_profile_incomplete")
+        if not optional_deps["playwright"]:
+            warnings.append("external_browser_not_ready")
 
         next_actions = self._doctor_next_actions(hh_api, hh_web, missing_deps)
+        if missing_application_fields:
+            next_actions.insert(
+                0,
+                "Open work-hunter ui and fill name, email, phone, and resume_path in Profile.",
+            )
+        if optional_deps["playwright"]:
+            next_actions.append("work-hunter browser-login linkedin")
+            next_actions.append("work-hunter browser-login indeed")
         if not config_exists:
             next_actions.insert(0, "work-hunter init")
 
@@ -2695,14 +2752,32 @@ class WorkHunter:
                 "active": profile_info.get("active"),
                 "queries": len(profile_data.get("queries") or []),
                 "must_have_skills": len(profile_data.get("must_have_skills") or []),
+                "application_fields": {
+                    "status": "ready" if not missing_application_fields else "incomplete",
+                    "missing": list(dict.fromkeys(missing_application_fields)),
+                    "resume_file_exists": resume_exists,
+                },
             },
             "hh_api": hh_api,
             "hh_web": hh_web,
+            "external_apply": {
+                "status": external_status,
+                "enabled": bool(external_config.get("enabled", True)),
+                "transport": str(external_config.get("transport") or "browser"),
+                "playwright": optional_deps["playwright"],
+                "interactive_login": True,
+            },
             "sources": {
                 "enabled": enabled_sources,
                 "capabilities": source_status,
             },
-            "recommended_mode": "api_first" if hh_api.get("status") == "ok" else "configure_hh_api",
+            "recommended_mode": (
+                "unified_hh_and_external"
+                if hh_api.get("status") == "ok" and external_status == "ready"
+                else "external_first_hh_after_reauth"
+                if external_status in {"ready", "profile_incomplete"}
+                else "configure_hh_api"
+            ),
             "blocked": blocked,
             "warnings": warnings,
             "next_actions": next_actions,
@@ -2900,20 +2975,30 @@ class WorkHunter:
             auth_capability = str(capabilities.get("auth") or "none")
             is_hh = source_name == "hh"
             requires_auth = auth_capability not in {"none", ""}
-            requires_confirmation = apply_capability in {
-                "official_api",
-                "personal_auth_recon",
-                "external_contact",
-            }
+            requires_confirmation = apply_capability not in {"", "none"}
             risk_flags: list[str] = []
             if requires_confirmation:
                 risk_flags.append("live_apply_or_contact")
-            if apply_capability == "personal_auth_recon":
-                risk_flags.append("unverified_personal_auth_adapter")
+            if apply_capability in {"browser", "session_or_browser"}:
+                risk_flags.append("browser_or_session_adapter")
+            if apply_capability == "external_contact":
+                risk_flags.append("manual_contact_channel")
+            if is_hh:
+                preferred_transport = "api"
+                fallback_transport = "web_cookie"
+            elif apply_capability == "session_or_browser":
+                preferred_transport = "authenticated_session"
+                fallback_transport = "persistent_browser"
+            elif apply_capability == "browser":
+                preferred_transport = "persistent_browser"
+                fallback_transport = "authenticated_session"
+            else:
+                preferred_transport = "public_fetch"
+                fallback_transport = "external_page"
             result[source_name] = {
                 **capabilities,
-                "preferred_transport": "api" if is_hh else "public_fetch",
-                "fallback_transport": "web_cookie" if is_hh else "external_page",
+                "preferred_transport": preferred_transport,
+                "fallback_transport": fallback_transport,
                 "requires_auth": requires_auth,
                 "requires_confirmation": requires_confirmation,
                 "risk_flags": risk_flags,
@@ -3029,8 +3114,24 @@ class WorkHunter:
 
     def update_profile(self, data: dict[str, Any]) -> dict[str, Any]:
         """Update the active profile's search preferences (queries, skills, stop_words)."""
-        allowed = ["queries", "desired_roles", "must_have_skills", "nice_to_have_skills",
-                   "stop_words", "desired_salary", "desired_cities"]
+        allowed = [
+            "name",
+            "first_name",
+            "last_name",
+            "email",
+            "phone",
+            "city",
+            "linkedin_url",
+            "portfolio_url",
+            "resume_path",
+            "queries",
+            "desired_roles",
+            "must_have_skills",
+            "nice_to_have_skills",
+            "stop_words",
+            "desired_salary",
+            "desired_cities",
+        ]
 
         def update_active_profile(config: dict[str, Any]) -> None:
             profile_id = config.get("profile", "default")
@@ -3141,6 +3242,90 @@ class WorkHunter:
     def _hh_client(self) -> HHApplyClient:
         config, backend = self._hh_runtime()
         return HHApplyClient(config, backend=backend)
+
+    def _hh_web_auth_material(
+        self,
+        *,
+        account: str | None = None,
+    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], str]:
+        from .hh_transport import extract_xsrf_token, load_hh_cookie_file
+
+        account_id = self._hh_account_id(account)
+        client_config = self._hh_client_for_account(account_id).config
+        cookies: list[dict[str, Any]] = []
+
+        browser_session = self._hh_browser_authorizer().session(account_id)
+        try:
+            browser_session.load()
+        except (OSError, ValueError, json.JSONDecodeError):
+            browser_session.cookies = []
+            browser_session.xsrf_token = ""
+        cookies.extend(browser_session.cookies)
+
+        cookie_file_raw = str(client_config.get("hh_cookie_file") or "").strip()
+        if cookie_file_raw:
+            cookie_file = Path(cookie_file_raw)
+            if not cookie_file.is_absolute():
+                cookie_file = self.root / cookie_file
+            if cookie_file.exists():
+                configured_cookies = load_hh_cookie_file(cookie_file)
+                known = {
+                    (
+                        str(cookie.get("domain") or "").casefold(),
+                        str(cookie.get("path") or "/"),
+                        str(cookie.get("name") or "").casefold(),
+                    )
+                    for cookie in cookies
+                }
+                cookies.extend(
+                    cookie
+                    for cookie in configured_cookies
+                    if (
+                        str(cookie.get("domain") or "").casefold(),
+                        str(cookie.get("path") or "/"),
+                        str(cookie.get("name") or "").casefold(),
+                    )
+                    not in known
+                )
+
+        xsrf_token = browser_session.xsrf_token or extract_xsrf_token(cookies=cookies)
+        if not cookies:
+            raise RuntimeError(
+                "HH browser cookies are required; run 'hh auth login --account default' "
+                "or 'hh web import-cookies ./cookies.txt'."
+            )
+        if not xsrf_token:
+            raise RuntimeError("HH browser cookies do not contain an XSRF token.")
+        return account_id, client_config, cookies, xsrf_token
+
+    def _hh_chatik_client(self, *, account: str | None = None) -> Any:
+        from .hh_transport import HHChatikClient
+
+        _account_id, client_config, cookies, xsrf_token = self._hh_web_auth_material(
+            account=account
+        )
+        chatik_config = client_config.get("chatik") or {}
+        return HHChatikClient(
+            cookies=cookies,
+            xsrf_token=xsrf_token,
+            user_agent=str(client_config.get("web_user_agent") or ""),
+            base_url=str(chatik_config.get("base_url") or "https://chatik.hh.ru"),
+            timeout=float(client_config.get("timeout") or 30),
+        )
+
+    def _hh_applicant_web_client(self, *, account: str | None = None) -> Any:
+        from .hh_transport import HHApplicantWebClient
+
+        _account_id, client_config, cookies, xsrf_token = self._hh_web_auth_material(
+            account=account
+        )
+        return HHApplicantWebClient(
+            cookies=cookies,
+            xsrf_token=xsrf_token,
+            user_agent=str(client_config.get("web_user_agent") or ""),
+            base_url=str(client_config.get("web_base_url") or "https://hh.ru"),
+            timeout=float(client_config.get("timeout") or 30),
+        )
 
     def list_hh_account_profiles(self) -> dict[str, Any]:
         accounts = self.config.get("hh_account_profiles") or {}
@@ -3448,20 +3633,23 @@ class WorkHunter:
             },
         )
         apply_capability = str(capabilities.get("apply") or "")
-        mode = "external_api_recon" if apply_capability == "personal_auth_recon" else "external_page"
-        risk_flags = ["external_manual_apply"]
+        request = self._external_apply_request(
+            job,
+            resume_id=resume_id,
+            letter=letter_body,
+        )
+        adapter_plan = ExternalApplyDispatcher().plan(request)
+        mode = str(adapter_plan.get("mode") or "browser")
+        risk_flags = list(adapter_plan.get("risk_flags") or [])
         raw_result: dict[str, Any] = {
-            "message": "Source does not have a configured direct apply API.",
+            "message": str(adapter_plan.get("message") or ""),
             "capabilities": capabilities,
+            "adapter_plan": adapter_plan,
             "apply": {},
         }
         external_url = job.url
-        if apply_capability == "personal_auth_recon":
+        if apply_capability == "session_or_browser":
             risk_flags.append("personal_auth_required")
-            raw_result["message"] = (
-                "Apply flow requires your own authenticated browser session. "
-                "Use api-recon-har to map the exact endpoint before enabling direct send."
-            )
 
         if job.source == "getmatch":
             detail = self._getmatch_apply_detail(job)
@@ -3500,10 +3688,33 @@ class WorkHunter:
             resume_id=resume_id,
             letter=letter_body,
             risk_flags=list(dict.fromkeys(risk_flags)),
-            status="external",
+            status=str(adapter_plan.get("status") or "blocked"),
             external_url=external_url,
             raw_result=raw_result,
         ).to_dict())
+
+    def _external_apply_request(
+        self,
+        job: Job,
+        *,
+        resume_id: str | None,
+        letter: str,
+    ) -> ExternalApplyRequest:
+        source_config = copy.deepcopy(
+            ((self.config.get("sources") or {}).get(job.source) or {})
+        )
+        global_config = copy.deepcopy(self.config.get("external_apply") or {})
+        return ExternalApplyRequest(
+            root=self.root,
+            job=copy.deepcopy(job),
+            letter=letter,
+            profile=copy.deepcopy(active_profile(self.config)),
+            about=copy.deepcopy(self.config.get("about") or {}),
+            ai_config=copy.deepcopy(self.config.get("ai") or {}),
+            source_config=source_config,
+            global_config=global_config,
+            resume_id=resume_id,
+        )
 
     def _getmatch_apply_detail(self, job: Job) -> dict[str, Any]:
         try:
@@ -3541,14 +3752,14 @@ class WorkHunter:
                     "message": "Cover letter is required by this source.",
                 }
             )
-        if capabilities.get("apply") == "personal_auth_recon":
+        if capabilities.get("apply") in {"session_or_browser", "browser"}:
             host = urllib.parse.urlsplit(external_url or job.url).hostname or job.source
             actions.append(
                 {
-                    "type": "api_recon_har",
+                    "type": "optional_api_recon_har",
                     "host": host,
                     "command": f"work-hunter api-recon-har <session.har> --host {host}",
-                    "message": "Export a HAR from your own logged-in browser session, then run this command to map the apply endpoint.",
+                    "message": "Optional: import a logged-in HAR to promote this browser flow to a direct session adapter.",
                 }
             )
         return actions
@@ -3574,16 +3785,34 @@ class WorkHunter:
         plan = self.prepare_apply_plan(job_id, resume_id=resume_id, letter=letter)
         if plan.get("status") != "ready":
             return plan
-        if plan.get("source") != "hh":
-            return {
-                "status": "blocked",
-                "message": "Only HH vacancies can be sent directly through the API.",
-                "plan": plan,
-            }
-
         job = self.storage.get_job(job_id)
         if job is None:
             raise ValueError(f"Job {job_id} not found")
+        if plan.get("source") != "hh":
+            request = self._external_apply_request(
+                job,
+                resume_id=resume_id,
+                letter=str(plan.get("letter") or ""),
+            )
+            external_result = ExternalApplyDispatcher().apply(request)
+            result_data = external_result.to_dict()
+            plan["status"] = external_result.status
+            plan["raw_result"] = result_data
+            if external_result.applied:
+                self.storage.save_application(
+                    job_id,
+                    "applied",
+                    external_result.message,
+                    source=job.source,
+                    source_id=job.source_id,
+                    resume_id=str(resume_id or "external"),
+                    plan_id=int(plan.get("id") or 0) or None,
+                    transport=external_result.mode,
+                    result=result_data,
+                )
+                self.storage.set_status(job_id, "applied", external_result.message)
+            return plan
+
         selected_resume = str(plan.get("resume_id") or "")
         if not selected_resume:
             return {
@@ -3595,7 +3824,15 @@ class WorkHunter:
         account_id = self._hh_account_id(account)
         body = str(plan.get("letter") or "")
         if body:
-            self.storage.save_letter(LetterDraft(job_id=job_id, body=body, template_name="manual-confirmation"))
+            self.storage.save_letter(
+                LetterDraft(
+                    job_id=job_id,
+                    body=body,
+                    template_name=(
+                        f"manual-confirmation:{account_id}:{selected_resume}"
+                    ),
+                )
+            )
         _confirmation, reports = self._run_hh_literal_targets(
             account_id,
             ((selected_resume, str(job.source_id)),),
@@ -4154,8 +4391,33 @@ class WorkHunter:
 
     def hh_web_status(self) -> dict[str, Any]:
         hh_config = self.hh_config()
+        account_id = self._hh_account_id()
+        browser_session = self._hh_browser_authorizer().session(account_id)
+        try:
+            browser_session.load()
+        except (OSError, ValueError, json.JSONDecodeError):
+            browser_session.cookies = []
+            browser_session.xsrf_token = ""
+        browser_cookie_count = len(browser_session.cookies)
+        browser_has_xsrf = bool(browser_session.xsrf_token)
         cookie_file_raw = str(hh_config.get("hh_cookie_file") or "")
         if not cookie_file_raw:
+            if browser_cookie_count:
+                return {
+                    "status": "ok" if browser_has_xsrf else "configured",
+                    "account": account_id,
+                    "cookie_source": "browser_session",
+                    "has_cookie_file": False,
+                    "cookie_count": browser_cookie_count,
+                    "has_xsrf": browser_has_xsrf,
+                    "can_load_resumes_page": browser_has_xsrf,
+                    "resumes_page_status": "configured_not_live_checked",
+                    "can_search_url": True,
+                    "can_tests": browser_has_xsrf,
+                    "can_chatik": browser_has_xsrf,
+                    "resume_hashes": [],
+                    "actions": [] if browser_has_xsrf else ["login to HH again"],
+                }
             return {
                 "status": "not_configured",
                 "has_cookie_file": False,
@@ -4172,6 +4434,23 @@ class WorkHunter:
         if not cookie_file.is_absolute():
             cookie_file = self.root / cookie_file
         if not cookie_file.exists():
+            if browser_cookie_count:
+                return {
+                    "status": "ok" if browser_has_xsrf else "configured",
+                    "account": account_id,
+                    "cookie_source": "browser_session",
+                    "cookie_file": str(cookie_file),
+                    "has_cookie_file": False,
+                    "cookie_count": browser_cookie_count,
+                    "has_xsrf": browser_has_xsrf,
+                    "can_load_resumes_page": browser_has_xsrf,
+                    "resumes_page_status": "configured_not_live_checked",
+                    "can_search_url": True,
+                    "can_tests": browser_has_xsrf,
+                    "can_chatik": browser_has_xsrf,
+                    "resume_hashes": [],
+                    "actions": [] if browser_has_xsrf else ["login to HH again"],
+                }
             return {
                 "status": "missing_cookie_file",
                 "cookie_file": str(cookie_file),
@@ -4191,10 +4470,16 @@ class WorkHunter:
             for line in text.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         )
-        has_xsrf = "_xsrf" in text
+        has_xsrf = "_xsrf" in text or browser_has_xsrf
         resume_hashes = sorted(set(re.findall(r"resume_hash[\"'=:\s]+([A-Za-z0-9_-]+)", text)))
         return {
             "status": "ok" if has_xsrf else "configured",
+            "account": account_id,
+            "cookie_source": (
+                "cookies_txt+browser_session"
+                if browser_cookie_count
+                else "cookies_txt"
+            ),
             "cookie_file": str(cookie_file),
             "has_cookie_file": True,
             "cookie_count": cookie_count,
@@ -4206,6 +4491,137 @@ class WorkHunter:
             "can_chatik": has_xsrf,
             "resume_hashes": resume_hashes,
             "actions": [] if has_xsrf else ["refresh cookies", "run hh web status"],
+        }
+
+    def hh_applicant_web_profile(
+        self,
+        *,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        from .hh_transport import applicant_profile_summary
+
+        account_id = self._hh_account_id(account)
+        try:
+            client = self._hh_applicant_web_client(account=account_id)
+        except RuntimeError as exc:
+            return {
+                "status": "blocked",
+                "code": "hh_web_auth_required",
+                "account": account_id,
+                "message": str(exc),
+            }
+        profile = applicant_profile_summary(client.load_profile_data())
+        return {"status": "ok", "account_profile": account_id, **profile}
+
+    def touch_hh_resumes_web(
+        self,
+        *,
+        account: str | None = None,
+        resume_hashes: list[str] | None = None,
+        dry_run: bool = True,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        from .hh_transport import applicant_profile_summary
+
+        if not dry_run:
+            blocked = require_mutation_confirmation(
+                confirm,
+                code="resume_touch_requires_confirmation",
+                message="HH web resume touch requires explicit confirmation.",
+                risk_flags=("resume_mutation", "external_mutating_request"),
+            )
+            if blocked is not None:
+                return blocked
+        account_id = self._hh_account_id(account)
+        try:
+            client = self._hh_applicant_web_client(account=account_id)
+        except RuntimeError as exc:
+            return {
+                "status": "blocked",
+                "code": "hh_web_auth_required",
+                "account": account_id,
+                "count": 0,
+                "message": str(exc),
+            }
+        profile = applicant_profile_summary(client.load_profile_data())
+        available = {
+            str(resume.get("hash") or "")
+            for resume in profile.get("resumes") or []
+            if str(resume.get("hash") or "")
+        }
+        requested = {
+            str(value or "").strip()
+            for value in (resume_hashes or [])
+            if str(value or "").strip()
+        }
+        unknown = sorted(requested - available)
+        if unknown:
+            raise ValueError(f"Unknown HH resume hashes: {', '.join(unknown)}")
+        selected = sorted(requested or available)
+        if dry_run:
+            return {
+                "status": "planned",
+                "account": account_id,
+                "count": len(selected),
+                "resume_hashes": selected,
+            }
+        updated: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        for resume_hash in selected:
+            try:
+                result = client.touch_resume(resume_hash)
+                updated.append({"resume_hash": resume_hash, "result": result})
+            except Exception as exc:
+                errors.append({"resume_hash": resume_hash, "error": str(exc)})
+        return {
+            "status": "ok" if not errors else "partial",
+            "transport": "hh_web",
+            "account": account_id,
+            "count": len(updated),
+            "updated": updated,
+            "errors": errors,
+        }
+
+    def set_hh_job_search_active(
+        self,
+        *,
+        account: str | None = None,
+        dry_run: bool = True,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        if not dry_run:
+            blocked = require_mutation_confirmation(
+                confirm,
+                code="job_search_status_requires_confirmation",
+                message="Changing HH job-search status requires explicit confirmation.",
+                risk_flags=("profile_mutation", "external_mutating_request"),
+            )
+            if blocked is not None:
+                return blocked
+        account_id = self._hh_account_id(account)
+        try:
+            client = self._hh_applicant_web_client(account=account_id)
+        except RuntimeError as exc:
+            return {
+                "status": "blocked",
+                "code": "hh_web_auth_required",
+                "account": account_id,
+                "message": str(exc),
+            }
+        profile_data = client.load_profile_data()
+        if dry_run:
+            return {
+                "status": "planned",
+                "account": account_id,
+                "job_search_status": "looking_for_offers",
+            }
+        result = client.set_looking_for_offers(profile_data)
+        return {
+            "status": "ok",
+            "transport": "hh_web",
+            "account": account_id,
+            "job_search_status": "looking_for_offers",
+            "result": result,
         }
 
     def import_hh_web_cookies(self, path: str | Path) -> dict[str, Any]:
@@ -4294,16 +4710,19 @@ class WorkHunter:
             return blocked
         client = self._hh_client()
         if not client.has_token():
-            return {"status": "blocked", "count": 0, "message": "HH access token is required."}
+            return self.touch_hh_resumes_web(dry_run=False, confirm=True)
         updated: list[str] = []
-        for payload in client.list_resumes():
-            resume = _hh_resume_from_payload(payload)
-            if resume.id:
-                self.storage.upsert_hh_resume(resume)
-            if not resume.id or not resume.can_publish_or_update:
-                continue
-            client.update_resume(resume.id)
-            updated.append(resume.id)
+        try:
+            for payload in client.list_resumes():
+                resume = _hh_resume_from_payload(payload)
+                if resume.id:
+                    self.storage.upsert_hh_resume(resume)
+                if not resume.id or not resume.can_publish_or_update:
+                    continue
+                client.update_resume(resume.id)
+                updated.append(resume.id)
+        except HHTransportError:
+            return self.touch_hh_resumes_web(dry_run=False, confirm=True)
         return {"status": "ok", "count": len(updated), "updated": updated}
 
     def create_hh_resume(
@@ -4603,6 +5022,408 @@ class WorkHunter:
             "sent": sent,
             "errors": errors,
         }
+
+    def list_hh_chatik(
+        self,
+        *,
+        account: str | None = None,
+        max_pages: int | None = None,
+        max_age_hours: float | None = None,
+        awaiting_only: bool = True,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        from .hh_transport.chatik import chatik_page_count, extract_chatik_candidates
+
+        account_id = self._hh_account_id(account)
+        client_config = self._hh_client_for_account(account_id).config
+        chatik_config = client_config.get("chatik") or {}
+        page_limit = int(
+            max_pages
+            if max_pages is not None
+            else chatik_config.get("max_pages") or 10
+        )
+        age_limit = (
+            float(max_age_hours)
+            if max_age_hours is not None
+            else float(chatik_config.get("max_age_hours") or 72)
+        )
+        if not 1 <= page_limit <= 100:
+            raise ValueError("max_pages must be in 1..100")
+        if age_limit <= 0 or age_limit > 24 * 365:
+            raise ValueError("max_age_hours must be in 0..8760")
+        if limit is not None and int(limit) < 1:
+            raise ValueError("limit must be positive")
+        try:
+            client = self._hh_chatik_client(account=account_id)
+        except RuntimeError as exc:
+            return {
+                "status": "blocked",
+                "code": "hh_chatik_auth_required",
+                "account": account_id,
+                "count": 0,
+                "message": str(exc),
+            }
+
+        candidates: list[dict[str, Any]] = []
+        seen_chat_ids: set[str] = set()
+        total_pages = 1
+        loaded_pages = 0
+        for page in range(page_limit):
+            if page >= total_pages:
+                break
+            payload = client.list_chats(page=page)
+            loaded_pages += 1
+            total_pages = min(page_limit, chatik_page_count(payload))
+            for candidate in extract_chatik_candidates(
+                payload,
+                awaiting_only=awaiting_only,
+                max_age_hours=age_limit,
+            ):
+                if candidate.chat_id in seen_chat_ids:
+                    continue
+                seen_chat_ids.add(candidate.chat_id)
+                candidates.append(candidate.to_dict())
+                if limit is not None and len(candidates) >= int(limit):
+                    break
+            if limit is not None and len(candidates) >= int(limit):
+                break
+        return {
+            "status": "ok",
+            "account": account_id,
+            "count": len(candidates),
+            "pages_loaded": loaded_pages,
+            "pages_available": total_pages,
+            "awaiting_only": awaiting_only,
+            "chats": candidates,
+        }
+
+    def reply_hh_chatik(
+        self,
+        *,
+        account: str | None = None,
+        template: str = "",
+        use_ai: bool = False,
+        system_prompt: str = "",
+        message_prompt: str = "",
+        max_pages: int | None = None,
+        max_age_hours: float | None = None,
+        history_limit: int | None = None,
+        message_limit: int | None = None,
+        limit: int | None = None,
+        leave_discarded: bool | None = None,
+        dry_run: bool = True,
+        confirm: bool = False,
+        send_delay_min_seconds: float | None = None,
+        send_delay_max_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        from .hh_transport.chatik import (
+            chatik_message_count,
+            chatik_message_history,
+            chatik_write_allowed,
+        )
+
+        if not template.strip() and not use_ai:
+            raise ValueError("Reply template is required unless use_ai=True")
+        if not dry_run and not confirm:
+            return {
+                "status": "blocked",
+                "code": "hh_chatik_confirmation_required",
+                "count": 0,
+                "message": "Explicit confirm=True is required before sending Chatik replies.",
+            }
+        account_id = self._hh_account_id(account)
+        client_config = self._hh_client_for_account(account_id).config
+        chatik_config = client_config.get("chatik") or {}
+        history_size = int(
+            history_limit
+            if history_limit is not None
+            else chatik_config.get("history_limit") or 20
+        )
+        max_messages = int(
+            message_limit
+            if message_limit is not None
+            else chatik_config.get("message_limit") or 20
+        )
+        if not 1 <= history_size <= 100:
+            raise ValueError("history_limit must be in 1..100")
+        if not 1 <= max_messages <= 1000:
+            raise ValueError("message_limit must be in 1..1000")
+        delay_min = float(
+            send_delay_min_seconds
+            if send_delay_min_seconds is not None
+            else chatik_config.get("send_delay_min_seconds") or 0
+        )
+        delay_max = float(
+            send_delay_max_seconds
+            if send_delay_max_seconds is not None
+            else chatik_config.get("send_delay_max_seconds") or 0
+        )
+        if delay_min < 0 or delay_max < delay_min or delay_max > 300:
+            raise ValueError("send delay must satisfy 0 <= min <= max <= 300 seconds")
+        should_leave_discarded = (
+            bool(leave_discarded)
+            if leave_discarded is not None
+            else bool(chatik_config.get("leave_discarded", True))
+        )
+
+        listing = self.list_hh_chatik(
+            account=account_id,
+            max_pages=max_pages,
+            max_age_hours=max_age_hours,
+            awaiting_only=True,
+            limit=limit,
+        )
+        if listing.get("status") == "blocked":
+            return listing
+        client = self._hh_chatik_client(account=account_id)
+        previous_replies = self.storage.list_hh_agent_outbox(
+            channel="hh_chatik_reply_auto"
+        )
+        previous_leaves = {
+            item.target
+            for item in self.storage.list_hh_agent_outbox(
+                channel="hh_chatik_leave_auto",
+                status="sent",
+            )
+        }
+        replies: list[dict[str, Any]] = []
+        leaves: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for candidate in listing.get("chats") or []:
+            chat_id = str(candidate.get("chat_id") or "")
+            fingerprint = hashlib.sha256(
+                (
+                    f"{candidate.get('last_message_id')}\0"
+                    f"{candidate.get('last_message_at')}\0"
+                    f"{candidate.get('last_message_text')}"
+                ).encode("utf-8")
+            ).hexdigest()
+            if candidate.get("discarded"):
+                if should_leave_discarded and chat_id not in previous_leaves:
+                    leaves.append(
+                        {
+                            "chat_id": chat_id,
+                            "reason": "applicant_state_discard",
+                            "source_message_fingerprint": fingerprint,
+                        }
+                    )
+                continue
+            if any(
+                item.status == "sent"
+                and item.target == chat_id
+                and item.payload.get("source_message_fingerprint") == fingerprint
+                for item in previous_replies
+            ):
+                continue
+
+            options = [str(value) for value in candidate.get("reply_options") or []]
+            history = str(candidate.get("last_message_text") or "")
+            if not options:
+                applicant_id = str(candidate.get("applicant_id") or "")
+                if not applicant_id:
+                    errors.append(
+                        {"chat_id": chat_id, "error": "Chatik applicant id is missing"}
+                    )
+                    continue
+                try:
+                    detail = client.get_chat_data(chat_id, applicant_id)
+                except Exception as exc:
+                    errors.append({"chat_id": chat_id, "error": str(exc)})
+                    continue
+                if not chatik_write_allowed(detail):
+                    errors.append(
+                        {"chat_id": chat_id, "error": "Chatik writing is not allowed"}
+                    )
+                    continue
+                if chatik_message_count(detail) >= max_messages:
+                    errors.append(
+                        {
+                            "chat_id": chat_id,
+                            "error": f"Chatik message limit ({max_messages}) reached",
+                        }
+                    )
+                    continue
+                history = chatik_message_history(detail, limit=history_size) or history
+
+            context = {
+                "chat_id": chat_id,
+                "vacancy_id": str(candidate.get("vacancy_id") or ""),
+                "vacancy_name": str(candidate.get("vacancy_name") or ""),
+                "employer_id": str(candidate.get("company_id") or ""),
+                "employer_name": str(candidate.get("company_name") or ""),
+                "contact_name": str(candidate.get("contact_name") or ""),
+                "resume_id": str(candidate.get("resume_id") or ""),
+                "resume_title": str(candidate.get("resume_title") or ""),
+                "last_message": str(candidate.get("last_message_text") or ""),
+                "history": history,
+                "reply_options": "\n".join(options),
+                "first_option": options[0] if options else "",
+            }
+            try:
+                if use_ai:
+                    message = self._draft_hh_chatik_reply_ai(
+                        context=context,
+                        options=options,
+                        system_prompt=system_prompt,
+                        message_prompt=message_prompt,
+                    )
+                else:
+                    message = _format_reply_template(template, context)
+                if options and message not in options:
+                    raise ValueError(
+                        "Chatik button reply must exactly match one offered option"
+                    )
+                if not message:
+                    raise ValueError("Chatik reply is empty")
+            except Exception as exc:
+                errors.append({"chat_id": chat_id, "error": str(exc)})
+                continue
+            replies.append(
+                {
+                    **context,
+                    "message": message,
+                    "reply_options": options,
+                    "source_message_fingerprint": fingerprint,
+                }
+            )
+
+        if dry_run:
+            return {
+                "status": "planned" if not errors else "partial",
+                "account": account_id,
+                "count": len(replies),
+                "leave_count": len(leaves),
+                "replies": replies,
+                "leaves": leaves,
+                "errors": errors,
+            }
+
+        sent: list[dict[str, Any]] = []
+        left: list[dict[str, Any]] = []
+        operation_index = 0
+        for leave in leaves:
+            if operation_index and delay_max:
+                time.sleep(random.uniform(delay_min, delay_max))
+            operation_index += 1
+            try:
+                result = client.leave_chat(str(leave["chat_id"]))
+                left.append({**leave, "result": result})
+                self.storage.create_hh_agent_outbox(
+                    channel="hh_chatik_leave_auto",
+                    target=str(leave["chat_id"]),
+                    payload={**leave, "result": result},
+                    status="sent",
+                )
+            except Exception as exc:
+                error = {**leave, "error": str(exc)}
+                errors.append(error)
+                self.storage.create_hh_agent_outbox(
+                    channel="hh_chatik_leave_auto",
+                    target=str(leave["chat_id"]),
+                    payload=error,
+                    status="error",
+                )
+        for reply in replies:
+            if operation_index and delay_max:
+                time.sleep(random.uniform(delay_min, delay_max))
+            operation_index += 1
+            idempotency_key = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"work-hunter:hh-chatik:{account_id}:{reply['chat_id']}:{reply['source_message_fingerprint']}",
+                )
+            )
+            try:
+                result = client.send_message(
+                    str(reply["chat_id"]),
+                    str(reply["message"]),
+                    idempotency_key=idempotency_key,
+                )
+                sent.append({**reply, "result": result})
+                self.storage.create_hh_agent_outbox(
+                    channel="hh_chatik_reply_auto",
+                    target=str(reply["chat_id"]),
+                    payload={
+                        "reply": reply,
+                        "source_message_fingerprint": reply[
+                            "source_message_fingerprint"
+                        ],
+                        "idempotency_key": idempotency_key,
+                        "send_result": result,
+                    },
+                    status="sent",
+                )
+            except Exception as exc:
+                error = {**reply, "error": str(exc)}
+                errors.append(error)
+                self.storage.create_hh_agent_outbox(
+                    channel="hh_chatik_reply_auto",
+                    target=str(reply["chat_id"]),
+                    payload={
+                        "reply": reply,
+                        "source_message_fingerprint": reply[
+                            "source_message_fingerprint"
+                        ],
+                        "idempotency_key": idempotency_key,
+                        "error": str(exc),
+                    },
+                    status="error",
+                )
+        return {
+            "status": "sent" if not errors else "partial",
+            "account": account_id,
+            "count": len(sent),
+            "leave_count": len(left),
+            "sent": sent,
+            "left": left,
+            "errors": errors,
+        }
+
+    def _draft_hh_chatik_reply_ai(
+        self,
+        *,
+        context: dict[str, str],
+        options: list[str],
+        system_prompt: str,
+        message_prompt: str,
+    ) -> str:
+        from .hh_autopilot.challenge_ai import scoped_ai_config
+
+        ai_config = scoped_ai_config(self.config.get("ai") or {}, "replies")
+        configured_system = system_prompt.strip() or str(
+            ai_config.get("system_prompt") or ""
+        ).strip()
+        configured_prompt = message_prompt.strip() or str(
+            ai_config.get("message_prompt") or ""
+        ).strip()
+        if not configured_system or not configured_prompt:
+            raise ValueError("AI reply prompts are not configured")
+        prompt_context = {
+            **context,
+            "candidate_profile": json.dumps(
+                active_profile(self.config), ensure_ascii=False
+            ),
+            "candidate_about": json.dumps(
+                self.config.get("about") or {}, ensure_ascii=False
+            ),
+        }
+        prompt = configured_prompt.format_map(_SafeFormatDict(prompt_context))
+        if options:
+            prompt += (
+                "\n\nОтветь строго одним из предложенных вариантов, без "
+                "изменений и дополнительных символов:\n- "
+                + "\n- ".join(options)
+            )
+        message = chat_completion(
+            [
+                {"role": "system", "content": configured_system},
+                {"role": "user", "content": prompt},
+            ],
+            ai_config,
+        ).strip()
+        if not message:
+            raise ValueError("AI returned an empty Chatik reply")
+        return message
 
     def reply_hh_employers(
         self,
@@ -6795,7 +7616,9 @@ class WorkHunter:
                     LetterDraft(
                         job_id=item.job_id,
                         body=item.letter,
-                        template_name="campaign-confirmation",
+                        template_name=(
+                            f"manual-confirmation:{account_id}:{item.resume_id}"
+                        ),
                     )
                 )
         reports: list[Any] = []
@@ -7538,6 +8361,8 @@ class WorkHunter:
             return HabrSource(source_config)
         if source_name == "geekjob":
             return GeekJobSource(source_config)
+        if source_name == "linkedin":
+            return LinkedInSource(source_config)
         if source_name == "telegram":
             return TelegramSource(source_config)
         if source_name == "getmatch":
@@ -7549,5 +8374,6 @@ class WorkHunter:
                 source_config,
                 source_name=source_name,
                 spec=PUBLIC_BOARD_SPECS[source_name],
+                root=self.root,
             )
         raise ValueError(f"Unknown source: {source_name}")

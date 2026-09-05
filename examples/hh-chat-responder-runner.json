@@ -1,0 +1,17 @@
+{
+  "tasks": [
+    {
+      "task": "hh-chatik-reply",
+      "confirm": false,
+      "use_ai": true,
+      "limit": 10,
+      "max_pages": 10,
+      "max_age_hours": 72,
+      "history_limit": 20,
+      "message_limit": 20,
+      "leave_discarded": true,
+      "send_delay_min_seconds": 1,
+      "send_delay_max_seconds": 3
+    }
+  ]
+}

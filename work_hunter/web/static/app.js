@@ -11,9 +11,13 @@ const state = {
   darkTheme: false,
   route: null,
   sourceKeys: null,
+  sourceCapabilities: {},
+  hhWebStatus: null,
+  workMode: "apply",
   initialLoadsPending: true,
   routeNeedsReload: false,
   calendarEvents: [],
+  calendarCursor: new Date(),
   agent: {
     preflight: null,
     digest: null,
@@ -26,6 +30,9 @@ const state = {
     labSnippets: [],
     events: [],
     tasks: [],
+    chats: null,
+    chatReplyPlan: null,
+    chatAuthStarting: false,
   },
   hhAutopilot: {
     config: null,
@@ -156,8 +163,12 @@ async function loadJobs() {
     if (status) params.set("status", status);
     state.jobs = await api(`/api/jobs?${params.toString()}`);
     renderJobs();
+    renderApplicationPipeline();
     updateSummary();
     await applyJobRouteSelection();
+    if (state.route?.destination === "vacancies" && !state.selectedId && state.jobs.length) {
+      await selectJob(requirePositiveInteger(state.jobs[0].id, "job id"));
+    }
   } finally {
     setSectionLoading("jobs", false);
   }
@@ -209,6 +220,10 @@ function renderJobs() {
     const scoreClass = score === "-" ? "" : score >= 70 ? " high" : score < 35 ? " low" : "";
     const scoreGuide = score === "-" ? "" : ' data-guide="match-score"';
     const checked = selectedJobIds.has(jobId) ? "checked" : "";
+    const statusKey = String(job.status || "new").toLowerCase();
+    const statusLabel = ({ new: "Новая", saved: "Сохранена", applied: "Отклик отправлен", hidden: "Скрыта", replied: "Ответили", interview: "Собеседование" })[statusKey] || job.status || "Новая";
+    const sourceKey = String(job.source || "").toLowerCase();
+    const sourceLabel = SOURCE_META[sourceKey]?.label || job.source || "Источник";
     tr.innerHTML = `
       <td><input type="checkbox" class="job-checkbox" data-job-id="${jobId}" data-record-action="toggle-job-select" data-record-id="${jobId}" ${checked}></td>
       <td><span class="score${scoreClass}"${scoreGuide}>${escapeHtml(String(score))}</span></td>
@@ -217,12 +232,64 @@ function renderJobs() {
         <div class="meta">${escapeHtml(job.company || "Компания не указана")}</div>
         <div class="meta">${escapeHtml([job.salary_text, job.location, job.remote ? "remote" : ""].filter(Boolean).join(" · "))}</div>
       </td>
-      <td>${escapeHtml(job.source)}</td>
-      <td>${escapeHtml(job.status || "new")}</td>
+      <td><span class="job-source">${sourceLogoMarkup(sourceKey, "compact")}${escapeHtml(sourceLabel)}</span></td>
+      <td><span class="job-status ${escapeAttr(statusKey)}">${escapeHtml(String(statusLabel))}</span></td>
     `;
     body.appendChild(tr);
   }
   syncBulkCheckboxes();
+}
+
+function pipelineStage(job) {
+  const status = String(job.status || "new").toLowerCase();
+  if (status.includes("interview")) return "interview";
+  if (["replied", "response", "responded", "offer", "rejected"].some((value) => status.includes(value))) return "replied";
+  if (["applied", "sent", "submitted"].some((value) => status.includes(value))) return "sent";
+  if (["saved", "draft", "prepared", "ready"].some((value) => status.includes(value))) return "prepared";
+  return null;
+}
+
+function renderApplicationPipeline() {
+  const root = $("#application-pipeline");
+  if (!root) return;
+  const grouped = { prepared: [], sent: [], replied: [], interview: [] };
+  for (const job of state.jobs) {
+    const stage = pipelineStage(job);
+    if (stage) grouped[stage].push(job);
+  }
+  for (const [stage, jobs] of Object.entries(grouped)) {
+    const column = root.querySelector(`[data-pipeline-column="${stage}"]`);
+    if (!column) continue;
+    const count = column.querySelector("h3 span");
+    const list = column.querySelector(".pipeline-list");
+    count.textContent = String(jobs.length);
+    list.replaceChildren();
+    for (const job of jobs.slice(0, 8)) {
+      const card = document.createElement("article");
+      card.className = "pipeline-card";
+      card.innerHTML = `
+        <div class="pipeline-card-head"><span class="metric-icon blue"><i class="ph ph-briefcase" aria-hidden="true"></i></span><span><strong>${escapeHtml(job.title || "Вакансия")}</strong><small>${escapeHtml(job.company || "Компания не указана")}</small></span></div>
+        <div class="meta"><span class="job-source">${sourceLogoMarkup(job.source, "compact")}${escapeHtml(SOURCE_META[String(job.source || "").toLowerCase()]?.label || job.source || "источник")}</span><span>${escapeHtml(job.status || "")}</span></div>
+        <button type="button"><i class="ph ph-arrow-right" aria-hidden="true"></i>Открыть вакансию</button>`;
+      card.querySelector("button").addEventListener("click", () => {
+        window.WorkHunterUI.route.activate(
+          resolvedRouteForUrl(`/jobs?filter=all&job=${requirePositiveInteger(job.id, "job id")}`),
+          { historyMode: "push" },
+        );
+      });
+      list.append(card);
+    }
+    if (!jobs.length) {
+      const empty = document.createElement("div");
+      empty.className = "pipeline-empty";
+      empty.textContent = stage === "prepared" ? "Сохраните подходящую вакансию" : "Пока пусто";
+      list.append(empty);
+    }
+  }
+  const total = Object.values(grouped).reduce((sum, jobs) => sum + jobs.length, 0);
+  $("#pipeline-total").textContent = String(total);
+  $("#pipeline-replied").textContent = String(grouped.replied.length);
+  $("#pipeline-interviews").textContent = String(grouped.interview.length);
 }
 
 async function selectJob(id) {
@@ -241,27 +308,28 @@ function renderDetail(job) {
   const flags = score?.red_flags || [];
   const letter = job.latest_letter?.body || "";
   $("#job-detail").className = "detail";
+  const detailSourceKey = String(job.source || "").toLowerCase();
+  const detailSourceLabel = SOURCE_META[detailSourceKey]?.label || job.source || "Источник";
   $("#job-detail").innerHTML = `
-    <h2>${escapeHtml(job.title)}</h2>
-    <p>${escapeHtml(job.company || "Компания не указана")} · ${escapeHtml(job.source)} · <a href="${escapeAttr(safeExternalUrl(job.url))}" target="_blank" rel="noreferrer">открыть</a></p>
+    <div class="detail-heading"><span class="metric-icon blue"><i class="ph ph-briefcase" aria-hidden="true"></i></span><div><span class="eyebrow">Выбранная вакансия</span><h2>${escapeHtml(job.title)}</h2><p class="detail-source-line">${escapeHtml(job.company || "Компания не указана")} · <span class="job-source">${sourceLogoMarkup(detailSourceKey, "compact")}${escapeHtml(detailSourceLabel)}</span> · <a href="${escapeAttr(safeExternalUrl(job.url))}" target="_blank" rel="noreferrer">Открыть на площадке <i class="ph ph-arrow-square-out" aria-hidden="true"></i></a></p></div></div>
     <div class="detail-actions" data-guide="vacancy-actions">
-      <button data-ui-action="mark-selected" data-status="saved" data-action-id="job.save">Сохранить</button>
-      <button data-ui-action="mark-selected" data-status="hidden" data-action-id="job.hide">Скрыть</button>
-      <button data-ui-action="mark-selected" data-status="applied" data-action-id="job.applied">Откликнулся</button>
+      <button data-ui-action="mark-selected" data-status="saved" data-action-id="job.save"><i class="ph ph-bookmark-simple" aria-hidden="true"></i>Сохранить</button>
+      <button data-ui-action="mark-selected" data-status="hidden" data-action-id="job.hide"><i class="ph ph-eye-slash" aria-hidden="true"></i>Скрыть</button>
+      <button data-ui-action="mark-selected" data-status="applied" data-action-id="job.applied"><i class="ph ph-check-circle" aria-hidden="true"></i>Откликнулся</button>
     </div>
     <details class="detail-disclosure">
       <summary>Подготовить</summary>
       <div class="detail-actions">
-        <button data-ui-action="prepare-letter" data-action-id="job.letter.local">Подготовить письмо</button>
-        <button data-ui-action="prepare-letter-ai" data-action-id="job.letter.ai">AI-письмо</button>
-        <button data-ui-action="fetch-full-description" data-action-id="job.description.fetch">Загрузить описание</button>
+        <button data-ui-action="prepare-letter" data-action-id="job.letter.local"><i class="ph ph-envelope-simple" aria-hidden="true"></i>Подготовить письмо</button>
+        <button data-ui-action="prepare-letter-ai" data-action-id="job.letter.ai"><i class="ph ph-sparkle" aria-hidden="true"></i>AI-письмо</button>
+        <button data-ui-action="fetch-full-description" data-action-id="job.description.fetch"><i class="ph ph-download-simple" aria-hidden="true"></i>Загрузить описание</button>
       </div>
     </details>
     <details class="detail-disclosure">
       <summary>Дополнительно</summary>
       <div class="detail-actions">
-        <button data-ui-action="apply-hh" data-dry-run="true" data-action-id="job.hh.plan">План отклика HH</button>
-        <button data-ui-action="apply-hh" data-dry-run="false" data-action-id="job.hh.live" data-guide="live-hh-action" class="danger-action">Отправить в HH</button>
+        <button data-ui-action="apply-job" data-dry-run="true" data-action-id="job.apply.plan"><i class="ph ph-list-checks" aria-hidden="true"></i>Проверить план</button>
+        <button data-ui-action="apply-job" data-dry-run="false" data-action-id="job.apply.live" data-guide="live-hh-action" class="primary"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i>Отправить отклик</button>
         <button data-ui-action="share-to-telegram" data-action-id="job.telegram.share">Поделиться в Telegram</button>
         <button data-ui-action="smart-classify" data-action-id="job.ai.classify">AI-классификация</button>
         <button data-ui-action="parse-job-structure" data-action-id="job.ai.structure">Структура</button>
@@ -361,6 +429,7 @@ async function prepareLetterAi() {
 
 function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
   const job = state.jobs.find((item) => Number(item.id) === Number(jobId)) || {};
+  const sourceLabel = String(job.source || plan.source || "площадку");
   const review = {
     jobId,
     resumeId: plan.resume_id,
@@ -372,8 +441,8 @@ function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
   let descriptor;
   descriptor = {
     operationType: "apply",
-    title: "Отправить отклик на HH?",
-    consequence: "HH отправит реальный отклик от вашего аккаунта. Отменить его после отправки может быть невозможно.",
+    title: `Отправить отклик через ${sourceLabel}?`,
+    consequence: `${sourceLabel} получит реальный отклик от вашего аккаунта. Отменить его после отправки может быть невозможно.`,
     targetRows: [
       { key: "vacancy", label: "Вакансия", safeValue: review.vacancy },
       { key: "company", label: "Компания", safeValue: review.company },
@@ -381,7 +450,7 @@ function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
       { key: "letter", label: "Письмо", safeValue: letter ? `${letter.length} символов` : "Без письма" },
     ],
     preview: letter || null,
-    riskFlags: [{ code: "external_mutation", safeMessage: "Действие изменит данные внешнего аккаунта HH." }],
+    riskFlags: [{ code: "external_mutation", safeMessage: `Действие изменит данные внешнего аккаунта ${sourceLabel}.` }],
     acknowledgement: "Я проверил вакансию, резюме и текст письма",
     confirmLabel: "Отправить отклик",
     fingerprint,
@@ -421,7 +490,7 @@ function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
   return descriptor;
 }
 
-async function applyHh(dryRun = true) {
+async function applyJob(dryRun = true) {
   if (!state.selectedId) return;
   const jobId = state.selectedId;
   const letter = getLetterValue();
@@ -468,6 +537,13 @@ function renderProfileForm() {
   $("#profile-stopwords").value = (d.stop_words || []).join(", ");
   $("#profile-must-skills").value = (d.must_have_skills || []).join(", ");
   $("#profile-nice-skills").value = (d.nice_to_have_skills || []).join(", ");
+  $("#profile-contact-name").value = d.name || "";
+  $("#profile-email").value = d.email || "";
+  $("#profile-phone").value = d.phone || "";
+  $("#profile-city").value = d.city || "";
+  $("#profile-linkedin").value = d.linkedin_url || "";
+  $("#profile-portfolio").value = d.portfolio_url || "";
+  $("#profile-resume-path").value = d.resume_path || "";
   $("#profile-active-label").textContent = `Активный профиль: ${state.profile.active}`;
 }
 
@@ -493,6 +569,13 @@ async function saveProfile() {
     stop_words: splitList($("#profile-stopwords").value),
     must_have_skills: splitList($("#profile-must-skills").value),
     nice_to_have_skills: splitList($("#profile-nice-skills").value),
+    name: $("#profile-contact-name").value.trim(),
+    email: $("#profile-email").value.trim(),
+    phone: $("#profile-phone").value.trim(),
+    city: $("#profile-city").value.trim(),
+    linkedin_url: $("#profile-linkedin").value.trim(),
+    portfolio_url: $("#profile-portfolio").value.trim(),
+    resume_path: $("#profile-resume-path").value.trim(),
   };
   try {
     const updated = await api("/api/profile", { method: "POST", body: JSON.stringify(data) });
@@ -531,6 +614,8 @@ async function loadConfig() {
     $("#opencode-model-input").value = state.config.ai.opencode_model || "";
     $("#opencode-agent-input").value = state.config.ai.opencode_agent || "work-hunter-ai";
     $("#opencode-server-input").value = state.config.ai.opencode_server_url || "http://127.0.0.1:4096";
+    if ($("#ai-provider-label")) $("#ai-provider-label").textContent = state.config.ai.backend === "opencode" ? "OpenCode" : "OpenAI-совместимый";
+    if ($("#ai-model-label")) $("#ai-model-label").textContent = state.config.ai.model || state.config.ai.opencode_model || "Не выбрана";
   }
 
   if (state.config && state.config.ui && state.config.ui.auto_sync) {
@@ -619,6 +704,46 @@ function setAutopilotValue(config, path, value) {
   target[parts.at(-1)] = value;
 }
 
+function humanList(value, fallback) {
+  return Array.isArray(value) && value.length ? value.join(", ") : fallback;
+}
+
+function renderHumanAutopilotSummary(config) {
+  const required = getAutopilotValue(config, "filters.required_keywords");
+  const excluded = getAutopilotValue(config, "filters.excluded_keywords");
+  const remote = getAutopilotValue(config, "filters.remote");
+  const salary = Number(getAutopilotValue(config, "filters.minimum_salary") || 0);
+  const start = getAutopilotValue(config, "schedule.start") || "08:00";
+  const end = getAutopilotValue(config, "schedule.end") || "21:00";
+  const daily = Number(getAutopilotValue(config, "limits.daily_success") || 0);
+  const remoteLabel = remote === "only" ? "Только удалённо" : (remote === "exclude" ? "Без удалёнки" : "Любой");
+  const values = {
+    "#hh-rule-keywords": humanList(required, "По правилам профиля"),
+    "#hh-rule-remote": remoteLabel,
+    "#hh-rule-salary": salary > 0 ? `От ${salary.toLocaleString("ru-RU")} ₽` : "Без минимума",
+    "#hh-rule-excluded": humanList(excluded, "Не задано"),
+    "#hh-rule-schedule": `${start}–${end}`,
+    "#hh-rule-limit": daily > 0 ? `${daily} откликов в день` : "По лимиту площадки",
+  };
+  for (const [selectorName, text] of Object.entries(values)) {
+    const element = $(selectorName);
+    if (element) element.textContent = text;
+  }
+}
+
+function syncHumanAccountSelector() {
+  const source = $("#hh-autopilot-account");
+  const target = $("#hh-human-account");
+  if (!source || !target) return;
+  const previous = target.value;
+  const accountOptions = [...source.options].filter((option) => !option.value.startsWith("__"));
+  target.replaceChildren(...accountOptions.map((option) => new Option(option.textContent, option.value)));
+  if (!target.options.length) target.add(new Option("default", "default"));
+  target.value = [...target.options].some((option) => option.value === previous)
+    ? previous
+    : target.options[0].value;
+}
+
 function renderHhAutopilotConfig(payload) {
   state.hhAutopilot.config = structuredClone(payload.config || {});
   state.hhAutopilot.managed = payload.managed?.accounts || [];
@@ -633,6 +758,7 @@ function renderHhAutopilotConfig(payload) {
   selector.value = [...selector.options].some((option) => option.value === previous)
     ? previous
     : (state.hhAutopilot.managed[0]?.profile_id || "__all__");
+  syncHumanAccountSelector();
   $("#hh-autopilot-config").value = JSON.stringify(state.hhAutopilot.config, null, 2);
   for (const [selectorName, path, type] of HH_AUTOPILOT_COMMON_FIELDS) {
     const input = $(selectorName);
@@ -643,6 +769,8 @@ function renderHhAutopilotConfig(payload) {
   const migrationNote = $("#hh-autopilot-migration-note");
   migrationNote.hidden = !migration.legacy_broad_apply_present;
   migrationNote.textContent = migration.message || "";
+  renderHumanAutopilotSummary(state.hhAutopilot.config);
+  syncHumanSearchRuleControls(state.hhAutopilot.config);
   syncHhAutopilotScopeBadge();
 }
 
@@ -685,6 +813,80 @@ function renderHhAutopilotStatus(payload) {
     );
     target.append(row);
   }
+  renderHumanAutopilotStatus();
+}
+
+function hhIsConnected() {
+  const status = state.hhWebStatus || {};
+  return status.authorized === true || status.can_search_url === true || status.can_chatik === true;
+}
+
+function selectedHumanAutopilotStatus() {
+  const payload = state.hhAutopilot.status || {};
+  const account = $("#hh-human-account")?.value || hhAutopilotAccount() || "default";
+  return payload.accounts?.[account] || payload;
+}
+
+function renderHumanAutopilotStatus() {
+  const connected = hhIsConnected();
+  const status = selectedHumanAutopilotStatus();
+  const controls = status.controls || {};
+  const quota = status.quota || {};
+  const authState = $("#hh-human-auth-status");
+  const authNote = $("#hh-human-auth-note");
+  const readyTitle = $("#hh-human-ready-title");
+  const readyNote = $("#hh-human-ready-note");
+  const startButton = $("#hh-human-start");
+  const sourceState = $("#source-hh-state");
+  if (authState) {
+    authState.textContent = connected ? "Подключено" : "Нужно войти";
+    authState.classList.toggle("warning", !connected);
+  }
+  if (sourceState) {
+    sourceState.textContent = connected ? "Подключено" : "Нужно войти";
+    sourceState.classList.toggle("warning", !connected);
+  }
+  if (authNote) {
+    authNote.textContent = connected
+      ? "Аккаунт готов. Можно выбрать резюме и запускать поиск."
+      : "Пароль вводится в отдельном окне HH и не сохраняется в Work Hunter.";
+  }
+  if (!readyTitle || !readyNote || !startButton) return;
+  if (!connected) {
+    readyTitle.textContent = "Сначала войдите в HH";
+    readyNote.textContent = "После входа проверим резюме, правила и доступный лимит.";
+    startButton.textContent = "Войти и продолжить";
+    return;
+  }
+  const used = Number(quota.used || 0);
+  const limit = Number(quota.daily_limit || getAutopilotValue(state.hhAutopilot.config || {}, "limits.daily_success") || 0);
+  if (controls.paused) {
+    readyTitle.textContent = "Автоотклики на паузе";
+    readyNote.textContent = "Продолжите работу с текущими правилами и лимитами.";
+    startButton.textContent = "Продолжить";
+  } else if (controls.enabled) {
+    readyTitle.textContent = "Автоотклики включены";
+    readyNote.textContent = limit > 0 ? `Сегодня отправлено ${used} из ${limit}.` : "Можно запустить поиск прямо сейчас.";
+    startButton.textContent = "Запустить сейчас";
+  } else {
+    readyTitle.textContent = "Всё готово к запуску";
+    readyNote.textContent = "Перед первым запуском покажем точный аккаунт и лимит.";
+    startButton.textContent = "Запустить автоотклики";
+  }
+}
+
+async function loadHhConnectionStatus() {
+  try {
+    const [auth, web] = await Promise.all([
+      api("/api/hh/auth/status"),
+      api("/api/hh/web/status"),
+    ]);
+    state.hhWebStatus = { ...web, authorized: auth.authorized === true, apiStatus: auth.status };
+  } catch (_error) {
+    state.hhWebStatus = { authorized: false };
+  }
+  renderHumanAutopilotStatus();
+  return state.hhWebStatus;
 }
 
 function appendAutopilotRow(target, title, detail, actions = []) {
@@ -802,6 +1004,7 @@ function renderHhAutopilotHistory(payload, { append = false } = {}) {
 }
 
 async function loadHhAutopilot() {
+  await loadHhConnectionStatus();
   const configPayload = await api(`/api/hh/autopilot/config${hhAutopilotQuery()}`);
   renderHhAutopilotConfig(configPayload);
   await loadHhAutopilotData();
@@ -929,11 +1132,248 @@ async function saveAiSettings() {
 
   state.config = await api("/api/config", { method: "POST", body: JSON.stringify(state.config) });
   $("#config-editor").value = JSON.stringify(state.config, null, 2);
+  if ($("#ai-provider-label")) $("#ai-provider-label").textContent = state.config.ai.backend === "opencode" ? "OpenCode" : "OpenAI-совместимый";
+  if ($("#ai-model-label")) $("#ai-model-label").textContent = state.config.ai.model || state.config.ai.opencode_model || "Не выбрана";
   notify("success", "settings-ai", "saved", "Настройки AI сохранены");
 }
 
+const SOURCE_META = Object.freeze({
+  hh: { label: "HeadHunter", domain: "hh.ru", url: "https://hh.ru/account/login", icon: "/vendor/brands/hh.png" },
+  linkedin: { label: "LinkedIn", domain: "linkedin.com", url: "https://www.linkedin.com/login", icon: "/vendor/brands/linkedin.png" },
+  habr: { label: "Хабр Карьера", domain: "career.habr.com", url: "https://career.habr.com/login", icon: "/vendor/brands/habr.png" },
+  geekjob: { label: "GeekJob", domain: "geekjob.ru", url: "https://geekjob.ru/login", icon: "/vendor/brands/geekjob.png" },
+  getmatch: { label: "Getmatch", domain: "getmatch.ru", url: "https://getmatch.ru/auth/signin", icon: "/vendor/brands/getmatch.png" },
+  relocate_me: { label: "Relocate.me", domain: "relocate.me", url: "https://relocate.me", icon: "/vendor/brands/relocate_me.png" },
+  rvc: { label: "RVC", domain: "app.rvc.global", url: "https://app.rvc.global/auth/sign-in", icon: "/vendor/brands/rvc.jpg" },
+  hirehi: { label: "HireHi", domain: "hirehi.ru", url: "https://hirehi.ru/login", icon: "/vendor/brands/hirehi.png" },
+  careerspace: { label: "CareerSpace", domain: "careerspace.app", url: "https://careerspace.app/login", icon: "/vendor/brands/careerspace.png" },
+  another_it: { label: "Another-IT", domain: "another-it.ru", url: "https://another-it.ru/login", icon: "/vendor/brands/another_it.png" },
+  jabka: { label: "Жабка", domain: "jabka.work", url: "https://jabka.work", icon: "/vendor/brands/jabka.png" },
+  indeed: { label: "Indeed", domain: "indeed.com", url: "https://secure.indeed.com/auth", icon: "/vendor/brands/indeed.png" },
+  telegram: { label: "Telegram-каналы", domain: "telegram.org", url: "https://web.telegram.org", icon: "/vendor/brands/telegram.png" },
+});
+
+function sourceLogoMarkup(sourceName, className = "") {
+  const meta = SOURCE_META[String(sourceName || "").toLowerCase()];
+  const classes = `source-logo ${className}`.trim();
+  if (meta?.icon) return `<img class="${escapeAttr(classes)}" src="${escapeAttr(meta.icon)}" alt="">`;
+  return `<span class="${escapeAttr(classes)} source-logo-fallback" aria-hidden="true"><i class="ph ph-globe"></i></span>`;
+}
+
+function sourceSyncLabel(source) {
+  if (!source?.last_sync_at) return "Ещё не синхронизировано";
+  const date = new Date(source.last_sync_at);
+  return Number.isNaN(date.getTime())
+    ? "Синхронизировано"
+    : `Обновлено ${date.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function selectHumanAccount(account) {
+  const technical = $("#hh-autopilot-account");
+  if (!technical) return;
+  const next = account || "default";
+  if ([...technical.options].some((option) => option.value === next)) technical.value = next;
+  syncHhAutopilotScopeBadge();
+}
+
+function setWorkMode(mode) {
+  state.workMode = mode === "search" ? "search" : "apply";
+  document.querySelectorAll("[data-work-mode], [data-hh-mode]").forEach((button) => {
+    const buttonMode = button.dataset.workMode || button.dataset.hhMode;
+    const active = buttonMode === state.workMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  const start = $("#work-mode-start");
+  if (start) {
+    start.textContent = $("#work-mode-hero")?.dataset.readiness === "ready"
+      ? (state.workMode === "search" ? "Найти вакансии" : "Запустить автоотклики")
+      : "Завершить настройку";
+  }
+}
+
+function confirmHumanAutopilotStart(trigger) {
+  const account = $("#hh-human-account")?.value || "default";
+  selectHumanAccount(account);
+  const status = selectedHumanAutopilotStatus();
+  const config = state.hhAutopilot.config || {};
+  const daily = getAutopilotValue(config, "limits.daily_success") || "по настройкам";
+  const fingerprint = stableActionFingerprint({ action: "enable-and-run", account, daily });
+  openLiveAction({
+    operationType: "resume_account",
+    title: "Запустить автоотклики?",
+    consequence: "Work Hunter включит автопилот и начнёт отправлять реальные отклики по вашим правилам.",
+    targetRows: [
+      { key: "resume_or_account", label: "Аккаунт", safeValue: account },
+      { key: "changes", label: "Дневной лимит", safeValue: String(daily) },
+    ],
+    riskFlags: [{ code: "external_mutation", safeMessage: "Отклики будут отправлены работодателям от вашего аккаунта." }],
+    acknowledgement: "Я проверил аккаунт, резюме и лимит откликов",
+    confirmLabel: "Запустить",
+    fingerprint,
+    trigger,
+    revalidate: async () => ({ status: "executable", fingerprint, canExecute: true }),
+    execute: async () => {
+      if (!status.controls?.enabled) await runHhAutopilotMutation("enable", {}, trigger, true);
+      return runHhAutopilotMutation("run-now", {}, trigger);
+    },
+  });
+}
+
+async function handleHumanAutopilotStart(eventOrTrigger) {
+  const trigger = eventOrTrigger?.currentTarget || eventOrTrigger;
+  const account = $("#hh-human-account")?.value || "default";
+  selectHumanAccount(account);
+  if (!hhIsConnected()) {
+    await startHhLogin({ account, trigger });
+    return;
+  }
+  const status = selectedHumanAutopilotStatus();
+  if (status.controls?.paused) {
+    await runHhAutopilotMutation("resume", {}, trigger);
+    await runHhAutopilotMutation("run-now", {}, trigger);
+    return;
+  }
+  if (status.controls?.enabled) {
+    await runHhAutopilotMutation("run-now", {}, trigger);
+    return;
+  }
+  confirmHumanAutopilotStart(trigger);
+}
+
+async function handlePrimaryWorkMode() {
+  if ($("#work-mode-hero")?.dataset.readiness !== "ready") {
+    activateView("settings");
+    switchSettingsSection("profile");
+    return;
+  }
+  if (state.workMode === "search") {
+    await syncJobs();
+    activateView("inbox");
+    return;
+  }
+  if (hhIsConnected()) {
+    await handleHumanAutopilotStart($("#work-mode-start"));
+  } else {
+    activateView("settings");
+    switchSettingsSection("hh");
+    $("#hh-login-button")?.focus();
+  }
+}
+
+function promptForHhAccount(trigger) {
+  const entered = window.prompt("Название аккаунта HH", "work");
+  const account = String(entered || "").trim();
+  if (!account) return;
+  startHhLogin({ account, trigger }).catch((error) => notifyError("hh-login", error));
+}
+
+function openSourceLogin(sourceName, url) {
+  if (sourceName === "hh") {
+    activateView("settings");
+    switchSettingsSection("hh");
+    return;
+  }
+  const safeUrl = safeExternalUrl(url);
+  if (safeUrl === "#") return;
+  window.open(safeUrl, "_blank", "noopener,noreferrer");
+}
+
+async function startSourceBrowserLogin(sourceName, url, trigger) {
+  if (sourceName === "hh") {
+    activateView("settings");
+    switchSettingsSection("hh");
+    return;
+  }
+  const meta = SOURCE_META[sourceName] || { label: sourceName };
+  setBusy(trigger, true, "Открываю вход...");
+  try {
+    await api("/api/sources/browser-login", {
+      method: "POST",
+      body: JSON.stringify({ source: sourceName, url }),
+    });
+    notify(
+      "success",
+      `source-login-${sourceName}`,
+      "started",
+      `Открываем ${meta.label}`,
+      "Войдите в отдельном окне. Work Hunter сохранит эту браузерную сессию для откликов.",
+    );
+  } finally {
+    setBusy(trigger, false);
+  }
+}
+
+function renderSourceCapabilities(sources, capabilities) {
+  const box = $("#sources-list");
+  if (!box) return;
+  const syncByName = Object.fromEntries(sources.map((source) => [source.source, source]));
+  const entries = Object.entries(capabilities).sort(([left], [right]) => {
+    const preferred = ["hh", "linkedin", "habr", "getmatch", "geekjob", "careerspace", "indeed", "relocate_me", "hirehi", "another_it", "jabka", "telegram"];
+    const leftIndex = preferred.indexOf(left);
+    const rightIndex = preferred.indexOf(right);
+    return (leftIndex < 0 ? 999 : leftIndex) - (rightIndex < 0 ? 999 : rightIndex);
+  });
+  box.replaceChildren();
+  if (!sources.length) {
+    const emptyNote = document.createElement("p");
+    emptyNote.className = "meta source-empty-note";
+    emptyNote.textContent = "Источники еще не синхронизировались";
+    box.append(emptyNote);
+  }
+  for (const [sourceName, capability] of entries) {
+    const meta = SOURCE_META[sourceName] || { label: sourceName, domain: sourceName, url: "" };
+    const row = document.createElement("article");
+    row.className = "source-capability-row";
+    const searchAvailable = !["", "none"].includes(String(capability.search || ""));
+    const applyKind = String(capability.apply || "none");
+    const canApply = !["", "none"].includes(applyKind);
+    const usesBrowser = ["browser", "session_or_browser"].includes(applyKind);
+    const requiresAuth = Boolean(capability.requires_auth);
+    const badges = [
+      searchAvailable ? '<span class="capability-badge">Поиск</span>' : "",
+      canApply ? `<span class="capability-badge apply">${applyKind === "external_contact" ? "Связаться" : "Автоотклик"}</span>` : "",
+      usesBrowser ? '<span class="capability-badge browser">Через браузер</span>' : "",
+      requiresAuth ? '<span class="capability-badge auth"><i class="ph ph-lock-key" aria-hidden="true"></i>Нужен вход</span>' : "",
+    ].join("");
+    const detail = applyKind === "official_api"
+      ? "Поиск, отклики и ответы работодателям"
+      : (usesBrowser
+        ? (requiresAuth ? "Автоотклик использует сохранённую браузерную сессию" : "Поиск автоматический; отклик откроется в браузере")
+        : "Вакансии загружаются в общую ленту");
+    const actionType = sourceName === "hh" ? "manage" : (requiresAuth ? "login" : "open");
+    const actionLabel = sourceName === "hh"
+      ? "Аккаунт HH"
+      : (requiresAuth ? `Войти в ${meta.label}` : (applyKind === "external_contact" ? "Открыть канал" : "Открыть отклик"));
+    const actionIcon = requiresAuth ? "ph-sign-in" : (sourceName === "hh" ? "ph-user-circle" : "ph-arrow-square-out");
+    row.innerHTML = `
+      <div class="source-capability-name">${sourceLogoMarkup(sourceName)}<span><strong>${escapeHtml(meta.label)}</strong><small>${escapeHtml(meta.domain)}</small></span></div>
+      <div class="source-capability-badges">${badges}</div>
+      <div class="source-capability-description">${escapeHtml(detail)}<br><span class="meta">${escapeHtml(sourceSyncLabel(syncByName[sourceName]))}</span></div>
+      <button type="button" class="source-action ${requiresAuth ? "login" : ""}" data-source-name="${escapeAttr(sourceName)}" data-source-action="${escapeAttr(actionType)}" data-source-url="${escapeAttr(meta.url)}"><i class="ph ${escapeAttr(actionIcon)}" aria-hidden="true"></i>${escapeHtml(actionLabel)}</button>`;
+    box.append(row);
+  }
+  const enabled = entries.filter(([, capability]) => capability.enabled).length;
+  const summary = $("#sources-summary");
+  if (summary) summary.textContent = `${enabled} площадок включено`;
+  const searchCount = entries.filter(([, capability]) => !["", "none"].includes(String(capability.search || ""))).length;
+  const applyCount = entries.filter(([, capability]) => !["", "none"].includes(String(capability.apply || "none"))).length;
+  const authCount = entries.filter(([, capability]) => capability.requires_auth).length;
+  const connectedCount = sources.filter((source) => source.last_sync_at && !source.last_error).length;
+  if ($("#sources-search-count")) $("#sources-search-count").textContent = String(searchCount);
+  if ($("#sources-apply-count")) $("#sources-apply-count").textContent = String(applyCount);
+  if ($("#sources-auth-count")) $("#sources-auth-count").textContent = String(authCount);
+  if ($("#sources-connected-count")) $("#sources-connected-count").textContent = String(connectedCount);
+  if ($("#search-source-count")) $("#search-source-count").textContent = String(searchCount);
+}
+
 async function loadSources() {
-  const sources = await api("/api/sources");
+  const [sources, capabilities] = await Promise.all([
+    api("/api/sources"),
+    api("/api/source-capabilities"),
+    loadHhConnectionStatus(),
+  ]);
+  state.sourceCapabilities = capabilities;
   state.sourceKeys = [...new Set(sources.map((source) => String(source.source || "")).filter(Boolean))];
   const sourceFilter = $("#source-filter");
   for (const sourceKey of state.sourceKeys) {
@@ -946,22 +1386,7 @@ async function loadSources() {
     state.routeNeedsReload = true;
     notify("warning", "route-source", "invalid-source", "Источник из ссылки больше недоступен");
   }
-  const box = $("#sources-list");
-  box.innerHTML = "";
-  if (!sources.length) {
-    box.innerHTML = `<p>Источники еще не синхронизировались.</p>`;
-    return;
-  }
-  for (const source of sources) {
-    const row = document.createElement("div");
-    row.className = "source-row";
-    row.innerHTML = `
-      <strong>${escapeHtml(source.source)}</strong>
-      <div class="meta">last sync: ${escapeHtml(source.last_sync_at || "-")}</div>
-      ${source.last_error ? `<div class="error">${escapeHtml(source.last_error)}</div>` : `<div class="meta">ошибок нет</div>`}
-    `;
-    box.appendChild(row);
-  }
+  renderSourceCapabilities(sources, capabilities);
 }
 
 async function todayResource(path) {
@@ -1114,7 +1539,7 @@ async function sendChatMessage() {
   }
 
   $("#chat-send-button").disabled = true;
-  $("#chat-send-button").textContent = "Думаю...";
+  $("#chat-send-button").innerHTML = '<i class="ph ph-circle-notch" aria-hidden="true"></i><span>Думаю…</span>';
 
   try {
     const result = await api("/api/chat", { method: "POST", body: JSON.stringify(body) });
@@ -1125,7 +1550,7 @@ async function sendChatMessage() {
     renderChat();
   } finally {
     $("#chat-send-button").disabled = false;
-    $("#chat-send-button").textContent = "Отправить";
+    $("#chat-send-button").innerHTML = '<i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span>Отправить</span>';
   }
 }
 
@@ -1191,6 +1616,7 @@ function setBusy(target, busy, busyLabel = "Работаю...") {
       busyButtonStates.set(button, {
         activeCount: 1,
         originalLabel: button.textContent,
+        originalMarkup: button.innerHTML,
       });
     }
     button.disabled = true;
@@ -1201,7 +1627,7 @@ function setBusy(target, busy, busyLabel = "Работаю...") {
     state.activeCount -= 1;
     if (state.activeCount > 0) return;
     button.disabled = false;
-    button.textContent = state.originalLabel;
+    button.innerHTML = state.originalMarkup || escapeHtml(state.originalLabel);
     busyButtonStates.delete(button);
   }
 }
@@ -1537,11 +1963,24 @@ async function loadStats() {
     funnelDiv.innerHTML = "";
     if (stats.application_funnel) {
       const total = stats.total_applications || 0;
+      const funnelLabels = {
+        prepared: "Подготовлено",
+        sent: "Отправлено",
+        applied: "Отклики",
+        response: "Ответы",
+        responded: "Ответы",
+        replied: "Ответы",
+        phone_screen: "Скрининг",
+        interview: "Интервью",
+        offer: "Офферы",
+        rejected: "Отказы",
+      };
       for (const item of stats.application_funnel) {
         const count = Number(item.count);
         const safeCount = Number.isFinite(count) ? count : 0;
         const status = String(item.status || "");
-        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${funnelWidth(safeCount, total)}%;min-width:40px;"><span>${escapeHtml(status)}</span><strong>${escapeHtml(String(item.count))}</strong></div>`;
+        const label = funnelLabels[status.toLowerCase()] || status;
+        funnelDiv.innerHTML += `<div class="funnel-stage" style="width:${funnelWidth(safeCount, total)}%;min-width:40px;"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(item.count))}</strong></div>`;
       }
     }
   } catch (e) {
@@ -1638,11 +2077,12 @@ function switchAgentPanel(panelName) {
   document.querySelectorAll(".agent-panel").forEach(p => p.classList.remove("active"));
   document.querySelector(`.agent-tab[data-agent-panel="${panelName}"]`)?.classList.add("active");
   $(`#agent-panel-${panelName}`)?.classList.add("active");
+  if (panelName === "chats" && !state.agent.chats) loadAgentChats();
 }
 
 const APPLICATION_TAB_PANELS = Object.freeze({
   pipeline: ["inbox"],
-  agent: ["dashboard", "approvals", "runs", "events"],
+  agent: ["dashboard", "chats", "approvals", "runs", "events"],
   automation: ["research", "templates", "resume-builder", "blacklist", "settings"],
 });
 
@@ -1665,6 +2105,8 @@ function switchApplicationsTab(tab, { push = true } = {}) {
   document.querySelectorAll(".agent-tab").forEach((button) => {
     button.hidden = !panels.includes(button.dataset.agentPanel);
   });
+  const agentTabBar = $("#view-agent > .agent-tabs");
+  if (agentTabBar) agentTabBar.hidden = panels.length === 1;
   const activePanel = document.querySelector(".agent-panel.active")?.id.replace("agent-panel-", "");
   switchAgentPanel(panels.includes(activePanel) ? activePanel : panels[0]);
   pushDestinationSubview("/applications", "tab", selected, push);
@@ -1740,19 +2182,147 @@ function setupDestinationPanels() {
     statsView.append(overview, trends);
   }
 
-  const settingsPanels = [...document.querySelectorAll("#view-settings > .panel")];
-  const mapping = ["profile", "resumes", "ai", "notifications", "hh", "search", "advanced", "advanced", "appearance", "help"];
-  settingsPanels.forEach((panelElement, index) => {
-    if (!panelElement.dataset.settingsPanel) panelElement.dataset.settingsPanel = mapping[index] || "advanced";
-  });
   const apiLab = $("#agent-panel-api-lab");
   const advancedSlot = $("#settings-advanced-slot");
-  if (apiLab && advancedSlot) {
+  const advancedFragments = $("#advanced-fragments");
+  for (const fragment of document.querySelectorAll("#view-settings > .advanced-fragment")) {
+    const title = fragment.querySelector("h2")?.textContent || "Служебные данные";
+    const details = document.createElement("details");
+    details.className = "advanced-disclosure advanced-section";
+    const summary = document.createElement("summary");
+    summary.innerHTML = `<i class="ph ph-folder-open" aria-hidden="true"></i><span>${escapeHtml(title)}</span><small>Открыть только при необходимости</small>`;
+    const body = document.createElement("div");
+    body.className = "advanced-section-body";
+    while (fragment.firstChild) body.append(fragment.firstChild);
+    details.append(summary, body);
+    advancedFragments?.append(details);
+    fragment.remove();
+  }
+  if (apiLab && advancedSlot && advancedFragments) {
     apiLab.classList.remove("agent-panel", "active");
     apiLab.removeAttribute("hidden");
-    advancedSlot.append(apiLab);
+    const details = document.createElement("details");
+    details.className = "advanced-disclosure advanced-section";
+    const summary = document.createElement("summary");
+    summary.innerHTML = '<i class="ph ph-code" aria-hidden="true"></i><span>HH API Lab</span><small>Ручные запросы и сохранённые шаблоны</small>';
+    const body = document.createElement("div");
+    body.className = "advanced-section-body";
+    body.append(apiLab);
+    details.append(summary, body);
+    advancedFragments.append(details);
     document.querySelector('.agent-tab[data-agent-panel="api-lab"]')?.remove();
   }
+}
+
+const LOCAL_SETTINGS_KEY = "work-hunter-ui-preferences";
+
+function localSettingsSnapshot() {
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_SETTINGS_KEY) || "{}");
+  } catch (_error) {
+    return {};
+  }
+}
+
+function persistLocalSettings() {
+  const settings = localSettingsSnapshot();
+  for (const control of document.querySelectorAll("[data-local-setting]")) {
+    settings[control.dataset.localSetting] = control.type === "checkbox" ? control.checked : control.value;
+  }
+  localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+  notify("success", "local-settings", "saved", "Настройки сохранены");
+}
+
+function applyAppearanceChoice({ theme, density, fontScale } = {}) {
+  if (theme) {
+    document.documentElement.dataset.themeChoice = theme;
+    const dark = theme === "dark" || (theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+    state.darkTheme = dark;
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    localStorage.setItem("work-hunter-theme", dark ? "dark" : "light");
+    localStorage.setItem("work-hunter-theme-choice", theme);
+    $("#theme-toggle-button").textContent = dark ? "Светлая" : "Тёмная";
+  }
+  if (density) {
+    document.documentElement.dataset.density = density;
+    localStorage.setItem("work-hunter-density", density);
+  }
+  if (fontScale) {
+    document.documentElement.style.setProperty("--font-scale", String(fontScale));
+    localStorage.setItem("work-hunter-font-scale", String(fontScale));
+  }
+}
+
+function loadLocalUiPreferences() {
+  const settings = localSettingsSnapshot();
+  for (const control of document.querySelectorAll("[data-local-setting]")) {
+    if (!(control.dataset.localSetting in settings)) continue;
+    if (control.type === "checkbox") control.checked = Boolean(settings[control.dataset.localSetting]);
+    else control.value = String(settings[control.dataset.localSetting]);
+  }
+  const theme = localStorage.getItem("work-hunter-theme-choice") || (localStorage.getItem("work-hunter-theme") === "dark" ? "dark" : "system");
+  const density = localStorage.getItem("work-hunter-density") || "comfortable";
+  const fontScale = Number(localStorage.getItem("work-hunter-font-scale") || 1);
+  applyAppearanceChoice({ theme, density, fontScale });
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => button.classList.toggle("active", button.dataset.themeChoice === theme));
+  document.querySelectorAll("[data-density]").forEach((button) => button.classList.toggle("active", button.dataset.density === density));
+  document.querySelectorAll("[data-font-scale]").forEach((button) => button.classList.toggle("active", Number(button.dataset.fontScale) === fontScale));
+}
+
+function syncHumanSearchRuleControls(config = state.hhAutopilot.config || {}) {
+  const values = {
+    "#search-rule-query": humanList(getAutopilotValue(config, "filters.required_keywords"), ""),
+    "#search-rule-keywords": humanList(getAutopilotValue(config, "filters.required_keywords"), ""),
+    "#search-rule-excluded": humanList(getAutopilotValue(config, "filters.excluded_keywords"), ""),
+    "#search-rule-remote": getAutopilotValue(config, "filters.remote") || "any",
+    "#search-rule-salary": String(getAutopilotValue(config, "filters.minimum_salary") || 0),
+    "#search-rule-score": String(getAutopilotValue(config, "ranking.minimum_score") || 60),
+    "#search-rule-start": getAutopilotValue(config, "schedule.start") || "08:00",
+    "#search-rule-end": getAutopilotValue(config, "schedule.end") || "21:00",
+    "#search-rule-interval": String(getAutopilotValue(config, "schedule.interval_minutes") || 60),
+    "#search-rule-limit": String(getAutopilotValue(config, "limits.daily_success") || 50),
+  };
+  for (const [selector, value] of Object.entries(values)) {
+    if ($(selector)) $(selector).value = value;
+  }
+  updateSearchRulePreview();
+}
+
+function updateSearchRulePreview() {
+  const query = $("#search-rule-query")?.value.trim() || "По правилам профиля";
+  const remote = $("#search-rule-remote")?.value || "any";
+  const salary = Number($("#search-rule-salary")?.value || 0);
+  const score = Number($("#search-rule-score")?.value || 0);
+  const limit = Number($("#search-rule-limit")?.value || 0);
+  if ($("#search-rule-score-value")) $("#search-rule-score-value").textContent = `${score}%`;
+  if ($("#search-preview-role")) $("#search-preview-role").textContent = query.split(",")[0] || "По правилам профиля";
+  if ($("#search-preview-remote")) $("#search-preview-remote").textContent = remote === "only" ? "Только удалённо" : remote === "exclude" ? "Офис или гибрид" : "Любой формат";
+  if ($("#search-preview-salary")) $("#search-preview-salary").textContent = salary > 0 ? `От ${salary.toLocaleString("ru-RU")} ₽` : "Без минимума";
+  if ($("#search-preview-score")) $("#search-preview-score").textContent = `Score от ${score}`;
+  if ($("#search-preview-limit")) $("#search-preview-limit").textContent = limit > 0 ? `До ${limit} откликов в день` : "По лимиту площадки";
+}
+
+async function saveHumanSearchRules() {
+  const config = structuredClone(state.hhAutopilot.config || JSON.parse($("#hh-autopilot-config")?.value || "{}"));
+  const list = (value) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+  setAutopilotValue(config, "filters.required_keywords", list($("#search-rule-keywords")?.value || $("#search-rule-query")?.value));
+  setAutopilotValue(config, "filters.excluded_keywords", list($("#search-rule-excluded")?.value));
+  setAutopilotValue(config, "filters.remote", $("#search-rule-remote")?.value || "any");
+  setAutopilotValue(config, "filters.minimum_salary", Number($("#search-rule-salary")?.value || 0));
+  setAutopilotValue(config, "ranking.minimum_score", Number($("#search-rule-score")?.value || 0));
+  setAutopilotValue(config, "schedule.start", $("#search-rule-start")?.value || "08:00");
+  setAutopilotValue(config, "schedule.end", $("#search-rule-end")?.value || "21:00");
+  setAutopilotValue(config, "schedule.interval_minutes", Number($("#search-rule-interval")?.value || 60));
+  setAutopilotValue(config, "limits.daily_success", Number($("#search-rule-limit")?.value || 50));
+  $("#hh-autopilot-config").value = JSON.stringify(config, null, 2);
+  for (const [selectorName, path, type] of HH_AUTOPILOT_COMMON_FIELDS) {
+    const input = $(selectorName);
+    if (!input) continue;
+    const value = getAutopilotValue(config, path);
+    input.value = type === "list" ? (value || []).join(", ") : (value ?? "");
+  }
+  await saveHhAutopilotConfig();
+  notify("success", "search-rules", "saved", "Правила поиска сохранены");
 }
 
 function setupNavigationAccessibility() {
@@ -1882,6 +2452,288 @@ async function loadAgentEvents() {
 async function loadAgentTasks() {
   state.agent.tasks = await api("/api/agent/tasks?limit=20");
   renderAgentEvents();
+}
+
+function agentChatLimit() {
+  const parsed = Number.parseInt($("#agent-chats-limit")?.value || "20", 10);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 100)) : 20;
+}
+
+async function loadAgentChats() {
+  const button = $("#agent-chats-refresh-button");
+  if (button) button.disabled = true;
+  $("#agent-chats-status").textContent = "Проверяю входящие чаты…";
+  clearAgentChatPlan();
+  try {
+    state.agent.chats = await api(`/api/hh/chats?limit=${agentChatLimit()}&awaiting_only=true`);
+    renderAgentChats();
+  } catch (error) {
+    state.agent.chats = { status: "error", message: error.message, chats: [] };
+    renderAgentChats();
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function startHhLogin({ account = "default", trigger = null, refreshChats = false } = {}) {
+  const button = trigger || $("#agent-chats-login-button");
+  if (state.agent.chatAuthStarting) return;
+  state.agent.chatAuthStarting = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Открываю окно входа…";
+  }
+  $("#agent-chats-status").textContent = "Открываю безопасное окно входа HH…";
+  try {
+    await api("/api/hh/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account }),
+    });
+    $("#agent-chats-status").textContent = "Завершите вход в открывшемся окне. Проверяю подключение…";
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      await loadHhConnectionStatus();
+      if (hhIsConnected()) {
+        state.agent.chatAuthStarting = false;
+        if (refreshChats) await loadAgentChats();
+        await loadHhAutopilot().catch(() => {});
+        return;
+      }
+    }
+    $("#agent-chats-status").textContent = "Вход пока не подтверждён. Нажмите «Войти в HH», чтобы попробовать ещё раз.";
+  } catch (error) {
+    $("#agent-chats-status").textContent = `Не удалось открыть вход HH: ${error.message}`;
+  } finally {
+    state.agent.chatAuthStarting = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Войти в HH";
+    }
+  }
+}
+
+async function startAgentChatLogin() {
+  return startHhLogin({
+    account: $("#hh-human-account")?.value || "default",
+    trigger: $("#agent-chats-login-button"),
+    refreshChats: true,
+  });
+}
+
+function agentChatActionCount(plan) {
+  return Number(plan?.count || 0) + Number(plan?.leave_count || 0);
+}
+
+function setAgentChatButtons({ canPlan = false, canSend = false } = {}) {
+  const planButton = $("#agent-chats-plan-button");
+  const sendButton = $("#agent-chats-send-button");
+  if (planButton) planButton.disabled = !canPlan;
+  if (sendButton) sendButton.disabled = !canSend;
+}
+
+function clearAgentChatPlan() {
+  state.agent.chatReplyPlan = null;
+  const output = $("#agent-chats-output");
+  if (output) {
+    output.hidden = true;
+    output.innerHTML = "";
+  }
+  setAgentChatButtons();
+}
+
+function renderAgentChats() {
+  const box = $("#agent-chats-list");
+  const status = $("#agent-chats-status");
+  const connection = $("#agent-chats-connection");
+  if (!box || !status) return;
+  const payload = state.agent.chats || {};
+  const chats = Array.isArray(payload.chats) ? payload.chats : [];
+  const blocked = payload.status === "blocked";
+  const failed = payload.status === "error";
+  if (connection) connection.hidden = !blocked;
+  const loginButton = $("#agent-chats-login-button");
+  if (loginButton) loginButton.disabled = state.agent.chatAuthStarting;
+  if (blocked) {
+    status.textContent = "HH не подключён — ответы и отправка пока недоступны.";
+  } else if (failed) {
+    status.textContent = `Не удалось загрузить чаты: ${payload.message || "неизвестная ошибка"}`;
+  } else if (chats.length) {
+    status.textContent = `Ждут ответа: ${chats.length}`;
+  } else {
+    status.textContent = "Новых сообщений, требующих ответа, нет.";
+  }
+  setAgentChatButtons({ canPlan: !blocked && !failed && chats.length > 0, canSend: false });
+  box.innerHTML = chats.length ? chats.map((chat) => {
+    const options = Array.isArray(chat.reply_options) ? chat.reply_options : [];
+    return `
+      <div class="agent-row">
+        <div class="agent-row-head">
+          <strong>${escapeHtml(chat.vacancy_name || `Chat #${chat.chat_id}`)}</strong>
+          <span class="agent-badge ${chat.discarded ? "error" : "active"}">${chat.discarded ? "отказ" : "ждёт ответа"}</span>
+        </div>
+        <div class="meta">${escapeHtml([chat.company_name, chat.contact_name, chat.resume_title].filter(Boolean).join(" · "))}</div>
+        <p>${escapeHtml(chat.last_message_text || "Без текста")}</p>
+        ${options.length ? `<div class="agent-inline-stats">${options.map((option) => `<span>${escapeHtml(option)}</span>`).join("")}</div>` : ""}
+      </div>`;
+  }).join("") : blocked
+    ? ""
+    : '<p class="meta">Здесь появятся сообщения работодателей, на которые нужно ответить.</p>';
+}
+
+function renderAgentChatReplyPlan(result) {
+  const output = $("#agent-chats-output");
+  const status = $("#agent-chats-status");
+  if (!output || !status) return;
+  const replies = Array.isArray(result?.replies) ? result.replies : [];
+  const leaves = Array.isArray(result?.leaves) ? result.leaves : [];
+  const actionCount = agentChatActionCount(result);
+  if (result?.status === "blocked") {
+    output.hidden = true;
+    output.innerHTML = "";
+    status.textContent = "Сначала подключите HH, затем обновите список чатов.";
+    setAgentChatButtons();
+    return;
+  }
+  if (!actionCount) {
+    output.hidden = true;
+    output.innerHTML = "";
+    status.textContent = "Готовых ответов нет — отправлять нечего.";
+    setAgentChatButtons({ canPlan: Array.isArray(state.agent.chats?.chats) && state.agent.chats.chats.length > 0 });
+    return;
+  }
+  const replyRows = replies.map((item) => `
+    <div class="agent-row">
+      <div class="agent-row-head">
+        <strong>${escapeHtml(item.vacancy_name || `Чат #${item.chat_id || "—"}`)}</strong>
+        <span class="agent-badge active">ответ</span>
+      </div>
+      <p>${escapeHtml(item.message || "")}</p>
+    </div>
+  `);
+  const leaveRows = leaves.map((item) => `
+    <div class="agent-row">
+      <div class="agent-row-head">
+        <strong>${escapeHtml(item.vacancy_name || `Чат #${item.chat_id || "—"}`)}</strong>
+        <span class="agent-badge warning">скрыть</span>
+      </div>
+      <p class="meta">Работодатель уже отказал — чат будет убран из входящих.</p>
+    </div>
+  `);
+  output.innerHTML = `
+    <div class="agent-row">
+      <div class="agent-row-head">
+        <strong>Ответы готовы к проверке</strong>
+        <span class="agent-badge approved">${actionCount}</span>
+      </div>
+      <p class="meta">Проверьте тексты ниже. Ничего не уйдёт без отдельного подтверждения.</p>
+    </div>
+    ${replyRows.join("")}
+    ${leaveRows.join("")}
+  `;
+  output.hidden = false;
+  status.textContent = `Подготовлено: ${replies.length} ответов, ${leaves.length} чатов скрыть.`;
+  setAgentChatButtons({ canPlan: true, canSend: true });
+}
+
+async function requestAgentChatReplyPlan() {
+  const result = await api("/api/hh/chats/reply", {
+    method: "POST",
+    body: JSON.stringify({
+      use_ai: true,
+      limit: agentChatLimit(),
+      leave_discarded: $("#agent-chats-leave-discarded")?.checked === true,
+      confirm: false,
+    }),
+  });
+  state.agent.chatReplyPlan = result;
+  renderAgentChatReplyPlan(result);
+  return result;
+}
+
+async function planAgentChatReplies() {
+  const button = $("#agent-chats-plan-button");
+  if (button) button.disabled = true;
+  try {
+    await requestAgentChatReplyPlan();
+  } catch (error) {
+    $("#agent-chats-status").textContent = `Не удалось подготовить ответы: ${error.message}`;
+    setAgentChatButtons({ canPlan: true, canSend: false });
+  } finally {
+    if (button && state.agent.chatReplyPlan) button.disabled = false;
+  }
+}
+
+function chatReplyPlanFingerprint(plan) {
+  return stableActionFingerprint({
+    replies: (plan.replies || []).map((item) => ({
+      chat_id: item.chat_id,
+      message: item.message,
+      source: item.source_message_fingerprint,
+    })),
+    leaves: (plan.leaves || []).map((item) => ({
+      chat_id: item.chat_id,
+      source: item.source_message_fingerprint,
+    })),
+  });
+}
+
+async function sendAgentChatReplies() {
+  const trigger = $("#agent-chats-send-button");
+  if (trigger) trigger.disabled = true;
+  let plan;
+  try {
+    plan = await requestAgentChatReplyPlan();
+  } catch (error) {
+    $("#agent-chats-status").textContent = `Не удалось проверить ответы: ${error.message}`;
+    setAgentChatButtons({ canPlan: true, canSend: false });
+    return;
+  }
+  const actionCount = agentChatActionCount(plan);
+  if (!actionCount) {
+    $("#agent-chats-status").textContent = "Нет готовых действий для отправки.";
+    return;
+  }
+  const fingerprint = chatReplyPlanFingerprint(plan);
+  let descriptor;
+  descriptor = {
+    operationType: "resume_account",
+    title: "Отправить ответы в чаты HH?",
+    consequence: "Работодатели получат реальные сообщения; отказные чаты будут скрыты, если включена очистка.",
+    targetRows: [
+      { key: "resume_or_account", label: "Аккаунт", safeValue: plan.account || "default" },
+      { key: "changes", label: "Действия", safeValue: `${plan.count || 0} ответов · ${plan.leave_count || 0} закрытий` },
+    ],
+    preview: (plan.replies || []).map((item) => `${item.vacancy_name}: ${item.message}`).join("\n\n") || null,
+    riskFlags: [{ code: "external_mutation", safeMessage: "Сообщения уйдут в реальные чаты HH." }],
+    acknowledgement: "Я проверил тексты ответов и список чатов",
+    confirmLabel: "Отправить ответы",
+    fingerprint,
+    trigger,
+    revalidate: async () => validateResumeAccountMutation(descriptor, async () => {
+      const current = await requestAgentChatReplyPlan();
+      const currentFingerprint = chatReplyPlanFingerprint(current);
+      if (currentFingerprint !== fingerprint) {
+        return { status: "changed", fingerprint: currentFingerprint, canExecute: false };
+      }
+      return { status: "executable", fingerprint, canExecute: true, blockers: [] };
+    }),
+    execute: async (confirm) => {
+      const result = await api("/api/hh/chats/reply", {
+        method: "POST",
+        body: JSON.stringify({
+          use_ai: true,
+          limit: agentChatLimit(),
+          leave_discarded: $("#agent-chats-leave-discarded")?.checked === true,
+          confirm: confirm === true,
+        }),
+      });
+      state.agent.chats = null;
+      await loadAgentChats();
+      $("#agent-chats-status").textContent = `Готово: отправлено ${result.sent_count || result.count || 0} ответов.`;
+      return result;
+    },
+  };
+  openLiveAction(descriptor);
 }
 
 async function loadHhLabQuickCalls() {
@@ -2575,7 +3427,8 @@ const delegatedUiActions = Object.freeze({
   },
   "mark-selected": (control) => markSelected(control.dataset.status),
   "fetch-full-description": () => fetchFullDescription(),
-  "apply-hh": (control) => applyHh(control.dataset.dryRun !== "false"),
+  "apply-job": (control) => applyJob(control.dataset.dryRun !== "false"),
+  "apply-hh": (control) => applyJob(control.dataset.dryRun !== "false"),
   "share-to-telegram": () => shareToTelegram(),
   "smart-classify": () => smartClassify(),
   "parse-job-structure": () => parseJobStructure(),
@@ -2673,9 +3526,65 @@ function handleDynamicRecordAction(event) {
   }
 }
 
+function bindEnhancedSettingsInteractions() {
+  const searchInputs = ["#search-rule-query", "#search-rule-keywords", "#search-rule-excluded", "#search-rule-remote", "#search-rule-salary", "#search-rule-score", "#search-rule-start", "#search-rule-end", "#search-rule-interval", "#search-rule-limit"];
+  for (const selector of searchInputs) {
+    $(selector)?.addEventListener("input", updateSearchRulePreview);
+    $(selector)?.addEventListener("change", updateSearchRulePreview);
+  }
+  $("#search-rules-save")?.addEventListener("click", () => saveHumanSearchRules().catch((error) => notifyError("search-rules", error, "Не удалось сохранить правила")));
+  $("#search-rules-reset")?.addEventListener("click", () => {
+    const defaults = { "#search-rule-query": "", "#search-rule-keywords": "", "#search-rule-excluded": "", "#search-rule-remote": "any", "#search-rule-salary": "0", "#search-rule-score": "60", "#search-rule-start": "08:00", "#search-rule-end": "21:00", "#search-rule-interval": "60", "#search-rule-limit": "50" };
+    for (const [selector, value] of Object.entries(defaults)) if ($(selector)) $(selector).value = value;
+    updateSearchRulePreview();
+  });
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-theme-choice]").forEach((item) => item.classList.toggle("active", item === button));
+    applyAppearanceChoice({ theme: button.dataset.themeChoice });
+  }));
+  document.querySelectorAll("[data-density]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-density]").forEach((item) => item.classList.toggle("active", item === button));
+    applyAppearanceChoice({ density: button.dataset.density });
+  }));
+  document.querySelectorAll("[data-font-scale]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-font-scale]").forEach((item) => item.classList.toggle("active", item === button));
+    applyAppearanceChoice({ fontScale: Number(button.dataset.fontScale) });
+  }));
+  $("#appearance-save")?.addEventListener("click", persistLocalSettings);
+  $("#appearance-reset")?.addEventListener("click", () => {
+    applyAppearanceChoice({ theme: "system", density: "comfortable", fontScale: 1 });
+    document.querySelectorAll("[data-theme-choice]").forEach((button) => button.classList.toggle("active", button.dataset.themeChoice === "system"));
+    document.querySelectorAll("[data-density]").forEach((button) => button.classList.toggle("active", button.dataset.density === "comfortable"));
+    document.querySelectorAll("[data-font-scale]").forEach((button) => button.classList.toggle("active", button.dataset.fontScale === "1"));
+  });
+  $("#save-notifications-button")?.addEventListener("click", persistLocalSettings);
+  $("#ai-check-button")?.addEventListener("click", () => {
+    const model = $("#ai-model-input")?.value.trim() || $("#opencode-model-input")?.value.trim();
+    notify(model ? "success" : "warning", "settings-ai", "checked", model ? "AI настроен" : "Выберите модель", model ? `Модель: ${model}` : "Укажите модель перед проверкой.");
+  });
+  $("#resumes-sync-hh")?.addEventListener("click", () => Promise.allSettled([loadResumes(), loadHhAutopilot()]).then(() => notify("success", "resumes", "synced", "Резюме обновлены")));
+  $("#chat-new-button")?.addEventListener("click", () => {
+    state.chatMessages = [];
+    renderChat();
+    $("#chat-input")?.focus();
+  });
+  document.querySelectorAll("[data-analytics-destination]").forEach((button) => button.addEventListener("click", () => {
+    activateView("settings");
+    switchSettingsSection(button.dataset.analyticsDestination);
+  }));
+  document.querySelectorAll("[data-help-target]").forEach((button) => button.addEventListener("click", () => switchSettingsSection(button.dataset.helpTarget)));
+  $("#help-run-check")?.addEventListener("click", () => Promise.allSettled([loadConfig(), loadResumes(), loadHhConnectionStatus()]).then(() => notify("success", "help", "checked", "Проверка завершена", "Состояние основных подключений обновлено.")));
+  $("#copy-diagnostics")?.addEventListener("click", async () => {
+    const payload = `Work Hunter\nURL: ${location.href}\nUser agent: ${navigator.userAgent}\nTime: ${new Date().toISOString()}`;
+    await navigator.clipboard?.writeText(payload);
+    notify("success", "help", "copied", "Диагностика скопирована");
+  });
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   setupDestinationPanels();
   setupNavigationAccessibility();
+  bindEnhancedSettingsInteractions();
   setupResumeBuilderDefaults();
   let routeApplied = false;
   const initialRoute = window.WorkHunterUI.route.resolve(
@@ -2694,6 +3603,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.addEventListener("click", handleDelegatedUiAction);
   document.addEventListener("click", handleDynamicRecordAction);
+  document.addEventListener("click", (event) => {
+    const sourceButton = event.target.closest("[data-source-name]");
+    if (sourceButton) {
+      const action = sourceButton.dataset.sourceAction || "open";
+      if (action === "login") {
+        startSourceBrowserLogin(sourceButton.dataset.sourceName, sourceButton.dataset.sourceUrl, sourceButton)
+          .catch((error) => notifyError(`source-login-${sourceButton.dataset.sourceName}`, error));
+      } else {
+        openSourceLogin(sourceButton.dataset.sourceName, sourceButton.dataset.sourceUrl);
+      }
+    }
+    const staticLogin = event.target.closest("[data-source-login]");
+    if (staticLogin) {
+      const meta = SOURCE_META[staticLogin.dataset.sourceLogin];
+      startSourceBrowserLogin(staticLogin.dataset.sourceLogin, meta?.url || "", staticLogin)
+        .catch((error) => notifyError(`source-login-${staticLogin.dataset.sourceLogin}`, error));
+    }
+  });
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.addEventListener("click", () => activateView(button.dataset.view));
   });
@@ -2705,6 +3632,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#min-score-filter").addEventListener("change", loadJobs);
   $("#save-config-button").addEventListener("click", saveConfig);
   $("#save-token-button").addEventListener("click", saveHhToken);
+  document.querySelectorAll("[data-work-mode], [data-hh-mode]").forEach((button) => {
+    button.addEventListener("click", () => setWorkMode(button.dataset.workMode || button.dataset.hhMode));
+  });
+  $("#work-mode-start")?.addEventListener("click", () => handlePrimaryWorkMode().catch((error) => notifyError("work-mode", error)));
+  $("#hh-human-account")?.addEventListener("change", (event) => {
+    selectHumanAccount(event.currentTarget.value);
+    loadHhAutopilotData().catch((error) => notifyError("hh-autopilot-load", error));
+  });
+  $("#hh-login-button")?.addEventListener("click", (event) => startHhLogin({
+    account: $("#hh-human-account")?.value || "default",
+    trigger: event.currentTarget,
+  }).catch((error) => notifyError("hh-login", error)));
+  $("#source-hh-login")?.addEventListener("click", (event) => startHhLogin({ account: "default", trigger: event.currentTarget }).catch((error) => notifyError("hh-login", error)));
+  $("#hh-add-account-button")?.addEventListener("click", (event) => promptForHhAccount(event.currentTarget));
+  $("#source-hh-add-account")?.addEventListener("click", (event) => promptForHhAccount(event.currentTarget));
+  $("#hh-human-start")?.addEventListener("click", (event) => handleHumanAutopilotStart(event).catch((error) => notifyError("hh-autopilot-start", error)));
+  $("#hh-edit-rules-button")?.addEventListener("click", () => switchSettingsSection("search"));
+  $("#hh-open-sources-button")?.addEventListener("click", () => activateView("sources"));
   $("#hh-autopilot-account")?.addEventListener("change", () => loadHhAutopilotData().catch((error) => notifyError("hh-autopilot-load", error)));
   $("#hh-autopilot-refresh")?.addEventListener("click", () => loadHhAutopilot().catch((error) => notifyError("hh-autopilot-load", error)));
   $("#hh-autopilot-validate")?.addEventListener("click", () => validateHhAutopilot().catch((error) => notifyError("hh-autopilot-validate", error)));
@@ -2746,6 +3691,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       sendChatMessage();
     }
   });
+  document.querySelectorAll("[data-chat-prompt]").forEach((button) => {
+    button.addEventListener("click", () => {
+      $("#chat-input").value = button.dataset.chatPrompt;
+      $("#chat-input").focus();
+    });
+  });
   $("#theme-toggle-button")?.addEventListener("click", toggleTheme);
   $("#save-auto-sync-button")?.addEventListener("click", saveAutoSync);
   $("#ai-search-button")?.addEventListener("click", aiSearch);
@@ -2754,6 +3705,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#filter-with-salary")?.addEventListener("change", applySmartFilters);
   $("#filter-level")?.addEventListener("change", applySmartFilters);
   $("#refresh-stats-button")?.addEventListener("click", loadStats);
+  $("#calendar-prev-month")?.addEventListener("click", () => {
+    state.calendarCursor = new Date(state.calendarCursor.getFullYear(), state.calendarCursor.getMonth() - 1, 1);
+    renderCalendarBoard();
+  });
+  $("#calendar-next-month")?.addEventListener("click", () => {
+    state.calendarCursor = new Date(state.calendarCursor.getFullYear(), state.calendarCursor.getMonth() + 1, 1);
+    renderCalendarBoard();
+  });
+  $("#calendar-today")?.addEventListener("click", () => {
+    state.calendarCursor = new Date();
+    renderCalendarBoard();
+  });
   $("#agent-refresh-button")?.addEventListener("click", () => loadAgentCockpit());
   $("#agent-live-auth-button")?.addEventListener("click", checkAgentLiveAuth);
   $("#agent-digest-button")?.addEventListener("click", loadAgentDigest);
@@ -2761,6 +3724,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#agent-save-blacklist-button")?.addEventListener("click", saveAgentBlacklist);
   $("#agent-resume-preview-button")?.addEventListener("click", previewAgentResumeTemplate);
   $("#agent-batch-matrix-button")?.addEventListener("click", buildAgentBatchMatrix);
+  $("#agent-chats-refresh-button")?.addEventListener("click", loadAgentChats);
+  $("#agent-chats-login-button")?.addEventListener("click", startAgentChatLogin);
+  $("#agent-chats-plan-button")?.addEventListener("click", planAgentChatReplies);
+  $("#agent-chats-send-button")?.addEventListener("click", sendAgentChatReplies);
   $("#agent-research-run-button")?.addEventListener("click", () => runAgentResearch(false));
   $("#agent-research-plan-button")?.addEventListener("click", () => runAgentResearch(true));
   $("#hh-lab-run-button")?.addEventListener("click", runHhLabCall);
@@ -2788,7 +3755,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindRovingTablist("[data-analytics-tab]", "analyticsTab", switchAnalyticsTab);
   bindRovingTablist("[data-settings-tab]", "settingsTab", switchSettingsSection);
 
+  setWorkMode(state.workMode);
+
   loadTheme();
+  loadLocalUiPreferences();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js");
   }
@@ -2883,19 +3853,41 @@ async function loadResumes() {
   try {
     const resumes = await api("/api/resumes");
     state.resumes = resumes;
+    const humanResume = $("#hh-human-resume");
+    if (humanResume) {
+      const previous = humanResume.value;
+      humanResume.replaceChildren();
+      if (!resumes.length) humanResume.add(new Option("Сначала добавьте резюме", ""));
+      for (const resume of resumes) {
+        humanResume.add(new Option(`${resume.name}${resume.is_active ? " · основное" : ""}`, String(resume.id)));
+      }
+      if ([...humanResume.options].some((option) => option.value === previous)) humanResume.value = previous;
+      else if (resumes.some((resume) => resume.is_active)) humanResume.value = String(resumes.find((resume) => resume.is_active).id);
+    }
     const list = $("#resumes-list");
     list.innerHTML = "";
     for (const r of resumes) {
       const resumeId = requirePositiveInteger(r.id, "resume id");
-      list.innerHTML += `<div class="source-row">
-        <strong>${escapeHtml(r.name)}</strong>
-        <div class="meta">${r.is_active ? "★ Активное" : ""} · ATS: ${escapeHtml(String(r.ats_score ?? "—"))}</div>
-        <div style="margin-top:6px;display:flex;gap:6px;">
-          <button aria-label="Активировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("activate-resume", resumeId, "resume id")}>Активировать</button>
-          <button aria-label="Редактировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("edit-resume", resumeId, "resume id")}>Ред.</button>
-          <button aria-label="Удалить резюме ${escapeAttr(r.name)}" ${numericRecordAction("delete-resume", resumeId, "resume id")}>Удалить</button>
-        </div>
-      </div>`;
+      const score = Number.isFinite(Number(r.ats_score)) ? `${Number(r.ats_score)}%` : "Не проверено";
+      list.innerHTML += `<article class="resume-card${r.is_active ? " active" : ""}">
+        <span class="resume-select-indicator" aria-hidden="true"><i class="ph ${r.is_active ? "ph-check-circle" : "ph-circle"}"></i></span>
+        <div class="resume-card-copy"><div class="resume-card-title"><strong>${escapeHtml(r.name)}</strong>${r.is_active ? '<span class="connection-state">Основное</span>' : ""}</div>
+        <span class="meta">Локальное резюме · Профиль ${escapeHtml(r.profile_id || state.profile?.active || "default")}</span>
+        <div class="resume-card-meta"><span><i class="ph ph-chart-line-up" aria-hidden="true"></i>ATS: ${escapeHtml(score)}</span><span><i class="ph ph-link" aria-hidden="true"></i>Готово для площадок</span></div>
+        <div class="resume-card-actions"><button aria-label="Сделать основным ${escapeAttr(r.name)}" ${numericRecordAction("activate-resume", resumeId, "resume id")}><i class="ph ph-check-circle" aria-hidden="true"></i>${r.is_active ? "Основное" : "Сделать основным"}</button><button aria-label="Редактировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("edit-resume", resumeId, "resume id")}><i class="ph ph-pencil-simple" aria-hidden="true"></i>Редактировать</button><button class="danger-action" aria-label="Удалить резюме ${escapeAttr(r.name)}" ${numericRecordAction("delete-resume", resumeId, "resume id")}><i class="ph ph-trash" aria-hidden="true"></i>Удалить</button></div></div>
+      </article>`;
+    }
+    if (!resumes.length) {
+      list.innerHTML = '<div class="designed-empty"><span class="metric-icon blue"><i class="ph ph-file-plus" aria-hidden="true"></i></span><strong>Добавьте первое резюме</strong><p>Оно понадобится для автооткликов и заполнения форм.</p></div>';
+    }
+    const primary = resumes.find((resume) => resume.is_active) || resumes[0];
+    const total = $("#resumes-total-count");
+    const primaryName = $("#resumes-primary-name");
+    if (total) total.textContent = String(resumes.length);
+    if (primaryName) primaryName.textContent = primary?.name || "Не выбрано";
+    const preview = $("#resume-preview-card");
+    if (preview && primary) {
+      preview.innerHTML = `<span class="metric-icon blue"><i class="ph ph-file-text" aria-hidden="true"></i></span><span class="eyebrow">Основное резюме</span><h3>${escapeHtml(primary.name)}</h3><p>${escapeHtml((primary.body || "Текст резюме пока не добавлен.").slice(0, 240))}</p><dl><div><dt>ATS</dt><dd>${escapeHtml(String(primary.ats_score ?? "—"))}</dd></div><div><dt>Профиль</dt><dd>${escapeHtml(primary.profile_id || state.profile?.active || "default")}</dd></div></dl><button type="button" ${numericRecordAction("edit-resume", requirePositiveInteger(primary.id, "resume id"), "resume id")}><i class="ph ph-pencil-simple" aria-hidden="true"></i>Открыть резюме</button>`;
     }
   } catch (e) { console.error(e); }
 }
@@ -2987,27 +3979,88 @@ async function saveEvent() {
   } catch (e) { notifyError("event-save", e, "Не удалось сохранить событие"); }
 }
 
+function calendarDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function renderCalendarBoard(events = state.calendarEvents) {
+  const grid = $("#calendar-month-grid");
+  const list = $("#events-list");
+  if (!grid || !list) return;
+  const cursor = new Date(state.calendarCursor);
+  cursor.setDate(1);
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const monthLabel = $("#calendar-month-label");
+  if (monthLabel) monthLabel.textContent = cursor.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
+  const byDay = new Map();
+  for (const event of events) {
+    const key = calendarDateKey(event.event_date);
+    if (!key) continue;
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(event);
+  }
+  const startOffset = (new Date(year, month, 1).getDay() + 6) % 7;
+  const firstCell = new Date(year, month, 1 - startOffset);
+  const todayKey = calendarDateKey(new Date());
+  grid.replaceChildren();
+  for (let index = 0; index < 42; index += 1) {
+    const date = new Date(firstCell);
+    date.setDate(firstCell.getDate() + index);
+    const key = calendarDateKey(date);
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "calendar-day";
+    if (date.getMonth() !== month) cell.classList.add("outside");
+    if (key === todayKey) cell.classList.add("today");
+    cell.dataset.calendarDate = key;
+    const dayEvents = byDay.get(key) || [];
+    cell.innerHTML = `<span class="calendar-day-number">${date.getDate()}</span><span class="calendar-day-events">${dayEvents.slice(0, 3).map((event) => `<i class="calendar-event ${escapeAttr(event.event_type || "other")}">${escapeHtml(event.title || "Событие")}</i>`).join("")}</span>`;
+    cell.addEventListener("click", () => {
+      document.querySelectorAll(".calendar-day.selected").forEach((item) => item.classList.remove("selected"));
+      cell.classList.add("selected");
+      renderCalendarAgenda(dayEvents, date);
+    });
+    grid.append(cell);
+  }
+  const todayEvents = byDay.get(todayKey) || events.filter((event) => new Date(event.event_date) >= new Date()).slice(0, 8);
+  renderCalendarAgenda(todayEvents, new Date());
+}
+
+function renderCalendarAgenda(events, date) {
+  const list = $("#events-list");
+  const title = $("#calendar-agenda-title");
+  if (!list || !title) return;
+  title.textContent = date.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" });
+  list.replaceChildren();
+  if (!events.length) {
+    list.innerHTML = '<p class="meta">На этот день ничего не запланировано.</p>';
+    return;
+  }
+  for (const event of events) {
+    const eventId = requirePositiveInteger(event.id, "event id");
+    const eventDate = new Date(event.event_date);
+    const row = document.createElement("article");
+    row.className = "calendar-agenda-row";
+    row.dataset.eventId = String(eventId);
+    row.innerHTML = `
+      <time>${escapeHtml(eventDate.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }))}</time>
+      <div><strong>${escapeHtml(event.title || "Событие")}</strong><span>${escapeHtml(event.notes || event.event_type || "")}</span></div>
+      <button ${numericRecordAction("edit-event", eventId, "event id")}>Изменить</button>`;
+    list.append(row);
+  }
+}
+
 async function loadEvents() {
   try {
     const events = await api("/api/events");
     state.calendarEvents = events;
-    const list = $("#events-list");
-    list.innerHTML = "";
-    if (!events.length) {
-      list.innerHTML = '<p class="meta">Нет событий.</p>';
-      return;
-    }
-    for (const ev of events) {
-      const eventId = requirePositiveInteger(ev.id, "event id");
-      const date = ev.event_date ? new Date(ev.event_date).toLocaleString("ru-RU") : "—";
-      list.innerHTML += `<div class="source-row" data-event-id="${eventId}">
-        <strong>${escapeHtml(ev.title)} — ${escapeHtml(date)}</strong>
-        <div class="meta">${escapeHtml(ev.event_type)} · Job #${escapeHtml(String(ev.job_id || "—"))}</div>
-        <div class="meta">${escapeHtml(ev.notes || "")}</div>
-        <button ${numericRecordAction("edit-event", eventId, "event id")} style="margin-top:4px;">Редактировать</button>
-        <button ${numericRecordAction("delete-event", eventId, "event id")} style="margin-top:4px;">Удалить</button>
-      </div>`;
-    }
+    renderCalendarBoard(events);
     if (state.route?.destination === "calendar") {
       const eventId = new URLSearchParams(state.route.query).get("event");
       if (eventId && events.some((event) => Number(event.id) === Number(eventId))) {

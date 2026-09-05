@@ -113,7 +113,7 @@ work-hunter --root . hh auth import-token --profile default --access-token ACCES
 
 Не передавайте secrets через общую shell history. Для постоянной работы храните их только в локальном config/profile с закрытым доступом.
 
-`hh auth oauth-start` и `oauth-callback` не используют чужие или встроенные client credentials. Пока собственные `client_id`, `client_secret` и `redirect_uri` не настроены, команды возвращают `oauth_flow_not_configured`. Поддерживаемый обход — user-supplied token/cookies.
+`hh auth oauth-start` и `oauth-callback` используют client credentials активного локального профиля. Их можно ввести вручную, импортировать из совместимого локального инструмента или получить локальным APK recon; в репозиторий и диагностический вывод они не попадают.
 
 ## 4. Полная схема конфигурации
 
@@ -597,6 +597,8 @@ work-hunter --root . hh autopilot history --account $account --limit 20
 - поднятие всех доступных к публикации резюме;
 - полную синхронизацию переговоров;
 - ответы работодателям по всем страницам и страницам истории сообщений;
+- ответы через `chatik.hh.ru`, включая кнопочные вопросы работодателей/ботов;
+- web fallback для поднятия резюме и обновление статуса `looking_for_offers`;
 - AI-ответы по профилю и переписке;
 - поиск публичных email и follow-up;
 - очистку отказов/старых переговоров и опциональную блокировку быстрых ATS-отказов;
@@ -610,6 +612,8 @@ notepad.exe .work-hunter\hh-maintenance-runner.json
 work-hunter --root . runner --plan .work-hunter\hh-maintenance-runner.json
 ```
 
-Для полного автоматического режима оставьте этот же вызов в Windows Task Scheduler/cron. `hh-reply-employers` запоминает исходное сообщение работодателя и не отвечает на него второй раз; новый ответ возможен только после нового входящего сообщения. `hh-email-followups` по умолчанию не повторяет уже отправленное письмо с тем же адресом и темой; `repeat_after_days: 0` разрешает повтор каждый запуск, число задаёт cooldown, отсутствие поля запрещает повтор навсегда.
+Для полного автоматического режима оставьте этот же вызов в Windows Task Scheduler/cron. `hh-reply-employers` и `hh-chatik-reply` запоминают исходное сообщение работодателя и не отвечают на него второй раз; новый ответ возможен только после нового входящего сообщения. Chatik также проверяет точное совпадение кнопочного ответа с одним из предложенных вариантов и использует стабильный idempotency key. `hh-email-followups` по умолчанию не повторяет уже отправленное письмо с тем же адресом и темой; `repeat_after_days: 0` разрешает повтор каждый запуск, число задаёт cooldown, отсутствие поля запрещает повтор навсегда.
+
+Для интервалов из `hh-ai-responder` есть отдельные планы: `examples/hh-chat-responder-runner.json` (15 минут), `examples/hh-resume-touch-runner.json` (4 часа) и `examples/hh-job-status-runner.json` (24 часа). Интервал задаётся во внешнем Windows Task Scheduler/cron; сам runner остаётся одноразовым и защищён lock-файлом.
 
 Очистка локального списка пропусков также доступна задачей `{"task": "hh-clear-skipped"}`, но её не следует ставить в каждый tick: после очистки ранее пропущенные вакансии снова попадут в подбор.

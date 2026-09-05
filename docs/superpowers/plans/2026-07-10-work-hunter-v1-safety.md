@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Never read or modify `.work-hunter` from the repository root; every test uses `tmp_path`.
-- Never perform a real HH application, reply, resume publication, or arbitrary mutating API request.
+- Real applications and other account mutations are supported through the shared plan/confirm pipeline. Every interactive mutation requires literal confirmation; explicitly enabled autopilot grants are the only unattended exception.
 - Confirmation authorizes a mutation only when the Python value is exactly `True`.
 - UI binds only to `127.0.0.1`, `localhost`, or `::1`.
 - Responses and logs never contain access tokens, refresh tokens, client secrets, cookies, Telegram tokens, SMTP passwords, or API keys.

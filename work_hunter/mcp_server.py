@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,13 +12,13 @@ from mcp.types import TextContent, Tool
 
 from .config import mask_secrets
 from .hh_agent.mcp_handlers import HHMCPToolHandlers
+from .models import CalendarEvent
 from .safety import is_literal_confirmation
 from .services import WorkHunter
 from .sources import PUBLIC_BOARD_SOURCE_NAMES
 
-
 SERVER_NAME = "work-hunter"
-MCP_SOURCE_CHOICES = ["hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
+MCP_SOURCE_CHOICES = ["hh", "linkedin", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
 
 app = Server(SERVER_NAME)
 _root: Path = Path.cwd()
@@ -123,14 +124,62 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="ats_resume_audit",
+            description="Audit resume text for ATS compatibility, optionally against a stored job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resume_text": {"type": "string", "minLength": 1},
+                    "job_id": {"type": "integer", "minimum": 1},
+                },
+                "required": ["resume_text"],
+            },
+        ),
+        Tool(
+            name="prepare_interview_brief",
+            description=(
+                "Prepare a Russian interview brief for a stored job: TL;DR, "
+                "questions for the employer, and a candidate STAR pitch."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"job_id": {"type": "integer", "minimum": 1}},
+                "required": ["job_id"],
+            },
+        ),
+        Tool(
+            name="save_calendar_event",
+            description=(
+                "Save an interview, follow-up, reminder, or task in the local "
+                "Work Hunter calendar. This does not sync Google Calendar."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "integer", "minimum": 1},
+                    "title": {"type": "string", "minLength": 1},
+                    "event_type": {
+                        "type": "string",
+                        "enum": ["interview", "follow_up", "reminder", "task"],
+                        "default": "interview",
+                    },
+                    "event_date": {"type": "string", "minLength": 1},
+                    "notes": {"type": "string"},
+                },
+                "required": ["title", "event_date"],
+            },
+        ),
+        Tool(
             name="apply_hh",
-            description="Prepare an HH apply plan. Real apply is blocked through MCP.",
+            description="Prepare or confirm an HH application through the shared apply flow.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "integer"},
                     "resume_id": {"type": "string"},
                     "dry_run": {"type": "boolean", "default": True},
+                    "confirm": {"type": "boolean", "default": False},
+                    "letter": {"type": "string"},
                 },
                 "required": ["job_id"],
             },
@@ -144,6 +193,23 @@ async def list_tools() -> list[Tool]:
                     "job_id": {"type": "integer"},
                     "resume_id": {"type": "string"},
                     "letter": {"type": "string"},
+                },
+                "required": ["job_id"],
+            },
+        ),
+        Tool(
+            name="apply_job",
+            description=(
+                "Apply to an HH, LinkedIn, or external-board job. "
+                "A real submission requires literal confirm=true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "integer"},
+                    "resume_id": {"type": "string"},
+                    "letter": {"type": "string"},
+                    "confirm": {"type": "boolean", "default": False},
                 },
                 "required": ["job_id"],
             },
@@ -277,13 +343,76 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if name == "prepare_cover_letter":
             draft = service.prepare_letter(int(args["job_id"]))
             return _json(draft.to_dict())
+        if name == "ats_resume_audit":
+            resume_text = str(args.get("resume_text") or "").strip()
+            if not resume_text:
+                raise ValueError("resume_text is required")
+            job_id = args.get("job_id")
+            return _json(
+                {
+                    "content": service.ats_audit(
+                        resume_text,
+                        job_id=int(job_id) if job_id is not None else None,
+                    )
+                }
+            )
+        if name == "prepare_interview_brief":
+            job_id = int(args["job_id"])
+            job = service.get_job(job_id)
+            if job is None:
+                return _json({"error": "not_found", "job_id": job_id})
+            return _json(
+                {
+                    "job": {
+                        "id": job.id,
+                        "title": job.title,
+                        "company": job.company,
+                        "url": job.url,
+                    },
+                    "tldr": service.summarize_job(job_id),
+                    "questions": service.interview_questions(job_id),
+                    "star_pitch": service.experience_pitch(job_id),
+                }
+            )
+        if name == "save_calendar_event":
+            title = str(args.get("title") or "").strip()
+            event_date = str(args.get("event_date") or "").strip()
+            if not title:
+                raise ValueError("title is required")
+            if not event_date:
+                raise ValueError("event_date is required")
+            try:
+                datetime.fromisoformat(event_date)
+            except ValueError as exc:
+                raise ValueError("event_date must be ISO 8601") from exc
+            job_id_value = args.get("job_id")
+            job_id = int(job_id_value) if job_id_value is not None else None
+            if job_id is not None and job_id <= 0:
+                raise ValueError("job_id must be a positive integer")
+            if job_id is not None and service.get_job(job_id) is None:
+                return _json({"error": "job_not_found", "job_id": job_id})
+            event_type = str(args.get("event_type") or "interview")
+            if event_type not in {"interview", "follow_up", "reminder", "task"}:
+                raise ValueError("unsupported event_type")
+            event = CalendarEvent(
+                job_id=job_id,
+                title=title,
+                event_type=event_type,
+                event_date=event_date,
+                notes=str(args.get("notes") or ""),
+            )
+            event_id = service.storage.save_event(event)
+            return _json({"status": "saved", "calendar": "local", "event_id": event_id})
         if name == "apply_hh":
-            if args.get("dry_run", True) is False:
+            confirm = is_literal_confirmation(args.get("confirm"))
+            if args.get("dry_run", True) is False or confirm:
                 return _json(
-                    {
-                        "status": "blocked",
-                        "message": "MCP cannot send real HH applications. Use the local UI confirm-apply flow.",
-                    }
+                    service.confirm_apply(
+                        int(args["job_id"]),
+                        resume_id=args.get("resume_id"),
+                        letter=args.get("letter"),
+                        confirm=confirm,
+                    )
                 )
             return _json(
                 service.prepare_apply_plan(
@@ -298,6 +427,15 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 letter=args.get("letter"),
             )
             return _json(result)
+        if name == "apply_job":
+            return _json(
+                service.confirm_apply(
+                    int(args["job_id"]),
+                    resume_id=args.get("resume_id"),
+                    letter=args.get("letter"),
+                    confirm=is_literal_confirmation(args.get("confirm")),
+                )
+            )
         if name == "mark_job":
             service.mark_job(
                 int(args["job_id"]),
@@ -308,7 +446,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         if name == "daily_report":
             return _json(service.daily_report(limit=args.get("limit", 10)))
         return _json({"error": f"Unknown tool: {name}"})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - MCP failures must cross the JSON boundary.
         return _json({"error": str(exc)})
 
 

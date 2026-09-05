@@ -10,7 +10,7 @@
 
 Ship Work Hunter 1.0 as a safe and reproducible local application. The release must preserve the existing CLI, MCP, SQLite, and browser cockpit workflows while closing every proven P0/P1 issue found in the July 2026 audit.
 
-The release does not perform real HH applications, replies, form submissions, resume publication, or other account mutations during verification. External behavior is verified with fakes, dry-run flows, and explicit confirmation tests.
+The release supports real HH and external-board applications through the same plan/confirm contract. Automated verification uses fakes and dry runs; an account-bound live smoke test may be run only for a vacancy explicitly selected by the operator.
 
 ## Audit Baseline
 

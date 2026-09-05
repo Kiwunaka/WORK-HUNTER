@@ -6,6 +6,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from work_hunter.models import Job
+from work_hunter.external_apply import ExternalApplyResult
 from work_hunter.hh_autopilot.types import DeliveryCertainty, DispatchOutcome
 from work_hunter.services import WorkHunter
 from work_hunter.cli import main as cli_main
@@ -113,7 +114,7 @@ def test_confirm_apply_posts_exact_vacancy_after_confirmation(monkeypatch, tmp_p
     assert app.storage.get_application(job_id).status == "applied"
 
 
-def test_non_hh_apply_plan_is_external_prepare_only(tmp_path):
+def test_non_hh_apply_plan_uses_browser_adapter(tmp_path):
     app = WorkHunter(root=tmp_path)
     job_id = app.storage.upsert_job(
         Job(source="habr", source_id="h1", url="https://career.habr.com/vacancies/1", title="Python")
@@ -121,11 +122,11 @@ def test_non_hh_apply_plan_is_external_prepare_only(tmp_path):
 
     plan = app.prepare_apply_plan(job_id)
 
-    assert plan["status"] == "external"
-    assert plan["mode"] == "external_page"
+    assert plan["status"] == "ready"
+    assert plan["mode"] == "browser"
     assert plan["external_url"] == "https://career.habr.com/vacancies/1"
     assert plan["raw_result"]["capabilities"]["search"] == "frontend_json"
-    assert "external_manual_apply" in plan["risk_flags"]
+    assert "browser_session" in plan["risk_flags"]
 
 
 def test_getmatch_apply_plan_fetches_detail_and_marks_personal_auth_recon(monkeypatch, tmp_path):
@@ -158,8 +159,8 @@ def test_getmatch_apply_plan_fetches_detail_and_marks_personal_auth_recon(monkey
 
     plan = app.prepare_apply_plan(job_id)
 
-    assert plan["status"] == "external"
-    assert plan["mode"] == "external_api_recon"
+    assert plan["status"] == "ready"
+    assert plan["mode"] == "browser"
     assert plan["external_url"] == "https://getmatch.ru/vacancies/34397-aqa-python"
     assert "source_detail_api_available" in plan["risk_flags"]
     assert "letter_required" in plan["risk_flags"]
@@ -168,7 +169,7 @@ def test_getmatch_apply_plan_fetches_detail_and_marks_personal_auth_recon(monkey
     assert plan["raw_result"]["apply"]["cover_letter_placeholder"] == "Расскажите про опыт API automation"
     assert plan["raw_result"]["source_detail"]["position"] == "AQA Python Engineer"
     assert plan["raw_result"]["next_actions"][0]["type"] == "open_url"
-    assert any(action["type"] == "api_recon_har" for action in plan["raw_result"]["next_actions"])
+    assert any(action["type"] == "optional_api_recon_har" for action in plan["raw_result"]["next_actions"])
     assert any(action["type"] == "cover_letter_hint" for action in plan["raw_result"]["next_actions"])
 
 
@@ -179,8 +180,9 @@ def test_source_capabilities_describe_hh_level_integrations(tmp_path):
 
     assert capabilities["hh"]["apply"] == "official_api"
     assert capabilities["getmatch"]["detail"] == "public_json"
-    assert capabilities["getmatch"]["apply"] == "personal_auth_recon"
+    assert capabilities["getmatch"]["apply"] == "session_or_browser"
     assert capabilities["rvc"]["search"] == "personal_auth_recon"
+    assert capabilities["linkedin"]["apply"] == "browser"
 
 
 def test_source_capabilities_cli_outputs_json(tmp_path, capsys):
@@ -209,11 +211,50 @@ def test_apply_plan_cli_outputs_plan_for_any_source(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["source"] == "habr"
     assert payload["resume_id"] == "resume-1"
-    assert payload["mode"] == "external_page"
+    assert payload["mode"] == "browser"
     assert payload["raw_result"]["next_actions"][0] == {
         "type": "open_url",
         "url": "https://career.habr.com/vacancies/1",
     }
+
+
+def test_confirm_external_apply_dispatches_and_persists(monkeypatch, tmp_path):
+    class FakeDispatcher:
+        def plan(self, request):
+            return {
+                "status": "ready",
+                "mode": "browser",
+                "message": "ready",
+                "risk_flags": ["external_mutation"],
+            }
+
+        def apply(self, request):
+            assert request.job.source == "habr"
+            assert request.letter == "Hello"
+            return ExternalApplyResult(
+                status="applied",
+                mode="browser",
+                message="sent",
+                applied=True,
+                steps=["submitted"],
+            )
+
+    monkeypatch.setattr("work_hunter.services.ExternalApplyDispatcher", FakeDispatcher)
+    app = WorkHunter(root=tmp_path)
+    job_id = app.storage.upsert_job(
+        Job(
+            source="habr",
+            source_id="h1",
+            url="https://career.habr.com/vacancies/1",
+            title="Python",
+        )
+    )
+
+    result = app.confirm_apply(job_id, letter="Hello", confirm=True)
+
+    assert result["status"] == "applied"
+    assert result["raw_result"]["steps"] == ["submitted"]
+    assert app.storage.get_application(job_id).status == "applied"
 
 
 def test_apply_plan_endpoint_returns_plan(monkeypatch, tmp_path):

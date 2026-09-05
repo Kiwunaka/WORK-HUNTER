@@ -9,8 +9,10 @@ from typing import Any
 from .api_discovery import discover_api_candidates_from_url
 from .api_probe import probe_api_candidates_from_url
 from .api_recon import analyze_har
+from .apk_recon import analyze_apk
 from .config import mask_secrets
 from .external_adapter_plan import build_external_adapter_plan
+from .external_apply import open_browser_session
 from .external_sessions import (
     call_external_session,
     import_external_session_from_har,
@@ -22,8 +24,8 @@ from .services import WorkHunter
 from .sources import PUBLIC_BOARD_SOURCE_NAMES
 
 
-SYNC_SOURCE_CHOICES = ["all", "hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
-LIST_SOURCE_CHOICES = ["hh", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
+SYNC_SOURCE_CHOICES = ["all", "hh", "linkedin", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
+LIST_SOURCE_CHOICES = ["hh", "linkedin", "habr", "geekjob", "telegram", *PUBLIC_BOARD_SOURCE_NAMES]
 HH_CHALLENGE_ACTIONS = (
     "completed",
     "dismissed",
@@ -110,6 +112,18 @@ def main(argv: list[str] | None = None) -> None:
     apply_plan.add_argument("--resume-id")
     apply_plan.add_argument("--letter", default="")
     apply_plan.add_argument("--letter-file", type=Path)
+
+    apply_job = sub.add_parser("apply")
+    apply_job.add_argument("job_id", type=int)
+    apply_job.add_argument("--resume-id")
+    apply_job.add_argument("--letter", default="")
+    apply_job.add_argument("--letter-file", type=Path)
+    apply_job.add_argument("--confirm", action="store_true")
+
+    browser_login = sub.add_parser("browser-login")
+    browser_login.add_argument("source", choices=LIST_SOURCE_CHOICES)
+    browser_login.add_argument("--url", default="")
+    browser_login.add_argument("--wait", type=_positive_int, default=300)
 
     hh_apply_from_file = sub.add_parser("hh-apply-from-file")
     hh_apply_from_file.add_argument("path", type=Path)
@@ -216,6 +230,37 @@ def main(argv: list[str] | None = None) -> None:
     hh_reply_employers.add_argument("--send-delay-min-seconds", type=float, default=1.0)
     hh_reply_employers.add_argument("--send-delay-max-seconds", type=float, default=3.0)
     hh_reply_employers.add_argument("--confirm", action="store_true")
+
+    hh_chatik = sub.add_parser("hh-chatik")
+    hh_chatik.add_argument("--account")
+    hh_chatik.add_argument("--max-pages", type=int)
+    hh_chatik.add_argument("--max-age-hours", type=float)
+    hh_chatik.add_argument(
+        "--awaiting-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    hh_chatik.add_argument("--limit", type=int)
+
+    hh_chatik_reply = sub.add_parser("hh-chatik-reply")
+    hh_chatik_reply.add_argument("--account")
+    hh_chatik_reply.add_argument("--template", default="")
+    hh_chatik_reply.add_argument("--use-ai", action="store_true")
+    hh_chatik_reply.add_argument("--system-prompt", default="")
+    hh_chatik_reply.add_argument("--message-prompt", default="")
+    hh_chatik_reply.add_argument("--max-pages", type=int)
+    hh_chatik_reply.add_argument("--max-age-hours", type=float)
+    hh_chatik_reply.add_argument("--history-limit", type=int)
+    hh_chatik_reply.add_argument("--message-limit", type=int)
+    hh_chatik_reply.add_argument("--limit", type=int)
+    hh_chatik_reply.add_argument(
+        "--leave-discarded",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    hh_chatik_reply.add_argument("--send-delay-min-seconds", type=float)
+    hh_chatik_reply.add_argument("--send-delay-max-seconds", type=float)
+    hh_chatik_reply.add_argument("--confirm", action="store_true")
 
     hh_skipped = sub.add_parser("hh-skipped")
     hh_skipped.add_argument("--clear", action="store_true")
@@ -498,6 +543,36 @@ def main(argv: list[str] | None = None) -> None:
     hh_reply_confirm.add_argument("--plan-id", type=int, required=True)
     hh_reply_confirm.add_argument("--confirm", action="store_true")
 
+    hh_chats_nested = hh_sub.add_parser("chats")
+    hh_chats_nested_sub = hh_chats_nested.add_subparsers(
+        dest="hh_chats_command", required=True
+    )
+    hh_chats_list = hh_chats_nested_sub.add_parser("list")
+    hh_chats_list.add_argument("--account")
+    hh_chats_list.add_argument("--max-pages", type=int)
+    hh_chats_list.add_argument("--max-age-hours", type=float)
+    hh_chats_list.add_argument("--limit", type=int)
+    hh_chats_list.add_argument(
+        "--awaiting-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    hh_chats_reply = hh_chats_nested_sub.add_parser("reply")
+    hh_chats_reply.add_argument("--account")
+    hh_chats_reply.add_argument("--template", default="")
+    hh_chats_reply.add_argument("--use-ai", action="store_true")
+    hh_chats_reply.add_argument("--max-pages", type=int)
+    hh_chats_reply.add_argument("--max-age-hours", type=float)
+    hh_chats_reply.add_argument("--history-limit", type=int)
+    hh_chats_reply.add_argument("--message-limit", type=int)
+    hh_chats_reply.add_argument("--limit", type=int)
+    hh_chats_reply.add_argument(
+        "--leave-discarded",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    hh_chats_reply.add_argument("--confirm", action="store_true")
+
     hh_web = hh_sub.add_parser("web")
     hh_web_sub = hh_web.add_subparsers(dest="hh_web_command", required=True)
     hh_web_sub.add_parser("status")
@@ -506,6 +581,15 @@ def main(argv: list[str] | None = None) -> None:
     hh_web_search = hh_web_sub.add_parser("search-url")
     hh_web_search.add_argument("url")
     hh_web_search.add_argument("--limit", type=int, default=20)
+    hh_web_profile = hh_web_sub.add_parser("profile")
+    hh_web_profile.add_argument("--account")
+    hh_web_touch = hh_web_sub.add_parser("touch-resumes")
+    hh_web_touch.add_argument("--account")
+    hh_web_touch.add_argument("--resume-hash", action="append")
+    hh_web_touch.add_argument("--confirm", action="store_true")
+    hh_web_job_status = hh_web_sub.add_parser("job-search-active")
+    hh_web_job_status.add_argument("--account")
+    hh_web_job_status.add_argument("--confirm", action="store_true")
 
     hh_api = hh_sub.add_parser("api")
     hh_api_sub = hh_api.add_subparsers(dest="hh_api_command", required=True)
@@ -524,6 +608,12 @@ def main(argv: list[str] | None = None) -> None:
     api_recon_har = sub.add_parser("api-recon-har")
     api_recon_har.add_argument("path", type=Path)
     api_recon_har.add_argument("--host", action="append", default=[])
+
+    apk_recon = sub.add_parser("apk-recon")
+    apk_recon.add_argument("path", type=Path)
+    apk_recon.add_argument("--source", required=True)
+    apk_recon.add_argument("--jadx", action="store_true")
+    apk_recon.add_argument("--timeout", type=int, default=180)
 
     api_discover_url = sub.add_parser("api-discover-url")
     api_discover_url.add_argument("url")
@@ -614,6 +704,31 @@ def main(argv: list[str] | None = None) -> None:
         if args.letter_file:
             letter_text = args.letter_file.read_text(encoding="utf-8")
         print_json(app.prepare_apply_plan(args.job_id, resume_id=args.resume_id, letter=letter_text))
+        return
+    if args.command == "apply":
+        letter_text = args.letter or None
+        if args.letter_file:
+            letter_text = args.letter_file.read_text(encoding="utf-8")
+        print_json(
+            app.confirm_apply(
+                args.job_id,
+                resume_id=args.resume_id,
+                letter=letter_text,
+                confirm=args.confirm,
+            )
+        )
+        return
+    if args.command == "browser-login":
+        print_json(
+            open_browser_session(
+                root=args.root,
+                source=args.source,
+                global_config=app.config.get("external_apply") or {},
+                source_config=(app.config.get("sources") or {}).get(args.source) or {},
+                url=args.url,
+                wait_seconds=args.wait,
+            )
+        )
         return
     if args.command == "hh-apply-from-file":
         template = args.template
@@ -865,6 +980,33 @@ def main(argv: list[str] | None = None) -> None:
                 )
             elif args.hh_reply_command == "confirm":
                 print_json(app.confirm_hh_reply(args.plan_id, confirm=args.confirm))
+        elif args.hh_command == "chats":
+            if args.hh_chats_command == "list":
+                print_json(
+                    app.list_hh_chatik(
+                        account=args.account,
+                        max_pages=args.max_pages,
+                        max_age_hours=args.max_age_hours,
+                        awaiting_only=args.awaiting_only,
+                        limit=args.limit,
+                    )
+                )
+            elif args.hh_chats_command == "reply":
+                print_json(
+                    app.reply_hh_chatik(
+                        account=args.account,
+                        template=args.template,
+                        use_ai=args.use_ai,
+                        max_pages=args.max_pages,
+                        max_age_hours=args.max_age_hours,
+                        history_limit=args.history_limit,
+                        message_limit=args.message_limit,
+                        limit=args.limit,
+                        leave_discarded=args.leave_discarded,
+                        dry_run=not args.confirm,
+                        confirm=args.confirm,
+                    )
+                )
         elif args.hh_command == "web":
             if args.hh_web_command == "status":
                 print_json(app.hh_web_status())
@@ -872,6 +1014,25 @@ def main(argv: list[str] | None = None) -> None:
                 print_json(app.import_hh_web_cookies(args.path))
             elif args.hh_web_command == "search-url":
                 print_json(app.hh_web_search_url(args.url, limit=args.limit))
+            elif args.hh_web_command == "profile":
+                print_json(app.hh_applicant_web_profile(account=args.account))
+            elif args.hh_web_command == "touch-resumes":
+                print_json(
+                    app.touch_hh_resumes_web(
+                        account=args.account,
+                        resume_hashes=args.resume_hash,
+                        dry_run=not args.confirm,
+                        confirm=args.confirm,
+                    )
+                )
+            elif args.hh_web_command == "job-search-active":
+                print_json(
+                    app.set_hh_job_search_active(
+                        account=args.account,
+                        dry_run=not args.confirm,
+                        confirm=args.confirm,
+                    )
+                )
         elif args.hh_command == "api":
             if args.hh_api_command == "call":
                 data = json.loads(args.data) if args.data else None
@@ -1155,6 +1316,49 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "api-recon-har":
         hosts = set(args.host or []) or None
         print_json(analyze_har(args.path, allowed_hosts=hosts))
+        return
+    if args.command == "apk-recon":
+        print_json(
+            analyze_apk(
+                args.path,
+                root=args.root,
+                source=args.source,
+                run_jadx=args.jadx,
+                timeout_seconds=args.timeout,
+            )
+        )
+        return
+    if args.command == "hh-chatik":
+        print_json(
+            app.list_hh_chatik(
+                account=args.account,
+                max_pages=args.max_pages,
+                max_age_hours=args.max_age_hours,
+                awaiting_only=args.awaiting_only,
+                limit=args.limit,
+            )
+        )
+        return
+    if args.command == "hh-chatik-reply":
+        print_json(
+            app.reply_hh_chatik(
+                account=args.account,
+                template=args.template,
+                use_ai=args.use_ai,
+                system_prompt=args.system_prompt,
+                message_prompt=args.message_prompt,
+                max_pages=args.max_pages,
+                max_age_hours=args.max_age_hours,
+                history_limit=args.history_limit,
+                message_limit=args.message_limit,
+                limit=args.limit,
+                leave_discarded=args.leave_discarded,
+                dry_run=not args.confirm,
+                confirm=args.confirm,
+                send_delay_min_seconds=args.send_delay_min_seconds,
+                send_delay_max_seconds=args.send_delay_max_seconds,
+            )
+        )
         return
     if args.command == "api-discover-url":
         hosts = set(args.host or []) or None

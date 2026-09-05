@@ -153,11 +153,7 @@ def browser_app(tmp_path):
                     }
                     """
                 )
-                setattr(
-                    page,
-                    "expect_console_error",
-                    expected_console_errors.append,
-                )
+                page.expect_console_error = expected_console_errors.append
                 page.on("pageerror", lambda error: page_errors.append(str(error)))
 
                 def capture_console_error(message):
@@ -230,7 +226,7 @@ def test_ui_loads_without_browser_errors(browser_app):
     [
         ("/", "/today"),
         ("/favorites?filter=all&x=1#saved", "/jobs?filter=saved&x=1#saved"),
-        ("/chat?job=7", "/assistant?job=7"),
+        ("/chat?job=1", "/assistant?job=1"),
         ("/agent", "/applications?tab=agent"),
         ("/stats", "/analytics?tab=overview"),
         ("/trends", "/analytics?tab=trends"),
@@ -553,7 +549,7 @@ def test_untrusted_job_url_is_not_an_executable_link(browser_app):
     page.goto(base_url, wait_until="networkidle")
     page.locator("#jobs-body tr").click()
     link = page.locator("#job-detail a")
-    expect(link).not_to_have_attribute("href", re.compile(r"^javascript:", re.I))
+    expect(link).not_to_have_attribute("href", re.compile(r"^javascript:", re.IGNORECASE))
     assert page.evaluate("window.__pwned") is None
 
 
@@ -976,7 +972,7 @@ def test_applied_status_records_application_and_learning_event(browser_app):
     assert application.status == "applied"
     behavior = app.storage.get_behavior_stats()
     assert behavior["by_action"]["applied"] == 1
-    expect(job_row.locator("td").nth(4)).to_have_text("applied")
+    expect(job_row.locator("td").nth(4)).to_have_text("Отклик отправлен")
 
 
 def test_selected_status_refreshes_detail_for_explicit_job_id(browser_app):
@@ -995,7 +991,7 @@ def test_selected_status_refreshes_detail_for_explicit_job_id(browser_app):
 
     assert detail_response.value.request.method == "GET"
     assert page.evaluate("state.selectedId") == job.id
-    expect(job_row.locator("td").nth(4)).to_have_text("saved")
+    expect(job_row.locator("td").nth(4)).to_have_text("Сохранена")
 
 
 def test_resume_edit_populates_fields_and_preserves_active(browser_app):
@@ -1009,9 +1005,8 @@ def test_resume_edit_populates_fields_and_preserves_active(browser_app):
             ats_score=87,
         )
     )
-    page.goto(f"{base_url}/settings", wait_until="domcontentloaded")
-    resume_row = page.locator("#resumes-list .source-row").filter(has_text="Backend CV")
-    resume_row.get_by_text("Ред.", exact=True).click()
+    page.goto(f"{base_url}/settings?section=resumes", wait_until="domcontentloaded")
+    page.get_by_role("button", name="Редактировать резюме Backend CV", exact=True).click()
     expect(page.locator("#resume-name-input")).to_have_value("Backend CV")
     expect(page.locator("#resume-body-input")).to_have_value("Python and PostgreSQL")
     with page.expect_response(lambda response: response.url.endswith("/api/resumes")):
@@ -1037,9 +1032,8 @@ def test_stale_resume_edit_returns_not_found_and_keeps_draft(browser_app):
         )
     )
     page.on("dialog", lambda dialog: dialog.dismiss())
-    page.goto(f"{base_url}/settings", wait_until="domcontentloaded")
-    resume_row = page.locator("#resumes-list .source-row").filter(has_text="Stale CV")
-    resume_row.get_by_text("Ред.", exact=True).click()
+    page.goto(f"{base_url}/settings?section=resumes", wait_until="domcontentloaded")
+    page.get_by_role("button", name="Редактировать резюме Stale CV", exact=True).click()
     app.storage.delete_resume(resume_id)
     page.locator("#resume-body-input").fill("Unsaved draft")
     page.expect_console_error(
@@ -1080,7 +1074,7 @@ def test_resume_and_ghost_actions_expose_record_context(browser_app):
             body='[{"id":22,"title":"Backend B","company":"Two","source":"x"}]',
         ),
     )
-    page.goto(f"{base_url}/settings", wait_until="domcontentloaded")
+    page.goto(f"{base_url}/settings?section=resumes", wait_until="domcontentloaded")
 
     edit_action = page.get_by_role(
         "button", name="Редактировать резюме Accessible CV", exact=True
@@ -1089,6 +1083,8 @@ def test_resume_and_ghost_actions_expose_record_context(browser_app):
     edit_action.click()
     expect(page.locator("#save-resume-button")).to_have_text("Обновить")
 
+    page.get_by_role("tab", name="Дополнительно", exact=True).click()
+    page.locator("summary").filter(has_text="Призраки (ghost)").click()
     page.locator("#check-ghost-button").click()
     expect(
         page.get_by_role("button", name="Отметить ghosted: Backend B", exact=True)
@@ -1116,7 +1112,8 @@ def test_ghost_action_updates_rendered_job_not_selected_job(browser_app):
 
     page.route("**/api/jobs/*/status", complete_job_action)
     page.route("**/api/jobs/*/record-event", complete_job_action)
-    page.goto(f"{base_url}/settings", wait_until="domcontentloaded")
+    page.goto(f"{base_url}/settings?section=advanced", wait_until="domcontentloaded")
+    page.locator("summary").filter(has_text="Призраки (ghost)").click()
     page.evaluate("state.selectedId = 11")
     page.locator("#check-ghost-button").click()
     ghost_action = (
@@ -1459,6 +1456,7 @@ def test_hh_lab_live_action_cancel_and_literal_confirmation(browser_app):
 
     page.route("**/api/hh/lab/call", capture_mutation)
     page.goto(base_url + "/settings?section=advanced", wait_until="domcontentloaded")
+    page.locator("summary").filter(has_text="HH API Lab").click()
     page.locator("#hh-lab-method").select_option("POST")
     page.locator("#hh-lab-path").fill("/resumes/123/publish")
     page.locator("#hh-lab-body").fill('{"token":"secret-value","publish":true}')
@@ -1914,8 +1912,8 @@ def test_vacancy_workspace_exposes_stable_capability_action_ids(browser_app):
         "job.letter.local",
         "job.letter.ai",
         "job.description.fetch",
-        "job.hh.plan",
-        "job.hh.live",
+        "job.apply.plan",
+        "job.apply.live",
         "job.telegram.share",
         "job.ai.classify",
         "job.ai.structure",

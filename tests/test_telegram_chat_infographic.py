@@ -8,12 +8,19 @@ from datetime import datetime
 from html import unescape
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "telegram-chat-retrospective-2026-07-11-13.html"
 SOURCE = Path(
     r"C:\Users\kiwun\Downloads\Telegram Desktop\ChatExport_2026-07-13 (1)\result.json"
 )
+if not SOURCE.is_file():
+    pytest.skip(
+        "authoritative Telegram export is not available on this machine",
+        allow_module_level=True,
+    )
 SOURCE_SHA256 = "BE65A707D8AC48A775998D745A91D3400720EB36996226F0AB4DD09494BCC0BF"
 REQUIRED_SECTIONS = ("overview", "story", "ledger", "polls", "jokes", "gems", "method")
 TOPIC_IDS = [

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
+import re
 import socket
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -44,6 +48,92 @@ APPLICATION_FUNNEL_STAGES = (
     "offer",
     "rejected",
 )
+HH_ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+SOURCE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+SOURCE_BROWSER_LOGIN_IDS = frozenset(
+    {
+        "linkedin",
+        "habr",
+        "geekjob",
+        "getmatch",
+        "relocate_me",
+        "rvc",
+        "hirehi",
+        "careerspace",
+        "another_it",
+        "jabka",
+        "indeed",
+    }
+)
+
+
+def _launch_hh_auth_login(root: Path, account: str) -> dict[str, Any]:
+    """Start the interactive HH login without blocking the local UI server."""
+    account_id = account.strip() or "default"
+    if not HH_ACCOUNT_ID_PATTERN.fullmatch(account_id):
+        raise ValueError("Invalid HH account id")
+    command = [
+        sys.executable,
+        "-m",
+        "work_hunter",
+        "--root",
+        str(root),
+        "hh",
+        "auth",
+        "login",
+        "--account",
+        account_id,
+    ]
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(command, **popen_kwargs)
+    return {"status": "started", "account": account_id, "pid": process.pid}
+
+
+def _launch_source_browser_login(root: Path, source: str, url: str = "") -> dict[str, Any]:
+    """Start a persistent source browser without blocking the local UI server."""
+    source_id = source.strip().casefold()
+    if (
+        not SOURCE_ID_PATTERN.fullmatch(source_id)
+        or source_id not in SOURCE_BROWSER_LOGIN_IDS
+    ):
+        raise ValueError("Unsupported source login")
+    login_url = url.strip()
+    if login_url:
+        parsed = urlparse(login_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("Source login URL must use HTTPS")
+    command = [
+        sys.executable,
+        "-m",
+        "work_hunter",
+        "--root",
+        str(root),
+        "browser-login",
+        source_id,
+        "--wait",
+        "900",
+    ]
+    if login_url:
+        command.extend(["--url", login_url])
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(command, **popen_kwargs)
+    return {"status": "started", "source": source_id, "pid": process.pid}
 
 
 @dataclass(frozen=True)
@@ -333,6 +423,28 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 self._send_json(app.hh_web_status())
                 return
+            if path == "/api/hh/web/profile":
+                app = WorkHunter(root)
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    app.hh_applicant_web_profile(
+                        account=_str_arg(query, "account") or None,
+                    )
+                )
+                return
+            if path == "/api/hh/chats":
+                app = WorkHunter(root)
+                query = parse_qs(parsed.query)
+                self._send_json(
+                    app.list_hh_chatik(
+                        account=_str_arg(query, "account") or None,
+                        max_pages=_optional_int_arg(query, "max_pages"),
+                        max_age_hours=_optional_float_arg(query, "max_age_hours"),
+                        awaiting_only=_bool_arg(query, "awaiting_only", True),
+                        limit=_optional_int_arg(query, "limit"),
+                    )
+                )
+                return
             if path == "/api/hh/negotiations":
                 app = WorkHunter(root)
                 self._send_json([n.to_dict() for n in app.storage.list_hh_negotiations()])
@@ -556,6 +668,35 @@ def make_handler(root: Path):
                 if path == "/api/hh/token/refresh":
                     self._send_json(mask_secrets(app.refresh_hh_token()))
                     return
+                if path == "/api/hh/auth/login":
+                    try:
+                        result = _launch_hh_auth_login(
+                            root,
+                            str(body.get("account") or "default"),
+                        )
+                    except ValueError as exc:
+                        self._send_json(
+                            {"status": "error", "message": str(exc)},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    self._send_json(result, HTTPStatus.ACCEPTED)
+                    return
+                if path == "/api/sources/browser-login":
+                    try:
+                        result = _launch_source_browser_login(
+                            root,
+                            str(body.get("source") or ""),
+                            str(body.get("url") or ""),
+                        )
+                    except ValueError as exc:
+                        self._send_json(
+                            {"status": "error", "message": str(exc)},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    self._send_json(result, HTTPStatus.ACCEPTED)
+                    return
                 if path == "/api/hh/resumes/update":
                     self._send_json(
                         app.update_hh_resumes(
@@ -592,6 +733,66 @@ def make_handler(root: Path):
                         app.confirm_hh_reply(
                             int(body.get("plan_id") or 0),
                             confirm=is_literal_confirmation(body.get("confirm")),
+                        )
+                    )
+                    return
+                if path == "/api/hh/web/touch-resumes":
+                    confirm = is_literal_confirmation(body.get("confirm"))
+                    hashes = body.get("resume_hashes")
+                    self._send_json(
+                        app.touch_hh_resumes_web(
+                            account=str(body.get("account") or "") or None,
+                            resume_hashes=(
+                                [str(value) for value in hashes]
+                                if isinstance(hashes, list)
+                                else None
+                            ),
+                            dry_run=not confirm,
+                            confirm=confirm,
+                        )
+                    )
+                    return
+                if path == "/api/hh/web/job-search-active":
+                    confirm = is_literal_confirmation(body.get("confirm"))
+                    self._send_json(
+                        app.set_hh_job_search_active(
+                            account=str(body.get("account") or "") or None,
+                            dry_run=not confirm,
+                            confirm=confirm,
+                        )
+                    )
+                    return
+                if path == "/api/hh/chats/reply":
+                    confirm = is_literal_confirmation(body.get("confirm"))
+                    self._send_json(
+                        app.reply_hh_chatik(
+                            account=str(body.get("account") or "") or None,
+                            template=str(body.get("template") or ""),
+                            use_ai=bool(body.get("use_ai", True)),
+                            system_prompt=str(body.get("system_prompt") or ""),
+                            message_prompt=str(body.get("message_prompt") or ""),
+                            max_pages=_optional_int(body.get("max_pages")),
+                            max_age_hours=_optional_float(
+                                body.get("max_age_hours")
+                            ),
+                            history_limit=_optional_int(
+                                body.get("history_limit")
+                            ),
+                            message_limit=_optional_int(
+                                body.get("message_limit")
+                            ),
+                            limit=_optional_int(body.get("limit")),
+                            leave_discarded=bool(
+                                body.get("leave_discarded", True)
+                            ),
+                            dry_run=not confirm,
+                            confirm=confirm,
+                            send_delay_min_seconds=_optional_float(
+                                body.get("send_delay_min_seconds")
+                            ),
+                            send_delay_max_seconds=_optional_float(
+                                body.get("send_delay_max_seconds")
+                            ),
                         )
                     )
                     return
@@ -1280,6 +1481,19 @@ def _optional_int_arg(query: dict[str, list[str]], name: str) -> int | None:
     if not values or values[0] == "":
         return None
     return int(values[0])
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _optional_float_arg(query: dict[str, list[str]], name: str) -> float | None:
+    values = query.get(name)
+    if not values or values[0] == "":
+        return None
+    return float(values[0])
 
 
 def _str_arg(query: dict[str, list[str]], name: str) -> str | None:

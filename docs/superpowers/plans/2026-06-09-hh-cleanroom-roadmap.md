@@ -1,4 +1,4 @@
-# HH Clean-Room Roadmap
+# HH Integration And Donor Roadmap
 
 Date: 2026-06-09
 
@@ -6,7 +6,7 @@ Date: 2026-06-09
 
 Reviewed `s3rgeym/hh-applicant-tool`, `0FL01/hh-applicant-tool`, local copy in `external/hh-applicant-tool`, GitHub issues, PRs, discussions, forks, PyPI, SourcePulse, and adjacent HH automation products.
 
-This is a clean-room roadmap: copy behavior patterns and user needs, not source code, README phrasing, private keys, or bypass-oriented implementation details.
+This is a private, personal-use integration roadmap. Compatible open-source code may be reused under its license, and local APK/web/HAR reverse engineering may be used to recover endpoints, public client configuration, payload shapes, and browser behavior. Account credentials and captured sessions stay in local ignored state.
 
 ## Core Product Principle
 
@@ -38,7 +38,7 @@ Work Hunter should not become only a clone of that. Our better direction is a sa
 - Events/tasks/calendar export, forms/challenge escalation, curated apply-from-file, batch preset matrices.
 - Safe scheduler/runner with notifications, command logs, dry-run/planned defaults, and Docker/native hardening notes.
 - Query/operator summary and web API endpoints with secret masking on sensitive responses.
-- Stronger safety posture than original: no real apply from MCP, confirm required.
+- MCP and UI share the same literal-confirmation contract for real apply.
 
 ## Main Gaps Versus Original
 
@@ -128,14 +128,13 @@ Work Hunter should not become only a clone of that. Our better direction is a sa
   - resume optimization;
   - question/test handling.
 
-## Safety And Trust Rules
+## Integration Rules
 
-- Do not copy upstream code or README text.
-- Do not copy Android client secrets or bypass-specific constants.
-- Keep risky web/browser flows opt-in and isolated.
-- Prefer official API where possible.
-- Real external actions require explicit confirmation.
-- Every automated decision must be explainable and logged.
+- Reuse upstream code when its license is compatible with this private personal-use project.
+- APK/HAR/browser recon may recover client configuration, endpoints, selectors, and payload shapes into ignored local state.
+- API/session is preferred when stable; persistent browser automation is the universal fallback.
+- Real external actions use the shared plan/confirm contract and leave an application record.
+- Every automated decision is explainable and logged.
 
 ## Completion Update
 

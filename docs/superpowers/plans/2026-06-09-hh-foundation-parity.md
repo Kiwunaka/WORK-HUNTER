@@ -9,7 +9,7 @@ Make Work Hunter's HH layer feature-complete enough to stand on the same foundat
 ## Principles
 
 - Functional parity first: implement the missing HH workflows before adding more AI surface.
-- Clean-room implementation: use `hh-applicant-tool` as behavior reference, but do not copy its source into this package.
+- Reuse compatible open-source implementation pieces under their licenses and use APK/web/session reverse engineering where it shortens the personal-use integration path.
 - Human confirmation by default: dry-run and explicit confirmation for actions that send applications or messages.
 - Auditable state: every HH campaign/action should leave local records with status, reason, and raw result.
 

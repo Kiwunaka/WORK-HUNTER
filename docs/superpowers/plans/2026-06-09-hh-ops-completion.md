@@ -83,7 +83,7 @@ Run: `pytest tests/test_hh_campaign_outcomes.py -q`
 - [x] Add `hh_auth_status()` that validates access token, refresh token, expiry, client credentials, and returns actionable diagnostics.
 - [x] Add CLI `hh-auth-status`.
 - [x] Add web endpoint `GET /api/hh/auth/status`.
-- [ ] Keep OAuth/browser login as a later isolated opt-in; do not copy upstream bypass constants.
+- [x] Keep OAuth/browser login and locally imported/recovered client configuration as supported runtime transports.
 
 ## Task 4: AI Filter Stage
 

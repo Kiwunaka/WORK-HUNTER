@@ -4,13 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Work Hunter</title>
+  <meta name="description" content="Work Hunter помогает находить подходящие вакансии, готовить точные отклики и держать поиск работы под контролем.">
+  <meta name="theme-color" content="#f4f1e9">
+  <link rel="stylesheet" href="/vendor/phosphor/style.css">
   <link rel="stylesheet" href="/app.css">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111827'/%3E%3Ctext x='32' y='40' font-size='24' text-anchor='middle' fill='white' font-family='Arial'%3EWH%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/redesign.css">
   <link rel="manifest" href="/manifest.json">
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Перейти к содержимому</a>
   <header id="mobile-appbar" class="mobile-appbar">
-    <button id="mobile-menu-button" aria-label="Открыть навигацию" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <button id="mobile-menu-button" aria-label="Открыть навигацию" aria-expanded="false"><i class="ph ph-list" aria-hidden="true"></i></button>
     <strong>Work Hunter</strong>
     <span aria-hidden="true"></span>
   </header>
@@ -23,14 +27,14 @@
       </div>
     </div>
     <nav aria-label="Основная навигация">
-      <button class="nav-button active" data-view="today"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9h-9V3Z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15V3.5Z"/></svg><span>Сегодня</span></button>
-      <button class="nav-button" data-view="inbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v11H4z"/><path d="M9 7.5V5h6v2.5M4 12h16"/></svg><span>Вакансии</span></button>
-      <button class="nav-button" data-view="agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="m7 9 5 3 5-3M8 16h4"/></svg><span>Отклики</span></button>
-      <button class="nav-button" data-view="calendar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v14H4zM4 10h16M8 3v5M16 3v5"/></svg><span>Календарь</span></button>
-      <button class="nav-button" data-view="chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8M8 13h5"/></svg><span>Ассистент</span></button>
-      <button class="nav-button" data-view="stats"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V9h3v10M10.5 19V5h3v14M16 19v-7h3v7"/></svg><span>Аналитика</span></button>
-      <button class="nav-button" data-view="sources"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8 7 6a3 3 0 0 0-4 4l3 3a3 3 0 0 0 4 0l1-1M15 16l2 2a3 3 0 0 0 4-4l-3-3a3 3 0 0 0-4 0l-1 1M8 16l8-8"/></svg><span>Источники</span></button>
-      <button class="nav-button" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="m19 13.5 2 1-2 3.5-2-.5a8 8 0 0 1-2 1.2L14.5 21h-5L9 18.7a8 8 0 0 1-2-1.2l-2 .5-2-3.5 2-1a8 8 0 0 1 0-3l-2-1L5 6l2 .5a8 8 0 0 1 2-1.2L9.5 3h5l.5 2.3a8 8 0 0 1 2 1.2l2-.5 2 3.5-2 1a8 8 0 0 1 0 3Z"/></svg><span>Настройки</span></button>
+      <button class="nav-button active" data-view="today"><i class="ph ph-house" aria-hidden="true"></i><span>Сегодня</span></button>
+      <button class="nav-button" data-view="inbox"><i class="ph ph-briefcase" aria-hidden="true"></i><span>Вакансии</span></button>
+      <button class="nav-button" data-view="agent"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span>Отклики</span></button>
+      <button class="nav-button" data-view="calendar"><i class="ph ph-calendar-blank" aria-hidden="true"></i><span>Календарь</span></button>
+      <button class="nav-button" data-view="chat"><i class="ph ph-sparkle" aria-hidden="true"></i><span>Ассистент</span></button>
+      <button class="nav-button" data-view="stats"><i class="ph ph-chart-bar" aria-hidden="true"></i><span>Аналитика</span></button>
+      <button class="nav-button" data-view="sources"><i class="ph ph-link" aria-hidden="true"></i><span>Источники</span></button>
+      <button class="nav-button" data-view="settings"><i class="ph ph-gear" aria-hidden="true"></i><span>Настройки</span></button>
     </nav>
     <div class="theme-toggle">
       <button id="theme-toggle-button" title="Переключить тему">Тёмная</button>
@@ -44,7 +48,7 @@
     </div>
   </aside>
 
-  <main class="shell">
+  <main class="shell" id="main-content">
     <header class="topbar" id="route-topbar">
       <div>
         <h1>Очередь вакансий</h1>
@@ -60,6 +64,26 @@
     <section id="readiness-banner" class="readiness-banner" data-readiness-state="loading" hidden></section>
 
     <section id="view-today" class="view today-view">
+      <section id="work-mode-hero" class="work-mode-hero" aria-labelledby="work-mode-title" data-readiness="loading">
+        <div class="work-mode-copy">
+          <div class="work-mode-title-row">
+            <span class="status-icon success" aria-hidden="true"><i class="ph ph-check-circle"></i></span>
+            <div>
+              <h2 id="work-mode-title">Work Hunter готов к поиску</h2>
+              <p id="work-mode-summary">Выберите режим — правила и подключённые площадки применятся автоматически.</p>
+            </div>
+          </div>
+          <div class="work-mode-options" role="radiogroup" aria-label="Режим работы">
+            <button type="button" class="work-mode-option" data-work-mode="search" role="radio" aria-checked="false">Искать вакансии</button>
+            <button type="button" class="work-mode-option active" data-work-mode="apply" role="radio" aria-checked="true">Искать и откликаться</button>
+          </div>
+        </div>
+        <div class="work-mode-action">
+          <button id="work-mode-start" type="button" class="primary"><i class="ph ph-play" aria-hidden="true"></i>Запустить автоотклики</button>
+          <span>Сначала покажем, что именно будет сделано</span>
+        </div>
+      </section>
+      <section id="today-kpis" class="today-kpis" aria-label="Сводка за сегодня"></section>
       <section id="today-readiness" class="today-readiness" data-state="loading"></section>
       <div class="today-grid">
         <section id="today-focus" class="today-section today-focus"></section>
@@ -78,40 +102,40 @@
         <button data-ui-action="clear-bulk-selection">Снять выбор</button>
       </div>
 
-      <div class="filters" style="flex-wrap:wrap;">
-        <label>Источник
-          <select id="source-filter">
-            <option value="">Все</option>
-            <option value="hh">HH</option>
-            <option value="habr">Habr</option>
-            <option value="geekjob">GeekJob</option>
-            <option value="telegram">Telegram</option>
-          </select>
-        </label>
-        <label>Min score
-          <input id="min-score-filter" type="number" value="0" min="0" max="100">
-        </label>
-        <label>AI-поиск
-          <input id="ai-search-input" type="text" placeholder="Например: удалёнка FastAPI от 200к...">
-        </label>
-        <button id="ai-search-button">Искать</button>
-        <label>
-          <input type="checkbox" id="filter-remote-only"> Только удалёнка
-        </label>
-        <label>
-          <input type="checkbox" id="filter-with-salary"> С зарплатой
-        </label>
-        <label>Уровень
-          <select id="filter-level">
-            <option value="">Все</option>
-            <option value="junior">Junior</option>
-            <option value="middle">Middle</option>
-            <option value="senior">Senior</option>
-            <option value="lead">Lead</option>
-          </select>
-        </label>
-        <button id="refresh-button">Обновить список</button>
-        <button id="export-csv-button" style="margin-left:auto;" data-action-id="stats.export-csv">Экспорт CSV</button>
+      <div class="filters vacancy-filters">
+        <div class="vacancy-search">
+          <i class="ph ph-magnifying-glass" aria-hidden="true"></i>
+          <label class="visually-hidden" for="ai-search-input">Поиск вакансий обычными словами</label>
+          <input id="ai-search-input" type="text" placeholder="Например: Python backend, удалёнка, от 200 000 ₽">
+          <button id="ai-search-button" class="primary"><i class="ph ph-magnifying-glass" aria-hidden="true"></i>Найти</button>
+        </div>
+        <div class="vacancy-filter-row">
+          <label class="filter-control"><i class="ph ph-globe" aria-hidden="true"></i><span class="visually-hidden">Источник</span>
+            <select id="source-filter" aria-label="Источник">
+              <option value="">Все источники</option>
+              <option value="hh">HH</option>
+              <option value="habr">Habr</option>
+              <option value="geekjob">GeekJob</option>
+              <option value="telegram">Telegram</option>
+            </select>
+          </label>
+          <label class="filter-control"><i class="ph ph-chart-line-up" aria-hidden="true"></i><span>Score от</span>
+            <input id="min-score-filter" type="number" value="0" min="0" max="100" aria-label="Минимальный score">
+          </label>
+          <label class="filter-check"><input type="checkbox" id="filter-remote-only"><i class="ph ph-monitor" aria-hidden="true"></i>Удалёнка</label>
+          <label class="filter-check"><input type="checkbox" id="filter-with-salary"><i class="ph ph-wallet" aria-hidden="true"></i>С зарплатой</label>
+          <label class="filter-control"><i class="ph ph-stairs" aria-hidden="true"></i><span class="visually-hidden">Уровень</span>
+            <select id="filter-level" aria-label="Уровень">
+              <option value="">Любой уровень</option>
+              <option value="junior">Junior</option>
+              <option value="middle">Middle</option>
+              <option value="senior">Senior</option>
+              <option value="lead">Lead</option>
+            </select>
+          </label>
+          <button id="refresh-button" title="Обновить список"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Обновить</button>
+          <button id="export-csv-button" data-action-id="stats.export-csv"><i class="ph ph-export" aria-hidden="true"></i>CSV</button>
+        </div>
       </div>
 
       <div class="workspace">
@@ -234,7 +258,7 @@
     <section id="view-calendar" class="view">
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <h1>Календарь</h1>
-        <button id="add-event-button" class="primary" data-ui-action="show-event-form" data-action-id="event.create">+ Событие</button>
+        <button id="add-event-button" class="primary" data-ui-action="show-event-form" data-action-id="event.create" aria-label="+ Событие"><i class="ph ph-plus" aria-hidden="true"></i>Добавить событие</button>
       </div>
       <div id="event-form" class="panel" style="display:none;margin-bottom:14px;">
         <h3 id="event-form-title">Новое событие</h3>
@@ -257,15 +281,54 @@
           <button data-ui-action="hide-event-form">Отмена</button>
         </div>
       </div>
-      <div id="events-list" class="source-list"></div>
+      <div class="calendar-toolbar">
+        <div class="actions">
+          <button id="calendar-prev-month" type="button" aria-label="Предыдущий месяц"><i class="ph ph-caret-left" aria-hidden="true"></i></button>
+          <button id="calendar-next-month" type="button" aria-label="Следующий месяц"><i class="ph ph-caret-right" aria-hidden="true"></i></button>
+          <strong id="calendar-month-label">Месяц</strong>
+          <button id="calendar-today" type="button">Сегодня</button>
+        </div>
+        <div class="calendar-view-switch" aria-label="Вид календаря"><button class="active" type="button">Месяц</button><button type="button" disabled>Неделя</button></div>
+      </div>
+      <div class="calendar-layout">
+        <section class="calendar-month" aria-label="Календарь на месяц">
+          <div class="calendar-weekdays" aria-hidden="true"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
+          <div id="calendar-month-grid" class="calendar-month-grid"></div>
+        </section>
+        <aside class="calendar-agenda">
+          <div class="panel-head"><div><span class="eyebrow">Расписание</span><h2 id="calendar-agenda-title">Сегодня</h2></div></div>
+          <div id="events-list" class="source-list"></div>
+        </aside>
+      </div>
     </section>
 
     <section id="view-chat" class="view">
       <div class="chat-layout">
+        <aside class="chat-history-panel" aria-label="Быстрые сценарии ассистента">
+          <div class="chat-history-head">
+            <div><span class="eyebrow">Диалоги</span><h2>Недавние</h2></div>
+            <button id="chat-new-button" type="button" title="Новый диалог" aria-label="Новый диалог"><i class="ph ph-plus" aria-hidden="true"></i></button>
+          </div>
+          <label class="chat-history-search"><i class="ph ph-magnifying-glass" aria-hidden="true"></i><input type="search" placeholder="Найти диалог" aria-label="Найти диалог"></label>
+          <div class="chat-history-list">
+            <button type="button" class="active" data-chat-prompt="Разбери выбранную вакансию и коротко объясни, насколько она мне подходит."><i class="ph ph-sparkle" aria-hidden="true"></i><span><strong>Разбор выбранной вакансии</strong><small>Текущий диалог</small></span></button>
+            <button type="button" data-chat-prompt="Подготовь короткое сопроводительное письмо для выбранной вакансии."><i class="ph ph-envelope-simple" aria-hidden="true"></i><span><strong>Сопроводительное письмо</strong><small>Начать сценарий</small></span></button>
+            <button type="button" data-chat-prompt="Подготовь меня к интервью по выбранной вакансии: вопросы и сильные ответы."><i class="ph ph-user-focus" aria-hidden="true"></i><span><strong>Подготовка к интервью</strong><small>Начать сценарий</small></span></button>
+            <button type="button" data-chat-prompt="Проверь моё резюме и назови три самых важных улучшения."><i class="ph ph-file-text" aria-hidden="true"></i><span><strong>Улучшение резюме</strong><small>Начать сценарий</small></span></button>
+          </div>
+        </aside>
         <div class="chat-main">
           <div class="chat-header">
-            <h2 id="chat-title">AI Ассистент</h2>
+            <div><span class="eyebrow">Помощник</span><h2 id="chat-title">Ассистент по поиску работы</h2></div>
             <span id="chat-context-info" class="meta"></span>
+          </div>
+          <div class="chat-quick-actions" aria-label="Быстрые действия">
+            <button type="button" data-chat-prompt="Проверь выбранную вакансию и моё резюме на ATS: покажи найденные ключевые слова, пробелы и три главных исправления."><i class="ph ph-check-square-offset" aria-hidden="true"></i>Проверить ATS</button>
+            <button type="button" data-chat-prompt="Разбери выбранную вакансию и коротко объясни, насколько она мне подходит."><i class="ph ph-file-magnifying-glass" aria-hidden="true"></i>Разобрать вакансию</button>
+            <button type="button" data-chat-prompt="Подготовь короткое сопроводительное письмо для выбранной вакансии."><i class="ph ph-envelope-simple" aria-hidden="true"></i>Написать письмо</button>
+            <button type="button" data-chat-prompt="Подготовь меня к интервью по выбранной вакансии: вопросы и сильные ответы."><i class="ph ph-user-focus" aria-hidden="true"></i>Подготовить интервью</button>
+            <button type="button" data-chat-prompt="Проверь моё резюме и назови три самых важных улучшения."><i class="ph ph-file-text" aria-hidden="true"></i>Улучшить резюме</button>
+            <button type="button" data-chat-prompt="Составь план следующих шагов по выбранной вакансии и предложи, какие события добавить в календарь."><i class="ph ph-calendar-plus" aria-hidden="true"></i>План в календарь</button>
           </div>
           <div id="chat-messages" class="chat-messages">
             <div class="chat-welcome">
@@ -274,8 +337,8 @@
             </div>
           </div>
           <div class="chat-input-bar">
-            <textarea id="chat-input" rows="2" placeholder="Задай вопрос..." wrap="soft"></textarea>
-            <button id="chat-send-button" class="primary" data-action-id="chat.send">Отправить</button>
+            <textarea id="chat-input" rows="2" placeholder="Спросить о вакансии, резюме или отклике…" wrap="soft"></textarea>
+            <button id="chat-send-button" class="primary" data-action-id="chat.send"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span>Отправить</span></button>
           </div>
         </div>
         <div class="chat-sidebar">
@@ -285,6 +348,8 @@
             <label style="margin-top: 12px;">
               <input type="checkbox" id="chat-attach-job" data-action-id="chat.attach-job"> Прикрепить выбранную вакансию
             </label>
+            <label class="chat-context-option"><input type="checkbox" checked disabled> Использовать правила поиска</label>
+            <label class="chat-context-option"><input type="checkbox" checked disabled> Учитывать историю откликов</label>
           </div>
         </div>
       </div>
@@ -294,71 +359,112 @@
       <div class="topbar" style="padding:0;margin-bottom:12px;">
         <div>
           <h1>Отклики</h1>
-          <p id="agent-status-line">Воронка, решения и автоматизация.</p>
+          <p id="agent-status-line">Всё, что происходит после выбора вакансии.</p>
         </div>
         <div class="actions">
-          <button id="agent-refresh-button" data-action-id="agent.refresh">Обновить</button>
-          <button id="agent-live-auth-button" data-action-id="agent.live-auth">Проверить HH auth</button>
-          <button id="agent-digest-button" class="primary">Digest</button>
+          <button id="agent-refresh-button" data-action-id="agent.refresh"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Обновить</button>
+          <button id="agent-live-auth-button" data-action-id="agent.live-auth"><i class="ph ph-user-check" aria-hidden="true"></i>Проверить HH</button>
+          <button id="agent-digest-button" class="primary"><i class="ph ph-sparkle" aria-hidden="true"></i>Сводка агента</button>
         </div>
       </div>
 
       <div class="destination-tabs" role="tablist" aria-label="Разделы откликов">
-        <button role="tab" data-applications-tab="pipeline">Воронка</button>
-        <button role="tab" data-applications-tab="agent">Агент</button>
-        <button role="tab" data-applications-tab="automation">Автоматизация</button>
+        <button role="tab" data-applications-tab="pipeline"><i class="ph ph-kanban" aria-hidden="true"></i>Воронка</button>
+        <button role="tab" data-applications-tab="agent"><i class="ph ph-chats" aria-hidden="true"></i>Сообщения и решения</button>
+        <button role="tab" data-applications-tab="automation"><i class="ph ph-lightning" aria-hidden="true"></i>Автоматизация</button>
       </div>
 
       <div class="agent-tabs">
-        <button class="agent-tab active" data-agent-panel="dashboard">Dashboard</button>
-        <button class="agent-tab" data-agent-panel="inbox">Inbox</button>
-        <button class="agent-tab" data-agent-panel="approvals">Approvals</button>
-        <button class="agent-tab" data-agent-panel="research">Research</button>
-        <button class="agent-tab" data-agent-panel="runs">Runs</button>
-        <button class="agent-tab" data-agent-panel="api-lab">API Lab</button>
-        <button class="agent-tab" data-agent-panel="templates">Templates</button>
-        <button class="agent-tab" data-agent-panel="resume-builder">Resume</button>
-        <button class="agent-tab" data-agent-panel="blacklist">Blacklist</button>
-        <button class="agent-tab" data-agent-panel="events">Events</button>
-        <button class="agent-tab" data-agent-panel="settings">Settings</button>
+        <button class="agent-tab active" data-agent-panel="dashboard">Состояние</button>
+        <button class="agent-tab" data-agent-panel="chats">Сообщения HH</button>
+        <button class="agent-tab" data-agent-panel="inbox">Входящие</button>
+        <button class="agent-tab" data-agent-panel="approvals">Нужно решение</button>
+        <button class="agent-tab" data-agent-panel="research">Поиск по площадкам</button>
+        <button class="agent-tab" data-agent-panel="runs">История работы</button>
+        <button class="agent-tab" data-agent-panel="api-lab">API</button>
+        <button class="agent-tab" data-agent-panel="templates">Письма</button>
+        <button class="agent-tab" data-agent-panel="resume-builder">Резюме</button>
+        <button class="agent-tab" data-agent-panel="blacklist">Стоп-лист</button>
+        <button class="agent-tab" data-agent-panel="events">Следующие шаги</button>
+        <button class="agent-tab" data-agent-panel="settings">Система</button>
+      </div>
+
+      <div id="agent-panel-chats" class="agent-panel">
+        <div class="panel hh-chats-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Чаты HH</h2>
+              <p>Сообщения работодателей и вопросы с готовыми вариантами ответа.</p>
+            </div>
+            <button id="agent-chats-refresh-button">Обновить</button>
+          </div>
+          <div class="hh-chats-controls">
+            <label class="hh-chats-limit">Сколько проверить
+              <input id="agent-chats-limit" type="number" min="1" max="100" value="20">
+            </label>
+            <label class="hh-chats-toggle">
+              <input id="agent-chats-leave-discarded" type="checkbox" checked>
+              <span>Скрывать чаты с отказом</span>
+            </label>
+            <div class="hh-chats-actions">
+              <button id="agent-chats-plan-button" disabled>Подготовить ответы</button>
+              <button id="agent-chats-send-button" class="primary" disabled>Проверить и отправить</button>
+            </div>
+          </div>
+          <div id="agent-chats-connection" class="agent-row hh-chats-connection" role="status" hidden>
+            <strong>Сначала подключите HH</strong>
+            <p>Нажмите кнопку и войдите в HH в появившемся окне. Пароль остаётся в браузере.</p>
+            <div class="agent-row-actions">
+              <button id="agent-chats-login-button" class="primary">Войти в HH</button>
+            </div>
+            <details class="detail-disclosure hh-chats-cli-login">
+              <summary>Вход через PowerShell</summary>
+              <code>work-hunter --root . hh auth login --account default</code>
+            </details>
+            <p class="meta">После входа список чатов обновится автоматически.</p>
+          </div>
+          <p class="meta hh-chats-status" id="agent-chats-status" aria-live="polite">Загружаю чаты…</p>
+          <div id="agent-chats-list" class="agent-list"></div>
+          <div id="agent-chats-output" class="agent-list hh-chat-plan" hidden></div>
+        </div>
       </div>
 
       <div id="agent-panel-dashboard" class="agent-panel active">
         <div class="agent-metrics">
           <div class="stat-card">
-            <h3>Auth</h3>
+            <h3><i class="ph ph-user-check" aria-hidden="true"></i>Вход в HH</h3>
             <div class="stat-number small" id="agent-auth-status">—</div>
             <p id="agent-auth-note">—</p>
           </div>
           <div class="stat-card">
-            <h3>Pending</h3>
+            <h3><i class="ph ph-hand-palm" aria-hidden="true"></i>Нужно решение</h3>
             <div class="stat-number" id="agent-pending-count">0</div>
-            <p>approval queue</p>
+            <p>ждут вашего ответа</p>
           </div>
           <div class="stat-card">
-            <h3>Runs</h3>
+            <h3><i class="ph ph-play-circle" aria-hidden="true"></i>Запуски</h3>
             <div class="stat-number" id="agent-runs-count">0</div>
-            <p>MCP / local ops</p>
+            <p>работа агента</p>
           </div>
           <div class="stat-card">
-            <h3>Decisions</h3>
+            <h3><i class="ph ph-check-square" aria-hidden="true"></i>Решения AI</h3>
             <div class="stat-number" id="agent-decisions-count">0</div>
-            <p>AI audit</p>
+            <p>проверено сегодня</p>
           </div>
         </div>
 
         <div class="panel">
           <div class="panel-head">
-            <h2>Операции</h2>
+            <h2>Быстрые действия</h2>
             <span class="meta" id="agent-operation-note"></span>
           </div>
           <div class="agent-operation-grid">
-            <button data-agent-operation="preflight">Preflight</button>
-            <button data-agent-operation="sync-resumes">Sync resumes</button>
-            <button data-agent-operation="update-resumes">Update resumes</button>
-            <button data-agent-operation="sync-negotiations">Sync negotiations</button>
-            <button data-agent-operation="clear-skipped">Clear skipped</button>
-            <button data-agent-operation="refresh-token">Refresh token</button>
+            <button data-agent-operation="preflight"><i class="ph ph-first-aid-kit" aria-hidden="true"></i>Проверить готовность</button>
+            <button data-agent-operation="sync-resumes"><i class="ph ph-file-arrow-down" aria-hidden="true"></i>Загрузить резюме</button>
+            <button data-agent-operation="update-resumes"><i class="ph ph-file-arrow-up" aria-hidden="true"></i>Обновить резюме</button>
+            <button data-agent-operation="sync-negotiations"><i class="ph ph-chats" aria-hidden="true"></i>Получить ответы</button>
+            <button data-agent-operation="clear-skipped"><i class="ph ph-broom" aria-hidden="true"></i>Очистить пропуски</button>
+            <button data-agent-operation="refresh-token"><i class="ph ph-key" aria-hidden="true"></i>Обновить вход</button>
           </div>
         </div>
 
@@ -372,15 +478,29 @@
       </div>
 
       <div id="agent-panel-inbox" class="agent-panel">
-        <div class="panel">
+        <div class="application-kpis" aria-label="Сводка по откликам">
+          <span>Всего <strong id="pipeline-total">0</strong></span>
+          <span>Ответили <strong id="pipeline-replied">0</strong></span>
+          <span>Собеседования <strong id="pipeline-interviews">0</strong></span>
+        </div>
+        <div id="application-pipeline" class="application-pipeline">
+          <section data-pipeline-column="prepared"><h3>Подготовлены <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="sent"><h3>Отправлены <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="replied"><h3>Ответили <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="interview"><h3>Собеседования <span>0</span></h3><div class="pipeline-list"></div></section>
+        </div>
+        <details class="detail-disclosure application-technical-inbox">
+          <summary>Служебная очередь агента</summary>
+          <div class="panel">
           <div class="panel-head">
             <div>
-              <h2>Agent inbox</h2>
-              <p>Outbox, webhooks, pending work and latest digest items.</p>
+              <h2>Входящие агента</h2>
+              <p>Исходящие задачи, вебхуки и последняя сводка.</p>
             </div>
           </div>
           <div id="agent-inbox-list" class="agent-list"></div>
         </div>
+        </details>
       </div>
 
       <div id="agent-panel-approvals" class="agent-panel">
@@ -398,7 +518,7 @@
           <div class="panel-head">
             <div>
               <h2>Deep research</h2>
-              <p class="meta">HH search analysis with local dry-run apply planning.</p>
+              <p class="meta">Cross-board search analysis with AI ranking and apply planning.</p>
             </div>
             <div class="actions">
               <button id="agent-research-run-button" data-action-id="agent.research.run">Исследовать</button>
@@ -557,111 +677,212 @@
 
     <section id="view-settings" class="view">
       <div class="destination-tabs settings-tabs" role="tablist" aria-label="Разделы настроек">
-        <button role="tab" data-settings-tab="profile">Профиль</button>
-        <button role="tab" data-settings-tab="resumes">Резюме</button>
-        <button role="tab" data-settings-tab="search">Поиск</button>
-        <button role="tab" data-settings-tab="hh">HH</button>
-        <button role="tab" data-settings-tab="ai">AI</button>
-        <button role="tab" data-settings-tab="notifications">Уведомления</button>
-        <button role="tab" data-settings-tab="appearance">Вид</button>
-        <button role="tab" data-settings-tab="help">Помощь</button>
-        <button role="tab" data-settings-tab="advanced">Дополнительно</button>
+        <span class="settings-tab-heading">Поиск работы</span>
+        <button role="tab" data-settings-tab="profile"><i class="ph ph-user" aria-hidden="true"></i>Профиль</button>
+        <button role="tab" data-settings-tab="resumes"><i class="ph ph-file-text" aria-hidden="true"></i>Резюме</button>
+        <button role="tab" data-settings-tab="search"><i class="ph ph-sliders-horizontal" aria-hidden="true"></i>Правила поиска</button>
+        <span class="settings-tab-heading">Подключения</span>
+        <button role="tab" data-settings-tab="hh"><i class="ph ph-link" aria-hidden="true"></i>Площадки и автоотклики</button>
+        <button role="tab" data-settings-tab="ai"><i class="ph ph-sparkle" aria-hidden="true"></i>AI</button>
+        <span class="settings-tab-heading">Приложение</span>
+        <button role="tab" data-settings-tab="notifications"><i class="ph ph-bell" aria-hidden="true"></i>Уведомления</button>
+        <button role="tab" data-settings-tab="appearance"><i class="ph ph-monitor" aria-hidden="true"></i>Вид</button>
+        <button role="tab" data-settings-tab="help"><i class="ph ph-question" aria-hidden="true"></i>Помощь</button>
+        <span class="settings-tab-heading">Для продвинутых</span>
+        <button role="tab" data-settings-tab="advanced"><i class="ph ph-code" aria-hidden="true"></i>Дополнительно</button>
       </div>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Профиль: что ищем</h2>
-          <div>
-            <button id="save-profile-button" class="primary" data-action-id="profile.save">Сохранить профиль</button>
-            <button id="rescore-after-save" style="margin-left:8px;">Пересчитать score</button>
-          </div>
+      <div class="panel settings-page settings-profile-page" data-settings-panel="profile">
+        <header class="settings-page-header">
+          <div><span class="eyebrow">Профиль поиска</span><h2>Данные, которые делают отклики точнее</h2><p>Заполните один раз: Work Hunter использует их для подбора вакансий, анкет и писем.</p></div>
+          <div class="actions"><button id="rescore-after-save"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Пересчитать score</button><button id="save-profile-button" class="primary" data-action-id="profile.save"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить профиль</button></div>
+        </header>
+        <section class="profile-completeness-card">
+          <span class="profile-avatar" aria-hidden="true">Д</span>
+          <div><strong id="profile-completeness-title">Профиль готов к работе</strong><span id="profile-active-label">Текущий профиль поиска</span><div class="profile-progress"><i></i></div></div>
+          <span>Чем точнее профиль, тем меньше лишних вакансий и ручной правки.</span>
+        </section>
+        <div class="settings-card-grid profile-card-grid">
+          <section class="settings-card">
+            <div class="settings-card-title"><span class="metric-icon blue"><i class="ph ph-target" aria-hidden="true"></i></span><div><h3>Что я ищу</h3><p>Роли, запросы и то, что точно не подходит.</p></div></div>
+            <label>Должности и роли<input id="profile-roles" placeholder="Backend Developer, Python Developer"><small>Можно указать несколько через запятую.</small></label>
+            <label>Поисковые запросы<textarea id="profile-queries" rows="3" placeholder="python backend, django, fastapi"></textarea></label>
+            <label>Исключить слова<textarea id="profile-stopwords" rows="3" placeholder="1C, стажёр, без опыта"></textarea></label>
+          </section>
+          <section class="settings-card">
+            <div class="settings-card-title"><span class="metric-icon green"><i class="ph ph-medal" aria-hidden="true"></i></span><div><h3>Навыки и приоритеты</h3><p>Что обязательно и что будет преимуществом.</p></div></div>
+            <label>Обязательные навыки<textarea id="profile-must-skills" rows="4" placeholder="python, fastapi, postgresql"></textarea><small>Используются при расчёте соответствия.</small></label>
+            <label>Желательные навыки<textarea id="profile-nice-skills" rows="4" placeholder="docker, kubernetes, redis"></textarea></label>
+          </section>
+          <section class="settings-card profile-contacts-card">
+            <div class="settings-card-title"><span class="metric-icon purple"><i class="ph ph-address-book" aria-hidden="true"></i></span><div><h3>Контакты для откликов</h3><p>Работодатель увидит эти данные в анкете.</p></div></div>
+            <div class="settings-fields-grid">
+              <label>Имя<input id="profile-contact-name" placeholder="Имя Фамилия"></label>
+              <label>Email<input id="profile-email" type="email" placeholder="you@example.com"></label>
+              <label>Телефон<input id="profile-phone" placeholder="+7..."></label>
+              <label>Город<input id="profile-city" placeholder="Москва"></label>
+              <label>LinkedIn<input id="profile-linkedin" placeholder="linkedin.com/in/..."></label>
+              <label>GitHub или портфолио<input id="profile-portfolio" placeholder="github.com/..."></label>
+              <label class="wide-field">Файл резюме<input id="profile-resume-path" placeholder="C:\\path\\resume.pdf"><small>PDF или DOCX, который можно приложить к внешней анкете.</small></label>
+            </div>
+          </section>
         </div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-          <div>
-            <label>Поисковые запросы (через запятую)
-              <textarea id="profile-queries" rows="3" style="width:100%;" placeholder="python backend, django, fastapi"></textarea>
-            </label>
-            <label>Желаемые роли (через запятую)
-              <input id="profile-roles" style="width:100%;" placeholder="backend, python, developer">
-            </label>
-            <label>Стоп-слова (через запятую)
-              <textarea id="profile-stopwords" rows="3" style="width:100%;" placeholder="1C, стажер, senior"></textarea>
-            </label>
-          </div>
-          <div>
-            <label>Must-have навыки (через запятую)
-              <textarea id="profile-must-skills" rows="4" style="width:100%;" placeholder="python, fastapi, postgresql"></textarea>
-            </label>
-            <label>Nice-to-have навыки (через запятую)
-              <textarea id="profile-nice-skills" rows="4" style="width:100%;" placeholder="docker, kubernetes, redis"></textarea>
-            </label>
-          </div>
-        </div>
-        <div class="meta" style="margin-top:8px;" id="profile-active-label"></div>
       </div>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Мои резюме</h2>
-          <button id="add-resume-button" class="primary" data-ui-action="show-resume-form" data-action-id="resume.create">+ Резюме</button>
-        </div>
-        <div id="resume-form" style="display:none;margin-bottom:10px;">
-          <label>Название <input id="resume-name-input" style="width:100%;" placeholder="Python Backend"></label>
-          <label>Текст резюме <textarea id="resume-body-input" rows="8" style="width:100%;" placeholder="Вставь текст резюме..."></textarea></label>
-          <div style="display:flex;gap:8px;margin-top:8px;">
-            <button id="save-resume-button" class="primary" data-ui-action="save-resume">Сохранить</button>
+      <div class="panel settings-page settings-resumes-page" data-settings-panel="resumes">
+        <header class="settings-page-header">
+          <div><span class="eyebrow">Резюме</span><h2>Резюме для разных ролей и площадок</h2><p>Выберите основное резюме — оно пойдёт в автоотклики, если для вакансии не задано другое.</p></div>
+          <div class="actions"><button id="resumes-sync-hh" type="button"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Синхронизировать с HH</button><button id="add-resume-button" class="primary" data-ui-action="show-resume-form" data-action-id="resume.create"><i class="ph ph-plus" aria-hidden="true"></i>Добавить резюме</button></div>
+        </header>
+        <section class="settings-status-card resumes-status-card"><span class="metric-icon green"><i class="ph ph-check-circle" aria-hidden="true"></i></span><div><strong>Резюме для автооткликов</strong><p>Активное резюме будет использовано на подключённых площадках и подставлено в формы.</p></div><dl><div><dt>Основное</dt><dd id="resumes-primary-name">Выберите ниже</dd></div><div><dt>Всего</dt><dd id="resumes-total-count">0</dd></div></dl></section>
+        <div id="resume-form" class="inline-editor" style="display:none;">
+          <label>Название<input id="resume-name-input" placeholder="Python Backend"></label>
+          <label>Текст резюме<textarea id="resume-body-input" rows="8" placeholder="Вставьте текст резюме..."></textarea></label>
+          <div class="actions">
+            <button id="save-resume-button" class="primary" data-ui-action="save-resume"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить</button>
             <button data-ui-action="hide-resume-form">Отмена</button>
           </div>
         </div>
-        <div id="resumes-list" class="source-list"></div>
+        <div class="resume-workspace"><div id="resumes-list" class="source-list resumes-card-list"></div><aside id="resume-preview-card" class="resume-preview-card"><span class="metric-icon blue"><i class="ph ph-file-text" aria-hidden="true"></i></span><h3>Выберите резюме</h3><p>Здесь появятся источник, обновление, навыки и площадки.</p></aside></div>
       </div>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>AI backend</h2>
+      <div class="panel settings-page settings-ai-page" data-settings-panel="ai">
+        <header class="settings-page-header">
+          <div><span class="eyebrow">AI</span><h2>Модель для оценки, писем и ответов</h2><p>Основные функции включаются здесь; технический транспорт спрятан ниже.</p></div>
+          <div class="actions"><button id="ai-check-button" type="button"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Проверить</button><button id="save-ai-button" class="primary"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить</button></div>
+        </header>
+        <section class="settings-status-card"><span class="metric-icon green"><i class="ph ph-check-circle" aria-hidden="true"></i></span><div><strong id="ai-connection-title">AI готов к работе</strong><p id="ai-connection-note">Ключ скрыт, а модель можно заменить в любой момент.</p></div><dl><div><dt>Провайдер</dt><dd id="ai-provider-label">OpenAI-совместимый</dd></div><div><dt>Модель</dt><dd id="ai-model-label">Не выбрана</dd></div></dl></section>
+        <div class="settings-card-grid ai-card-grid">
+          <section class="settings-card">
+            <div class="settings-card-title"><span class="metric-icon blue"><i class="ph ph-cpu" aria-hidden="true"></i></span><div><h3>Провайдер и модель</h3><p>Ключ хранится только на этом устройстве.</p></div></div>
+            <label>Способ подключения<select id="ai-backend-select"><option value="direct">OpenAI-совместимый API</option><option value="opencode">OpenCode</option></select></label>
+            <label>API-ключ<input type="password" id="ai-key-input" placeholder="sk-or-v1-..."></label>
+            <label>Модель<input type="text" id="ai-model-input" placeholder="google/gemini-2.5-flash"></label>
+          </section>
+          <section class="settings-card">
+            <div class="settings-card-title"><span class="metric-icon purple"><i class="ph ph-sparkle" aria-hidden="true"></i></span><div><h3>Как использовать AI</h3><p>Можно отключить отдельные сценарии.</p></div></div>
+            <label class="toggle-row"><span><strong>Оценивать вакансии</strong><small>Объяснять соответствие профилю</small></span><input type="checkbox" data-local-setting="ai-fit" checked></label>
+            <label class="toggle-row"><span><strong>Писать сопроводительные</strong><small>Готовить письмо под вакансию</small></span><input type="checkbox" data-local-setting="ai-letters" checked></label>
+            <label class="toggle-row"><span><strong>Готовить ответы</strong><small>Помогать с сообщениями работодателей</small></span><input type="checkbox" data-local-setting="ai-replies" checked></label>
+            <label class="toggle-row"><span><strong>Помогать с интервью</strong><small>Вопросы и сильные ответы</small></span><input type="checkbox" data-local-setting="ai-interview" checked></label>
+          </section>
+          <section class="settings-card">
+            <div class="settings-card-title"><span class="metric-icon orange"><i class="ph ph-chat-circle-text" aria-hidden="true"></i></span><div><h3>Стиль ответов</h3><p>Применяется к письмам и сообщениям.</p></div></div>
+            <label>Тон<select data-local-setting="ai-tone"><option>Кратко и по делу</option><option selected>Нейтрально</option><option>Дружелюбно</option></select></label>
+            <label>Язык<select data-local-setting="ai-language"><option selected>Русский</option><option>English</option></select></label>
+            <label>Длина письма<select data-local-setting="ai-length"><option>Короткое</option><option selected>Среднее, до 250 слов</option><option>Подробное</option></select></label>
+          </section>
+          <section class="settings-card">
+            <div class="settings-card-title"><span class="metric-icon green"><i class="ph ph-gauge" aria-hidden="true"></i></span><div><h3>Расход и лимиты</h3><p>Защита от случайного перерасхода.</p></div></div>
+            <label>Дневной лимит запросов<input type="number" min="1" max="500" value="80" data-local-setting="ai-daily-limit"></label>
+            <div class="usage-meter"><span>Использовано сегодня</span><strong>0 / 80</strong><i><b style="width:0%"></b></i></div>
+          </section>
         </div>
-        <div style="display: flex; flex-direction: column; gap: 8px;">
-          <label>Backend
-            <select id="ai-backend-select" style="width: 100%; padding: 4px;">
-              <option value="direct">Direct OpenAI-compatible</option>
-              <option value="opencode">OpenCode</option>
-            </select>
-          </label>
-          <label>OpenRouter API Key
-            <input type="password" id="ai-key-input" placeholder="sk-or-v1-..." style="width: 100%; padding: 4px;">
-          </label>
-          <label>Модель (OpenRouter model ID)
-            <input type="text" id="ai-model-input" placeholder="google/gemini-2.5-flash" style="width: 100%; padding: 4px;">
-          </label>
-          <label>OpenCode transport
-            <select id="opencode-transport-select" style="width: 100%; padding: 4px;">
-              <option value="cli">CLI: opencode run</option>
-              <option value="server">Server: opencode serve</option>
-            </select>
-          </label>
-          <label>OpenCode command
-            <input type="text" id="opencode-command-input" placeholder="opencode" style="width: 100%; padding: 4px;">
-          </label>
-          <label>OpenCode model
-            <input type="text" id="opencode-model-input" placeholder="provider/model" style="width: 100%; padding: 4px;">
-          </label>
-          <label>OpenCode agent
-            <input type="text" id="opencode-agent-input" placeholder="work-hunter-ai" style="width: 100%; padding: 4px;">
-          </label>
-          <label>OpenCode server URL
-            <input type="text" id="opencode-server-input" placeholder="http://127.0.0.1:4096" style="width: 100%; padding: 4px;">
-          </label>
-          <button id="save-ai-button" class="primary">Сохранить AI настройки</button>
-        </div>
+        <details class="advanced-disclosure"><summary><i class="ph ph-code" aria-hidden="true"></i><span>Дополнительные параметры</span><small>OpenCode, команда, агент и адрес сервера</small></summary><div class="settings-fields-grid">
+          <label>Транспорт OpenCode<select id="opencode-transport-select"><option value="cli">CLI: opencode run</option><option value="server">Server: opencode serve</option></select></label>
+          <label>Команда<input type="text" id="opencode-command-input" placeholder="opencode"></label>
+          <label>Модель OpenCode<input type="text" id="opencode-model-input" placeholder="provider/model"></label>
+          <label>Агент<input type="text" id="opencode-agent-input" placeholder="work-hunter-ai"></label>
+          <label class="wide-field">Адрес сервера<input type="text" id="opencode-server-input" placeholder="http://127.0.0.1:4096"></label>
+        </div></details>
       </div>
-      <div class="panel">
-        <h2>Авто-синхронизация</h2>
-        <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;">
-          <label>Интервал (минуты, 0 = выкл)
-            <input type="number" id="auto-sync-interval" value="0" min="0" max="1440" style="width:100px;">
-          </label>
-          <button id="save-auto-sync-button">Сохранить</button>
-          <span id="auto-sync-status" class="meta"></span>
-        </div>
+      <div class="panel settings-page settings-notifications-page" data-settings-panel="notifications">
+        <header class="settings-page-header"><div><span class="eyebrow">Уведомления</span><h2>Только важное и в удобное время</h2><p>Ответы работодателей не потеряются, а обычные события уйдут в сводку.</p></div><button id="save-notifications-button" class="primary" type="button"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить уведомления</button></header>
+        <section class="settings-status-card"><span class="metric-icon green"><i class="ph ph-bell-ringing" aria-hidden="true"></i></span><div><strong>Уведомления включены</strong><p>Важные события приходят сразу, остальные — по расписанию.</p></div><dl><div><dt>Тихие часы</dt><dd>22:00–08:00</dd></div></dl></section>
+        <div class="notifications-layout"><div class="settings-card-grid">
+          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon blue"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></span><div><h3>Куда присылать</h3><p>Выберите удобные каналы.</p></div></div>
+            <label class="toggle-row"><span><strong>Внутри приложения</strong><small>Всегда доступно</small></span><input type="checkbox" data-local-setting="notify-app" checked></label>
+            <label class="toggle-row"><span><strong>Telegram</strong><small>Нужно подключить бота</small></span><input type="checkbox" data-local-setting="notify-telegram"></label>
+            <label class="toggle-row"><span><strong>Email</strong><small>На адрес из профиля</small></span><input type="checkbox" data-local-setting="notify-email" checked></label>
+            <label class="toggle-row"><span><strong>Windows</strong><small>Системные уведомления</small></span><input type="checkbox" data-local-setting="notify-windows" checked></label>
+          </section>
+          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon purple"><i class="ph ph-list-checks" aria-hidden="true"></i></span><div><h3>О чём сообщать</h3><p>Критичное уже включено.</p></div></div>
+            <label class="toggle-row"><span><strong>Сильное совпадение</strong></span><input type="checkbox" data-local-setting="notify-match" checked></label>
+            <label class="toggle-row"><span><strong>Отклик отправлен</strong></span><input type="checkbox" data-local-setting="notify-applied" checked></label>
+            <label class="toggle-row"><span><strong>Работодатель ответил</strong></span><input type="checkbox" data-local-setting="notify-reply" checked></label>
+            <label class="toggle-row"><span><strong>Приглашение на интервью</strong></span><input type="checkbox" data-local-setting="notify-interview" checked></label>
+            <label class="toggle-row"><span><strong>Требуется ваше решение</strong></span><input type="checkbox" data-local-setting="notify-approval" checked></label>
+            <label class="toggle-row"><span><strong>Ошибка автоматизации</strong></span><input type="checkbox" data-local-setting="notify-error" checked></label>
+          </section>
+          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon orange"><i class="ph ph-clock" aria-hidden="true"></i></span><div><h3>Тихие часы и сводка</h3><p>Настройте расписание без шума.</p></div></div>
+            <div class="settings-fields-grid"><label>С<input type="time" value="22:00" data-local-setting="quiet-from"></label><label>До<input type="time" value="08:00" data-local-setting="quiet-to"></label><label class="wide-field">Сводка<select data-local-setting="digest-time"><option selected>Каждый день в 09:00</option><option>По будням в 09:00</option><option>Не присылать</option></select></label></div>
+            <div class="auto-sync-inline"><label>Обновлять вакансии каждые, мин<input type="number" id="auto-sync-interval" value="0" min="0" max="1440"></label><button id="save-auto-sync-button">Применить</button><span id="auto-sync-status" class="meta"></span></div>
+          </section>
+        </div><aside class="notification-preview"><span class="eyebrow">Предпросмотр</span><div class="notification-preview-card"><span class="metric-icon orange"><i class="ph ph-envelope-simple" aria-hidden="true"></i></span><div><strong>Работодатель ответил</strong><span>Тинькофф · Python Backend Developer</span><p>Ваш опыт нам интересен. Удобно созвониться завтра?</p><button type="button">Открыть сообщение</button></div></div><p>Так выглядит важное уведомление внутри Work Hunter.</p></aside></div>
       </div>
-      <div class="panel hh-autopilot-panel">
+      <div class="panel hh-autopilot-panel" data-settings-panel="hh">
+        <section class="platform-automation-shell" aria-labelledby="platform-automation-title">
+          <header class="platform-automation-header">
+            <div>
+              <span class="eyebrow">Автоотклики</span>
+              <h2 id="platform-automation-title">Подключите аккаунт и запустите поиск</h2>
+              <p>Обычные настройки — сверху. Служебные команды и JSON спрятаны ниже.</p>
+            </div>
+            <div class="platform-mode" role="radiogroup" aria-label="Режим HH">
+              <button type="button" data-hh-mode="search" role="radio" aria-checked="false">Только искать</button>
+              <button type="button" class="active" data-hh-mode="apply" role="radio" aria-checked="true">Искать и откликаться</button>
+            </div>
+          </header>
+
+          <section class="human-launch-card">
+            <div>
+              <strong id="hh-human-ready-title">Сначала войдите в HH</strong>
+              <span id="hh-human-ready-note">После входа проверим резюме, правила и доступный лимит.</span>
+            </div>
+            <button id="hh-human-start" type="button" class="primary">Запустить автоотклики</button>
+          </section>
+
+          <div class="platform-automation-grid">
+            <section class="human-card connection-card">
+              <div class="human-card-head">
+                <div>
+                  <span class="eyebrow">Подключения</span>
+                  <h3>HeadHunter</h3>
+                </div>
+                <span id="hh-human-auth-status" class="connection-state warning">Нужно войти</span>
+              </div>
+              <label class="human-field">Аккаунт
+                <select id="hh-human-account"><option value="default">default</option></select>
+              </label>
+              <label class="human-field">Резюме
+                <select id="hh-human-resume"><option value="">Выбрать после входа</option></select>
+              </label>
+              <div class="human-actions">
+                <button id="hh-login-button" type="button" class="primary">Войти в HH</button>
+                <button id="hh-add-account-button" type="button">+ Добавить аккаунт</button>
+              </div>
+              <p id="hh-human-auth-note" class="meta">Пароль вводится в отдельном окне HH и не сохраняется в Work Hunter.</p>
+            </section>
+
+            <section class="human-card rules-card">
+              <div class="human-card-head">
+                <div>
+                  <span class="eyebrow">Мои правила</span>
+                  <h3>Что искать и куда откликаться</h3>
+                </div>
+                <button id="hh-edit-rules-button" type="button">Изменить</button>
+              </div>
+              <dl class="rules-summary">
+                <div><dt>Вакансии</dt><dd id="hh-rule-keywords">Python, FastAPI</dd></div>
+                <div><dt>Формат</dt><dd id="hh-rule-remote">Любой</dd></div>
+                <div><dt>Зарплата</dt><dd id="hh-rule-salary">Без минимума</dd></div>
+                <div><dt>Исключить</dt><dd id="hh-rule-excluded">Не задано</dd></div>
+                <div><dt>Расписание</dt><dd id="hh-rule-schedule">08:00–21:00</dd></div>
+                <div><dt>Лимит</dt><dd id="hh-rule-limit">50 откликов в день</dd></div>
+              </dl>
+            </section>
+          </div>
+
+          <section class="human-card platform-shortcuts">
+            <div>
+              <span class="eyebrow">Другие площадки</span>
+              <h3>Работать не только с HH</h3>
+              <p>LinkedIn, Habr Career, Getmatch, GeekJob, Indeed и остальные подключаются в одном месте.</p>
+            </div>
+            <button id="hh-open-sources-button" type="button">Открыть площадки</button>
+          </section>
+        </section>
+
+        <details class="hh-technical-panel">
+          <summary>Техническая панель</summary>
+          <div class="hh-technical-body">
         <div class="panel-head">
           <h2>Ключи и токены HH</h2>
           <div class="inline-form" style="display: flex; flex-direction: column; gap: 8px;">
@@ -763,24 +984,24 @@
             <section><h4>Журнал</h4><div id="hh-autopilot-history" class="agent-list compact"></div><button id="hh-autopilot-history-more" hidden>Ещё</button></section>
           </div>
         </div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Сохранённые поиски</h2>
-          <button id="add-search-button" data-ui-action="show-search-form">+ Поиск</button>
-        </div>
-        <div id="search-form" style="display:none;margin-bottom:10px;">
-          <label>Название <input id="search-name-input" style="width:100%;" placeholder="FastAPI удалёнка"></label>
-          <label>Поисковый запрос <input id="search-query-input" style="width:100%;" placeholder="python fastapi backend"></label>
-          <label><input type="checkbox" id="search-alert-checkbox"> Включить уведомления</label>
-          <div style="display:flex;gap:8px;margin-top:8px;">
-            <button id="save-search-button" class="primary" data-ui-action="save-search" data-action-id="search.save">Сохранить</button>
-            <button data-ui-action="hide-search-form">Отмена</button>
           </div>
-        </div>
-        <div id="searches-list" class="source-list"></div>
+        </details>
       </div>
-      <div class="panel">
+      <div class="panel settings-page settings-search-page" data-settings-panel="search">
+        <header class="settings-page-header"><div><span class="eyebrow">Правила поиска</span><h2>Кого искать и когда откликаться</h2><p>Одни правила применяются ко всем включённым площадкам.</p></div><div class="actions"><button id="search-rules-reset" type="button"><i class="ph ph-arrow-counter-clockwise" aria-hidden="true"></i>Сбросить</button><button id="search-rules-save" type="button" class="primary"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить правила</button></div></header>
+        <section class="settings-status-card"><span class="metric-icon green"><i class="ph ph-check-circle" aria-hidden="true"></i></span><div><strong>Правила применяются ко всем площадкам</strong><p>Изменения будут учтены при следующем поиске.</p></div><dl><div><dt>Площадок</dt><dd id="search-source-count">—</dd></div></dl></section>
+        <div class="search-rules-layout"><div class="settings-card-grid">
+          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon blue"><i class="ph ph-user-focus" aria-hidden="true"></i></span><div><h3>1. Кого искать</h3><p>Должности, навыки и исключения.</p></div></div><label>Запрос обычными словами<input id="search-rule-query" placeholder="Python backend developer"></label><label>Ключевые слова<input id="search-rule-keywords" placeholder="python, fastapi, postgresql"></label><label>Исключить<input id="search-rule-excluded" placeholder="стажировка, 1C, без опыта"></label></section>
+          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon purple"><i class="ph ph-map-pin" aria-hidden="true"></i></span><div><h3>2. Где и как работать</h3><p>Локация и формат работы.</p></div></div><label>География<input id="search-rule-location" placeholder="Любая точка мира"></label><label>Формат<select id="search-rule-remote"><option value="any">Любой</option><option value="only">Только удалённо</option><option value="exclude">Только офис или гибрид</option></select></label><label>Занятость<select data-local-setting="employment-type"><option>Любая</option><option>Полная занятость</option><option>Проектная работа</option><option>Фриланс</option></select></label></section>
+          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon green"><i class="ph ph-wallet" aria-hidden="true"></i></span><div><h3>3. Зарплата и качество</h3><p>Отсекаем слабые совпадения.</p></div></div><div class="settings-fields-grid"><label>Минимальная зарплата<input id="search-rule-salary" type="number" min="0" value="0"></label><label>Валюта<select data-local-setting="salary-currency"><option>₽</option><option>USD</option><option>EUR</option></select></label><label class="wide-field">Минимальный score<input id="search-rule-score" type="range" min="0" max="100" value="60"><output id="search-rule-score-value">60%</output></label></div></section>
+          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon orange"><i class="ph ph-calendar-blank" aria-hidden="true"></i></span><div><h3>4. Расписание и лимиты</h3><p>Контроль активности агента.</p></div></div><div class="settings-fields-grid"><label>Начало<input id="search-rule-start" type="time" value="08:00"></label><label>Конец<input id="search-rule-end" type="time" value="21:00"></label><label>Каждые, мин<input id="search-rule-interval" type="number" min="1" value="60"></label><label>Откликов в день<input id="search-rule-limit" type="number" min="1" value="50"></label></div></section>
+        </div><aside class="search-rule-preview"><span class="eyebrow">Что получится</span><h3 id="search-preview-role">Python backend</h3><ul><li><i class="ph ph-monitor" aria-hidden="true"></i><span id="search-preview-remote">Любой формат</span></li><li><i class="ph ph-wallet" aria-hidden="true"></i><span id="search-preview-salary">Без минимума</span></li><li><i class="ph ph-chart-line-up" aria-hidden="true"></i><span id="search-preview-score">Score от 60</span></li><li><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span id="search-preview-limit">До 50 откликов в день</span></li></ul><p>Эта сводка обновляется сразу при изменении правил.</p></aside></div>
+        <section class="saved-searches-card"><div class="panel-head"><div><span class="eyebrow">Наборы</span><h3>Сохранённые поиски</h3></div><button id="add-search-button" data-ui-action="show-search-form"><i class="ph ph-plus" aria-hidden="true"></i>Добавить поиск</button></div>
+          <div id="search-form" class="inline-editor" style="display:none;"><label>Название<input id="search-name-input" placeholder="FastAPI удалёнка"></label><label>Поисковый запрос<input id="search-query-input" placeholder="python fastapi backend"></label><label class="filter-check"><input type="checkbox" id="search-alert-checkbox">Включить уведомления</label><div class="actions"><button id="save-search-button" class="primary" data-ui-action="save-search" data-action-id="search.save">Сохранить</button><button data-ui-action="hide-search-form">Отмена</button></div></div>
+          <div id="searches-list" class="source-list"></div>
+        </section>
+      </div>
+      <div class="panel advanced-fragment">
         <div class="panel-head">
           <h2>Призраки (ghost)</h2>
           <button id="check-ghost-button" data-ui-action="load-ghost-jobs">Проверить</button>
@@ -788,77 +1009,151 @@
         <p class="meta">Вакансии без ответа 7+ дней после отклика.</p>
         <div id="ghost-jobs-list" class="source-list"></div>
       </div>
-      <div class="panel">
+      <div class="panel advanced-fragment">
         <div class="panel-head">
           <h2>Конфигурация (JSON)</h2>
           <button id="save-config-button" class="primary" data-action-id="config.save">Сохранить JSON</button>
         </div>
         <textarea id="config-editor" spellcheck="false"></textarea>
       </div>
-      <div class="panel" data-settings-panel="appearance">
-        <div class="panel-head"><h2>Внешний вид</h2></div>
-        <p>Используйте системную светлую или тёмную тему.</p>
-        <button data-ui-action="toggle-theme-from-settings">Переключить тему</button>
+      <div class="panel settings-page settings-appearance-page" data-settings-panel="appearance">
+        <header class="settings-page-header"><div><span class="eyebrow">Вид</span><h2>Интерфейс подстроен под вас</h2><p>Выберите тему, плотность и удобный размер текста.</p></div><div class="actions"><button id="appearance-reset" type="button"><i class="ph ph-arrow-counter-clockwise" aria-hidden="true"></i>Сбросить вид</button><button id="appearance-save" type="button" class="primary"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить вид</button></div></header>
+        <div class="appearance-layout"><div class="settings-card-grid">
+          <section class="settings-card"><h3>1. Тема</h3><div class="choice-grid theme-choice-grid"><button type="button" data-theme-choice="system" class="active"><i class="ph ph-desktop" aria-hidden="true"></i><strong>Системная</strong><small>Как в Windows</small></button><button type="button" data-theme-choice="light"><i class="ph ph-sun" aria-hidden="true"></i><strong>Светлая</strong><small>Светлый интерфейс</small></button><button type="button" data-theme-choice="dark"><i class="ph ph-moon" aria-hidden="true"></i><strong>Тёмная</strong><small>Для работы вечером</small></button></div></section>
+          <section class="settings-card"><h3>2. Плотность</h3><div class="segmented-setting"><button type="button" data-density="compact">Компактно</button><button type="button" data-density="comfortable" class="active">Удобно</button><button type="button" data-density="spacious">Просторно</button></div><p>Баланс между количеством информации и свободным пространством.</p></section>
+          <section class="settings-card"><h3>3. Размер текста</h3><div class="segmented-setting"><button type="button" data-font-scale="0.9">90%</button><button type="button" data-font-scale="1" class="active">100%</button><button type="button" data-font-scale="1.1">110%</button></div></section>
+          <section class="settings-card"><h3>4. Поведение</h3><label>Начальный экран<select id="appearance-start-route"><option value="/today">Сегодня</option><option value="/jobs?filter=all">Вакансии</option><option value="/applications?tab=pipeline">Отклики</option></select></label><label class="toggle-row"><span><strong>Показывать подсказки</strong></span><input type="checkbox" data-local-setting="show-guidance" checked></label><label class="toggle-row"><span><strong>Анимация интерфейса</strong></span><input type="checkbox" data-local-setting="motion" checked></label></section>
+        </div><aside class="appearance-preview"><span class="eyebrow">Предпросмотр</span><div class="mini-app-preview"><div><i class="ph ph-house" aria-hidden="true"></i><i class="ph ph-briefcase" aria-hidden="true"></i><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></div><main><strong>Сегодня</strong><article><span class="metric-icon blue"><i class="ph ph-target" aria-hidden="true"></i></span><div><b>Python Backend Developer</b><small>Совпадение 86%</small></div><button>Открыть</button></article><article><span class="metric-icon green"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></span><div><b>Откликов сегодня</b><small>18 из 50</small></div><button class="primary">Продолжить</button></article></main></div></aside></div>
       </div>
-      <div class="panel" data-settings-panel="help">
-        <div class="panel-head"><h2>Помощь и подсказки</h2></div>
-        <p>Повторите первоначальную настройку или верните контекстные советы.</p>
-        <div class="actions">
-          <button data-ui-action="restart-onboarding" data-action-id="onboarding.restart">Повторить знакомство</button>
-          <button data-ui-action="restart-guidance" data-action-id="guidance.restart">Показать советы снова</button>
-        </div>
+      <div class="panel settings-page settings-help-page" data-settings-panel="help">
+        <header class="settings-page-header"><div><span class="eyebrow">Помощь</span><h2>Найти ответ или исправить настройку</h2><p>Сначала быстрая проверка, потом подробности.</p></div></header>
+        <label class="help-search"><i class="ph ph-magnifying-glass" aria-hidden="true"></i><input type="search" placeholder="Найти ответ или действие"></label>
+        <div class="help-quick-grid"><button type="button" data-help-target="hh"><span class="metric-icon blue"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></span><strong>Как запустить автоотклики</strong><small>Пошаговая настройка</small></button><button type="button" data-help-target="hh"><span class="metric-icon green"><i class="ph ph-link" aria-hidden="true"></i></span><strong>Подключить HH и LinkedIn</strong><small>Вход и аккаунты</small></button><button type="button" data-help-target="search"><span class="metric-icon purple"><i class="ph ph-sliders-horizontal" aria-hidden="true"></i></span><strong>Настроить правила поиска</strong><small>Фильтры и лимиты</small></button><button type="button" data-help-target="advanced"><span class="metric-icon orange"><i class="ph ph-warning-circle" aria-hidden="true"></i></span><strong>Почему отклик не отправился</strong><small>Причины и диагностика</small></button></div>
+        <div class="help-work-grid"><section class="settings-card"><div class="panel-head"><div><span class="eyebrow">Диагностика</span><h3>Быстрая проверка</h3></div><button id="help-run-check" type="button">Проверить всё</button></div><div class="health-check-list"><div><span class="metric-icon green"><i class="ph ph-check" aria-hidden="true"></i></span><span><strong>Профиль и резюме</strong><small>Основные данные заполнены</small></span><b>Готово</b></div><div><span class="metric-icon orange"><i class="ph ph-user" aria-hidden="true"></i></span><span><strong>Аккаунты площадок</strong><small>Проверим вход при запуске</small></span><b>Проверить</b></div><div><span class="metric-icon blue"><i class="ph ph-sparkle" aria-hidden="true"></i></span><span><strong>AI</strong><small>Модель и ключ доступа</small></span><b>Проверить</b></div></div></section><section class="settings-card"><span class="eyebrow">Начать заново</span><h3>Вернуть знакомство и подсказки</h3><p>Настройки и данные не удаляются.</p><div class="actions"><button data-ui-action="restart-onboarding" data-action-id="onboarding.restart"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Повторить знакомство</button><button data-ui-action="restart-guidance" data-action-id="guidance.restart"><i class="ph ph-lightbulb" aria-hidden="true"></i>Показать подсказки</button></div></section></div>
+        <section class="diagnostics-card"><div><span class="metric-icon green"><i class="ph ph-shield-check" aria-hidden="true"></i></span><span><strong>Work Hunter работает</strong><small>Версия приложения и состояние локальных сервисов</small></span></div><dl><div><dt>Версия</dt><dd>local</dd></div><div><dt>Сервер</dt><dd class="success-text">Доступен</dd></div></dl><button id="copy-diagnostics" type="button"><i class="ph ph-copy" aria-hidden="true"></i>Скопировать диагностику</button></section>
       </div>
-      <div id="settings-advanced-slot" data-settings-panel="advanced"></div>
+      <div id="settings-advanced-slot" class="panel settings-page settings-advanced-page" data-settings-panel="advanced"><header class="settings-page-header"><div><span class="eyebrow">Для продвинутых</span><h2>Дополнительные параметры</h2><p>Обычная работа не требует изменений. Служебные данные и API спрятаны в раскрывающиеся блоки.</p></div></header><section class="settings-status-card"><span class="metric-icon green"><i class="ph ph-shield-check" aria-hidden="true"></i></span><div><strong>Система в норме</strong><p>Основные компоненты готовы к работе.</p></div><dl><div><dt>Хранение</dt><dd>Локально</dd></div><div><dt>Сессии</dt><dd>По запросу</dd></div></dl></section><div id="advanced-fragments"></div></div>
     </section>
 
     <section id="view-sources" class="view">
-      <div class="panel">
+      <section class="source-kpis" aria-label="Сводка по площадкам">
+        <article><span class="metric-icon green"><i class="ph ph-link" aria-hidden="true"></i></span><div><span>Синхронизировано</span><strong id="sources-connected-count">—</strong><small>источников</small></div></article>
+        <article><span class="metric-icon blue"><i class="ph ph-magnifying-glass" aria-hidden="true"></i></span><div><span>Поиск</span><strong id="sources-search-count">—</strong><small>площадок</small></div></article>
+        <article><span class="metric-icon purple"><i class="ph ph-lightning" aria-hidden="true"></i></span><div><span>Автоотклик</span><strong id="sources-apply-count">—</strong><small>площадок</small></div></article>
+        <article><span class="metric-icon orange"><i class="ph ph-user" aria-hidden="true"></i></span><div><span>Нужен вход</span><strong id="sources-auth-count">—</strong><small>площадок</small></div></article>
+      </section>
+      <section class="source-account-card">
         <div class="panel-head">
-          <h2>Источники</h2>
-          <button data-ui-action="sync-from-sources" data-action-id="sources.sync">Синхронизировать</button>
+          <div>
+            <span class="eyebrow">Ваши аккаунты</span>
+            <h2>Вход на площадки</h2>
+          </div>
+          <button data-ui-action="sync-from-sources" data-action-id="sources.sync">Обновить всё</button>
         </div>
-        <div id="sources-list" class="source-list"></div>
+        <div class="account-connection-row">
+          <div class="source-account-identity"><img class="source-logo large" src="/vendor/brands/hh.png" alt=""><span><strong>HeadHunter</strong><small id="source-hh-account">default</small></span></div>
+          <span id="source-hh-state" class="connection-state warning">Нужно войти</span>
+          <div class="actions">
+            <button id="source-hh-login" type="button" class="primary"><i class="ph ph-sign-in" aria-hidden="true"></i>Войти в HH</button>
+            <button id="source-hh-add-account" type="button"><i class="ph ph-user-plus" aria-hidden="true"></i>Добавить аккаунт</button>
+          </div>
+        </div>
+        <div class="account-connection-row">
+          <div class="source-account-identity"><img class="source-logo large" src="/vendor/brands/linkedin.png" alt=""><span><strong>LinkedIn</strong><small>Сессия сохраняется для автооткликов</small></span></div>
+          <span class="connection-state warning">Нужно войти</span>
+          <button type="button" data-source-login="linkedin"><i class="ph ph-sign-in" aria-hidden="true"></i>Войти в LinkedIn</button>
+        </div>
+        <div class="account-connection-row">
+          <div class="source-account-identity"><img class="source-logo large" src="/vendor/brands/getmatch.png" alt=""><span><strong>Getmatch</strong><small>Отдельная браузерная сессия</small></span></div>
+          <span class="connection-state warning">Нужно войти</span>
+          <button type="button" data-source-login="getmatch"><i class="ph ph-sign-in" aria-hidden="true"></i>Войти в Getmatch</button>
+        </div>
+        <div class="account-connection-row">
+          <div class="source-account-identity"><img class="source-logo large" src="/vendor/brands/indeed.png" alt=""><span><strong>Indeed</strong><small>Отдельная браузерная сессия</small></span></div>
+          <span class="connection-state warning">Нужно войти</span>
+          <button type="button" data-source-login="indeed"><i class="ph ph-sign-in" aria-hidden="true"></i>Войти в Indeed</button>
+        </div>
+        <div class="account-connection-row">
+          <div class="source-account-identity"><img class="source-logo large" src="/vendor/brands/rvc.jpg" alt=""><span><strong>RVC</strong><small>app.rvc.global · браузерная сессия</small></span></div>
+          <span class="connection-state warning">Нужно войти</span>
+          <button type="button" data-source-login="rvc"><i class="ph ph-sign-in" aria-hidden="true"></i>Войти в RVC</button>
+        </div>
+      </section>
+
+      <div class="source-work-grid">
+      <section class="panel source-platforms-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Площадки</span>
+            <h2>Где искать и откликаться</h2>
+          </div>
+          <span id="sources-summary" class="meta">Проверяем возможности…</span>
+        </div>
+        <div id="sources-list" class="source-list source-capability-list"></div>
+        <div class="source-legend" aria-label="Уровни автоматизации">
+          <span><i class="legend-dot search"></i><strong>Поиск</strong> — вакансии загружаются автоматически</span>
+          <span><i class="legend-dot apply"></i><strong>Автоотклик</strong> — Work Hunter может отправить отклик</span>
+          <span><i class="legend-dot browser"></i><strong>Через браузер</strong> — может понадобиться ваш вход</span>
+        </div>
+      </section>
+      <aside class="source-how-card">
+        <div><span class="metric-icon green"><i class="ph ph-lightning" aria-hidden="true"></i></span><h3>Автоотклик</h3><p>Work Hunter сам отправляет точные отклики по вашим правилам.</p><strong>Максимальная автоматизация</strong></div>
+        <div><span class="metric-icon blue"><i class="ph ph-magnifying-glass" aria-hidden="true"></i></span><h3>Поиск</h3><p>Вакансии появляются в общей ленте, решение остаётся за вами.</p><strong>Полуавтоматически</strong></div>
+        <div><span class="metric-icon neutral"><i class="ph ph-browser" aria-hidden="true"></i></span><h3>Через браузер</h3><p>Откроем площадку и попросим войти, когда это понадобится.</p><strong>С вашим участием</strong></div>
+      </aside>
       </div>
     </section>
 
     <section id="view-stats" class="view">
       <div class="destination-tabs" role="tablist" aria-label="Разделы аналитики">
-        <button role="tab" data-analytics-tab="overview">Обзор</button>
-        <button role="tab" data-analytics-tab="trends">Тренды</button>
+        <button role="tab" data-analytics-tab="overview"><i class="ph ph-chart-line-up" aria-hidden="true"></i>Обзор</button>
+        <button role="tab" data-analytics-tab="trends"><i class="ph ph-trend-up" aria-hidden="true"></i>Тренды</button>
       </div>
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <h1>Статистика</h1>
-        <button id="refresh-stats-button" data-action-id="stats.refresh">Обновить</button>
+        <div><h1>Результаты за 30 дней</h1><p>Что помогает получать ответы и где теряются отклики.</p></div>
+        <div class="actions"><button type="button"><i class="ph ph-calendar-blank" aria-hidden="true"></i>Последние 30 дней</button><button id="refresh-stats-button" data-action-id="stats.refresh"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Обновить</button></div>
       </div>
       <div class="stats-grid">
         <div class="stat-card">
-          <h3>Всего вакансий</h3>
+          <span class="metric-icon blue"><i class="ph ph-eye" aria-hidden="true"></i></span><h3>Найдено</h3>
           <div class="stat-number" id="stat-total">—</div>
+          <p>вакансий загружено</p>
         </div>
         <div class="stat-card">
-          <h3>Новых</h3>
+          <span class="metric-icon green"><i class="ph ph-target" aria-hidden="true"></i></span><h3>Новых</h3>
           <div class="stat-number" id="stat-new">—</div>
+          <p>за выбранный период</p>
         </div>
         <div class="stat-card">
-          <h3>Откликов</h3>
+          <span class="metric-icon orange"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></span><h3>Откликов</h3>
           <div class="stat-number" id="stat-applied">—</div>
+          <p>отправлено агентом и вручную</p>
         </div>
         <div class="stat-card">
-          <h3>Сохранено</h3>
+          <span class="metric-icon purple"><i class="ph ph-bookmark-simple" aria-hidden="true"></i></span><h3>Сохранено</h3>
           <div class="stat-number" id="stat-saved">—</div>
+          <p>для решения позже</p>
         </div>
       </div>
-      <div class="stats-section">
-        <h3>По источникам</h3>
-        <div id="stats-by-source" class="stats-bars"></div>
-      </div>
-      <div class="stats-section">
-        <h3>Распределение Score</h3>
-        <div id="stats-score-dist" class="stats-bars"></div>
-      </div>
-      <div class="stats-section">
-        <h3>Воронка откликов</h3>
-        <div id="stats-funnel" class="stats-funnel"></div>
+      <div class="analytics-grid">
+        <div class="stats-section analytics-sources">
+          <div class="panel-head"><div><span class="eyebrow">Площадки</span><h3>Лучшие источники</h3></div></div>
+          <div id="stats-by-source" class="stats-bars"></div>
+        </div>
+        <div class="stats-section analytics-score">
+          <div class="panel-head"><div><span class="eyebrow">Качество</span><h3>Распределение score</h3></div></div>
+          <div id="stats-score-dist" class="stats-bars"></div>
+        </div>
+        <div class="stats-section analytics-funnel">
+          <div class="panel-head"><div><span class="eyebrow">Конверсия</span><h3>Воронка откликов</h3></div></div>
+          <div id="stats-funnel" class="stats-funnel"></div>
+        </div>
+        <div class="stats-section analytics-insights">
+          <div class="panel-head"><div><span class="eyebrow">Следующий шаг</span><h3>Что улучшить</h3></div></div>
+          <button type="button" data-analytics-destination="resumes"><span class="metric-icon blue"><i class="ph ph-file-text" aria-hidden="true"></i></span><span><strong>Проверьте основное резюме</strong><small>Добавьте навыки из сильных вакансий</small></span><i class="ph ph-caret-right" aria-hidden="true"></i></button>
+          <button type="button" data-analytics-destination="search"><span class="metric-icon green"><i class="ph ph-target" aria-hidden="true"></i></span><span><strong>Расширьте правила поиска</strong><small>Проверьте локацию и порог score</small></span><i class="ph ph-caret-right" aria-hidden="true"></i></button>
+          <button type="button" data-analytics-destination="notifications"><span class="metric-icon purple"><i class="ph ph-bell" aria-hidden="true"></i></span><span><strong>Не пропускайте ответы</strong><small>Включите важные уведомления</small></span><i class="ph ph-caret-right" aria-hidden="true"></i></button>
+        </div>
       </div>
     </section>
 

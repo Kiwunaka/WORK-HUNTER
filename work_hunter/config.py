@@ -64,6 +64,12 @@ if callable(_register_at_fork):
 def _default_profile() -> dict[str, Any]:
     return {
         "name": "Кандидат",
+        "email": "",
+        "phone": "",
+        "city": "",
+        "linkedin_url": "",
+        "portfolio_url": "",
+        "resume_path": "",
         "title": "",
         "queries": ["python backend", "fullstack python", "fastapi"],
         "desired_roles": ["backend", "python", "developer"],
@@ -101,6 +107,12 @@ def default_config() -> dict[str, Any]:
     })
     public_board_sources["relocate_me"].update({
         "fetch_details": True,
+    })
+    public_board_sources["indeed"].update({
+        "browser_fallback": True,
+        "headless": False,
+        "timeout_seconds": 45,
+        "login_wait_seconds": 45,
     })
     return {
         "profile": "default",
@@ -229,6 +241,18 @@ def default_config() -> dict[str, Any]:
         "research": {
             "max_results": 200,
         },
+        "external_apply": {
+            "enabled": True,
+            "transport": "browser",
+            "headless": False,
+            "browser": "chromium",
+            "timeout_seconds": 45,
+            "login_wait_seconds": 180,
+            "max_steps": 12,
+            "slow_mo_ms": 100,
+            "answer_with_ai": True,
+            "answers": {},
+        },
         "hh_agent": {
             "paused": False,
             "telegram": {
@@ -259,8 +283,18 @@ def default_config() -> dict[str, Any]:
                 "web_user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0 Safari/537.36"
+                    "Chrome/151.0.0.0 Safari/537.36"
                 ),
+                "chatik": {
+                    "base_url": "https://chatik.hh.ru",
+                    "max_age_hours": 72,
+                    "max_pages": 10,
+                    "history_limit": 20,
+                    "message_limit": 20,
+                    "send_delay_min_seconds": 1.0,
+                    "send_delay_max_seconds": 3.0,
+                    "leave_discarded": True,
+                },
                 "hh_applicant_tool_command": "hh-applicant-tool",
                 "hh_applicant_tool_config_dir": "",
                 "allow_broad_apply": False,
@@ -274,6 +308,20 @@ def default_config() -> dict[str, Any]:
                 "enabled": True,
                 "pages": 1,
                 "fallback_unfiltered": True,
+            },
+            "linkedin": {
+                "enabled": True,
+                "pages": 1,
+                "page_size": 25,
+                "locations": ["Russia", "Remote"],
+                "geo_id": "101728296",
+                "date_posted_seconds": 604800,
+                "remote_only": False,
+                "apply_adapter": {
+                    "transport": "browser",
+                    "kind": "linkedin_easy_apply",
+                    "answers": {},
+                },
             },
             "telegram": {
                 "enabled": True,

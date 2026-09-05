@@ -6,6 +6,7 @@ import json
 import re
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ..models import Job
@@ -76,6 +77,13 @@ PUBLIC_BOARD_SPECS: dict[str, PublicBoardSpec] = {
         paths=("/", "/jobs"),
         query_params=("q",),
     ),
+    "indeed": PublicBoardSpec(
+        name="indeed",
+        base_url="https://www.indeed.com",
+        paths=("/jobs?fromage=7", "/jobs?l=Remote&fromage=7"),
+        query_params=("q",),
+        page_param="start",
+    ),
 }
 
 PUBLIC_BOARD_SOURCE_NAMES = tuple(PUBLIC_BOARD_SPECS)
@@ -105,17 +113,19 @@ class PublicJobBoardSource:
         source_name: str,
         spec: PublicBoardSpec | None = None,
         fetcher: Callable[[str], str] | None = None,
+        root: str | Path | None = None,
     ):
         self.config = config
         self.source_name = source_name
         self.spec = spec or PUBLIC_BOARD_SPECS[source_name]
         self.fetcher = fetch_url if fetcher is None else fetcher
+        self.root = Path(root) if root is not None else Path.cwd()
 
     def collect(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
         jobs: list[Job] = []
         seen: set[str] = set()
         for url in self._candidate_urls(profile):
-            html = self.fetcher(url)
+            html = self._fetch(url)
             for job in parse_public_board_html(html, source=self.source_name, base_url=self.base_url):
                 key = (
                     canonicalize_job_url(job.url)
@@ -129,6 +139,50 @@ class PublicJobBoardSource:
                 if limit is not None and len(jobs) >= limit:
                     return jobs
         return jobs
+
+    def _fetch(self, url: str) -> str:
+        try:
+            return self.fetcher(url)
+        except Exception:
+            if not bool(self.config.get("browser_fallback", False)):
+                raise
+            return self._fetch_with_browser(url)
+
+    def _fetch_with_browser(self, url: str) -> str:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                'Browser search requires Playwright: pip install -e ".[browser]"'
+            ) from exc
+        profile_dir = self.root / ".work-hunter" / "browser" / self.source_name
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=bool(self.config.get("headless", False)),
+            )
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                timeout_ms = max(
+                    5_000,
+                    int(self.config.get("timeout_seconds", 45) or 45) * 1000,
+                )
+                page.set_default_timeout(timeout_ms)
+                page.goto(url, wait_until="domcontentloaded")
+                wait_seconds = max(
+                    0,
+                    int(self.config.get("login_wait_seconds", 45) or 0),
+                )
+                for _ in range(wait_seconds):
+                    if not _browser_challenge_visible(page):
+                        break
+                    if bool(self.config.get("headless", False)):
+                        break
+                    page.wait_for_timeout(1000)
+                return page.content()
+            finally:
+                context.close()
 
     @property
     def base_url(self) -> str:
@@ -189,6 +243,20 @@ def public_board_default_config(name: str) -> dict[str, Any]:
         "page_param": spec.page_param,
         "pages": 1,
     }
+
+
+def _browser_challenge_visible(page: Any) -> bool:
+    title = str(page.title() or "").casefold()
+    url = str(page.url or "").casefold()
+    return any(
+        marker in f"{title} {url}"
+        for marker in (
+            "additional verification",
+            "just a moment",
+            "captcha",
+            "challenge",
+        )
+    )
 
 
 def parse_public_board_html(html: str, *, source: str, base_url: str) -> list[Job]:
@@ -588,6 +656,8 @@ def _looks_like_job_href(href: str) -> bool:
             "/position",
             "/positions",
             "/skills/",
+            "/rc/clk",
+            "/pagead/clk",
         )
     )
 

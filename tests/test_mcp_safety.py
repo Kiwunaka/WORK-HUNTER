@@ -11,18 +11,43 @@ from work_hunter.sources import PUBLIC_BOARD_SOURCE_NAMES
 
 
 class FakeWorkHunter:
-    def apply_hh(self, *args, **kwargs):
-        raise AssertionError("MCP must not call real HH apply")
+    calls = []
+
+    def confirm_apply(self, job_id, *, resume_id=None, letter=None, confirm=False):
+        self.calls.append(
+            {
+                "job_id": job_id,
+                "resume_id": resume_id,
+                "letter": letter,
+                "confirm": confirm,
+            }
+        )
+        return {"status": "sent" if confirm else "blocked"}
 
 
-def test_mcp_blocks_real_hh_apply(monkeypatch):
+def test_mcp_requires_literal_confirmation_for_real_hh_apply(monkeypatch):
+    FakeWorkHunter.calls = []
     monkeypatch.setattr(mcp_server, "WorkHunter", lambda root: FakeWorkHunter())
 
     result = asyncio.run(mcp_server.call_tool("apply_hh", {"job_id": 1, "dry_run": False}))
     payload = json.loads(result[0].text)
 
     assert payload["status"] == "blocked"
-    assert "MCP" in payload["message"]
+    assert FakeWorkHunter.calls == [
+        {"job_id": 1, "resume_id": None, "letter": None, "confirm": False}
+    ]
+
+
+def test_mcp_can_confirm_hh_apply_with_literal_true(monkeypatch):
+    FakeWorkHunter.calls = []
+    monkeypatch.setattr(mcp_server, "WorkHunter", lambda root: FakeWorkHunter())
+
+    result = asyncio.run(
+        mcp_server.call_tool("apply_hh", {"job_id": 1, "confirm": True})
+    )
+
+    assert json.loads(result[0].text)["status"] == "sent"
+    assert FakeWorkHunter.calls[0]["confirm"] is True
 
 
 def test_mcp_source_enums_include_public_board_sources():

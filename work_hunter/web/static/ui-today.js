@@ -209,6 +209,9 @@
 
   function compose({ resources, now, timeZone }) {
     const clock = createZonedClock(now, timeZone);
+    const jobs = resourceData(resources.jobs);
+    const approvals = resourceData(resources.approvals).filter((approval) => approval.status === "pending");
+    const upcoming = selectUpcoming(resources.events, clock);
     return {
       readiness: resources.readiness,
       resourceStates: {
@@ -220,8 +223,14 @@
       },
       focus: selectFocus(resources, clock).slice(0, 3),
       freshMatches: selectFreshMatches(resources.jobs).slice(0, 3),
-      upcoming: selectUpcoming(resources.events, clock).slice(0, 2),
+      upcoming: upcoming.slice(0, 2),
       pendingDecision: selectPendingDecision(resources.approvals),
+      metrics: {
+        matches: jobs.filter((job) => job.status === "new" && scoreOf(job) >= 70).length,
+        applied: jobs.filter((job) => ["applied", "sent", "submitted"].includes(String(job.status || "").toLowerCase())).length,
+        decisions: approvals.length,
+        interviews: upcoming.filter((event) => String(event.type || event.event_type || "").toLowerCase().includes("interview")).length,
+      },
       timeZone,
     };
   }
@@ -254,10 +263,35 @@
     const freshRoot = document.querySelector("#today-fresh-matches");
     const upcomingRoot = document.querySelector("#today-upcoming");
     const decisionsRoot = document.querySelector("#today-decisions");
+    const kpisRoot = document.querySelector("#today-kpis");
     if (!readinessRoot || !focusRoot || !freshRoot || !upcomingRoot || !decisionsRoot) return;
 
     readinessRoot.replaceChildren();
     readinessRoot.dataset.state = model.readiness;
+    const workModeHero = document.querySelector("#work-mode-hero");
+    const workModeTitle = document.querySelector("#work-mode-title");
+    const workModeSummary = document.querySelector("#work-mode-summary");
+    const workModeStart = document.querySelector("#work-mode-start");
+    if (workModeHero) workModeHero.dataset.readiness = model.readiness;
+    if (workModeTitle) {
+      workModeTitle.textContent = model.readiness === "ready"
+        ? "Work Hunter готов к поиску"
+        : (model.readiness === "loading" ? "Проверяю готовность Work Hunter" : "Сначала завершите настройку");
+    }
+    if (workModeSummary) {
+      workModeSummary.textContent = model.readiness === "ready"
+        ? "Выберите режим — правила и подключённые площадки применятся автоматически."
+        : "Добавьте цель поиска и активное резюме; аккаунты площадок можно подключить следом.";
+    }
+    if (workModeStart && model.readiness !== "ready") workModeStart.textContent = "Завершить настройку";
+    if (kpisRoot) {
+      const metrics = model.metrics || {};
+      kpisRoot.innerHTML = `
+        <article><span class="metric-icon green"><i class="ph ph-target" aria-hidden="true"></i></span><div><span>Подходят сегодня</span><strong>${metrics.matches || 0}</strong><small>сильных совпадений</small></div></article>
+        <article><span class="metric-icon blue"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></span><div><span>Отклики</span><strong>${metrics.applied || 0}</strong><small>отправлено</small></div></article>
+        <article><span class="metric-icon orange"><i class="ph ph-envelope-simple" aria-hidden="true"></i></span><div><span>Нужен ответ</span><strong>${metrics.decisions || 0}</strong><small>ваших решений</small></div></article>
+        <article><span class="metric-icon purple"><i class="ph ph-calendar-check" aria-hidden="true"></i></span><div><span>Собеседования</span><strong>${metrics.interviews || 0}</strong><small>в ближайшие 30 дней</small></div></article>`;
+    }
     const readinessCopy = document.createElement("div");
     const readinessTitle = document.createElement("strong");
     readinessTitle.textContent = model.readiness === "ready" ? "Готово к поиску" : model.readiness === "loading" ? "Проверяю готовность…" : "Нужна настройка";
@@ -284,7 +318,16 @@
       row.dataset.actionId = `today.focus.${item.kind}`;
       const title = item.title || item.action_type || (item.kind === "approval" ? `Решение #${item.id}` : `Запись #${item.id}`);
       const meta = item.kind === "job" ? `Совпадение ${scoreOf(item)}` : item.kind === "approval" ? "Ожидает решения" : item.kind === "event" ? "Сегодня" : "К выполнению";
-      row.append(Object.assign(document.createElement("strong"), { textContent: title }), Object.assign(document.createElement("span"), { textContent: meta }));
+      const icon = document.createElement("span");
+      icon.className = `today-row-icon metric-icon ${item.kind === "approval" ? "orange" : item.kind === "job" ? "green" : "blue"}`;
+      icon.innerHTML = `<i class="ph ${item.kind === "approval" ? "ph-hand-palm" : item.kind === "job" ? "ph-target" : item.kind === "event" ? "ph-calendar-blank" : "ph-check-square"}" aria-hidden="true"></i>`;
+      const copy = document.createElement("span");
+      copy.className = "today-row-copy";
+      copy.append(Object.assign(document.createElement("strong"), { textContent: title }), Object.assign(document.createElement("small"), { textContent: meta }));
+      const caret = document.createElement("i");
+      caret.className = "ph ph-caret-right";
+      caret.setAttribute("aria-hidden", "true");
+      row.append(icon, copy, caret);
       row.addEventListener("click", () => {
         const destination = item.kind === "job"
           ? "inbox"
@@ -330,7 +373,16 @@
       row.type = "button";
       row.className = "today-row";
       row.dataset.actionId = "today.open-event";
-      row.append(Object.assign(document.createElement("strong"), { textContent: event.title || "Событие" }), Object.assign(document.createElement("span"), { textContent: event.event_date || event.starts_at || event.date || "" }));
+      const icon = document.createElement("span");
+      icon.className = "today-row-icon metric-icon purple";
+      icon.innerHTML = '<i class="ph ph-calendar-check" aria-hidden="true"></i>';
+      const copy = document.createElement("span");
+      copy.className = "today-row-copy";
+      copy.append(Object.assign(document.createElement("strong"), { textContent: event.title || "Событие" }), Object.assign(document.createElement("small"), { textContent: event.event_date || event.starts_at || event.date || "" }));
+      const caret = document.createElement("i");
+      caret.className = "ph ph-caret-right";
+      caret.setAttribute("aria-hidden", "true");
+      row.append(icon, copy, caret);
       row.addEventListener("click", () => navigate?.("calendar", { event: event.id }));
       upcomingRoot.append(row);
     }
@@ -342,7 +394,16 @@
       button.type = "button";
       button.className = "today-decision";
       button.dataset.actionId = "today.open-approval";
-      button.textContent = `${model.pendingDecision.action_type || "Действие"} · #${model.pendingDecision.id}`;
+      const icon = document.createElement("span");
+      icon.className = "today-row-icon metric-icon orange";
+      icon.innerHTML = '<i class="ph ph-hand-palm" aria-hidden="true"></i>';
+      const copy = document.createElement("span");
+      copy.className = "today-row-copy";
+      copy.append(Object.assign(document.createElement("strong"), { textContent: model.pendingDecision.action_type || "Действие" }), Object.assign(document.createElement("small"), { textContent: `Нужно ваше подтверждение · #${model.pendingDecision.id}` }));
+      const caret = document.createElement("i");
+      caret.className = "ph ph-caret-right";
+      caret.setAttribute("aria-hidden", "true");
+      button.append(icon, copy, caret);
       button.addEventListener("click", () => navigate?.("agent", { approval: model.pendingDecision.id }));
       decisionsRoot.append(button);
     }

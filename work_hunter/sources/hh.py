@@ -392,7 +392,7 @@ class HHApplyClient:
                 page=page,
                 per_page=per_page,
             )
-            items.extend(result.items)
+            items.extend(dict(item) for item in result.items)
             if page + 1 >= result.pages:
                 break
         return items
@@ -455,7 +455,7 @@ class HHApplyClient:
                 page=page,
                 per_page=per_page,
             )
-            items.extend(result.items)
+            items.extend(dict(item) for item in result.items)
             if page + 1 >= result.pages:
                 break
         return items

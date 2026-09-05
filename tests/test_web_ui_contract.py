@@ -17,6 +17,7 @@ from work_hunter.web.server import (
     _job_json,
     make_handler,
 )
+import work_hunter.web.server as web_server
 
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "work_hunter" / "web" / "static"
@@ -127,6 +128,56 @@ def test_ui_deep_links_and_static_assets_are_served(tmp_path):
         manifest_status, _, manifest_body = _get_text(base, "/manifest.json")
         assert manifest_status == 200
         assert json.loads(manifest_body)["name"] == "Work Hunter"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_hh_auth_login_route_starts_interactive_login_without_blocking(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_launch(root, account):
+        calls.append((root, account))
+        return {"status": "started", "account": account, "pid": 1234}
+
+    monkeypatch.setattr(web_server, "_launch_hh_auth_login", fake_launch)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        status, body = _post_json(base, "/api/hh/auth/login", {"account": "default"})
+        assert status == 202
+        assert body == {"status": "started", "account": "default", "pid": 1234}
+        assert calls == [(tmp_path, "default")]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_source_browser_login_route_starts_persistent_session(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_launch(root, source, url=""):
+        calls.append((root, source, url))
+        return {"status": "started", "source": source, "pid": 4321}
+
+    monkeypatch.setattr(web_server, "_launch_source_browser_login", fake_launch)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        status, body = _post_json(
+            base,
+            "/api/sources/browser-login",
+            {"source": "linkedin", "url": "https://www.linkedin.com/login"},
+        )
+        assert status == 202
+        assert body == {"status": "started", "source": "linkedin", "pid": 4321}
+        assert calls == [(tmp_path, "linkedin", "https://www.linkedin.com/login")]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -464,7 +515,8 @@ def test_primary_navigation_has_exactly_eight_russian_destinations_and_local_ico
         "Настройки",
     ):
         assert f">{label}<" in markup or label in markup
-    assert markup.count("<svg") == 8
+    assert markup.count('<i class="ph ') == 8
+    assert '/vendor/phosphor/style.css' in index
     assert "http://" not in markup
     assert "https://" not in markup
 

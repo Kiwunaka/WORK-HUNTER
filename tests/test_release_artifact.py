@@ -14,7 +14,6 @@ from pathlib import Path
 
 import work_hunter
 
-
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_FILES = {
     "app.css",
@@ -138,14 +137,20 @@ def test_project_and_module_versions_are_1_0_0():
 def test_release_metadata_declares_safe_bounds_and_build_tools():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["build-system"] == {
-        "requires": ["setuptools>=75,<81"],
+        "requires": ["setuptools>=83,<85"],
         "build-backend": "setuptools.build_meta",
     }
     assert project["project"]["readme"] == "README.md"
     assert project["project"]["dependencies"] == [
-        "mcp>=1.27,<2",
+        "mcp>=1.29.1,<2",
         "requests>=2.32,<3",
         "starlette>=1.3.1,<2",
+        "cryptography>=50.0,<51",
+        "idna>=3.15,<4",
+        "pyjwt>=2.13,<3",
+        "pydantic-settings>=2.14.2,<3",
+        "python-multipart>=0.0.31,<1",
+        "urllib3>=2.7,<3",
         "tzdata>=2025.2; sys_platform == 'win32'",
     ]
     extras = project["project"]["optional-dependencies"]

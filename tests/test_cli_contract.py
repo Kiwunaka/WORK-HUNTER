@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import work_hunter.cli as cli_module
 from work_hunter.cli import main as cli_main
 from work_hunter.models import Job
 from work_hunter.services import WorkHunter
@@ -116,3 +117,55 @@ def test_hh_apply_plan_persists_and_confirm_requires_flag(monkeypatch, tmp_path,
     blocked = json.loads(capsys.readouterr().out)
     assert blocked["status"] == "blocked"
     assert FakeHHClient.apply_calls == []
+
+
+def test_profile_update_persists_external_application_fields(tmp_path, capsys):
+    resume = tmp_path / "resume.pdf"
+    resume.write_bytes(b"%PDF-test")
+    payload = {
+        "name": "Candidate",
+        "email": "candidate@example.test",
+        "phone": "+79990000000",
+        "resume_path": str(resume),
+    }
+
+    cli_main(
+        [
+            "--root",
+            str(tmp_path),
+            "profile",
+            "update",
+            "--json",
+            json.dumps(payload),
+        ]
+    )
+
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["email"] == payload["email"]
+    doctor = WorkHunter(root=tmp_path).doctor()
+    assert doctor["profile"]["application_fields"]["status"] == "ready"
+
+
+def test_browser_login_cli_uses_persistent_source_session(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_open_browser_session(**kwargs):
+        calls.append(kwargs)
+        return {"status": "authenticated", "source": kwargs["source"]}
+
+    monkeypatch.setattr(cli_module, "open_browser_session", fake_open_browser_session)
+
+    cli_main(
+        [
+            "--root",
+            str(tmp_path),
+            "browser-login",
+            "linkedin",
+            "--wait",
+            "120",
+        ]
+    )
+
+    assert json.loads(capsys.readouterr().out)["status"] == "authenticated"
+    assert calls[0]["source"] == "linkedin"
+    assert calls[0]["wait_seconds"] == 120

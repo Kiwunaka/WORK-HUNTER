@@ -1,6 +1,6 @@
 # Work Hunter
 
-Personal local job-search command center for finding vacancies, scoring fit, preparing applications, and running a guarded HH agent flow.
+Personal local job-search command center for finding vacancies, scoring fit, preparing applications, and sending applications across HH, LinkedIn, and external job boards.
 
 This repository is a **private local-first tool**, not a public SaaS product. It is built around one user, local secrets, local SQLite state, and explicit safety gates for real job applications.
 
@@ -8,10 +8,12 @@ This repository is a **private local-first tool**, not a public SaaS product. It
 
 Work Hunter helps with the full job-search loop:
 
-- collect vacancies from HH, Habr, GeekJob, Telegram, Getmatch, Relocate.me, and other public boards;
+- collect vacancies from HH, LinkedIn, Indeed, Habr, GeekJob, Telegram, GetMatch, Relocate.me, HireHi, CareerSpace, Another-IT, and Jabka;
 - score jobs against a local profile;
 - draft cover letters, resume tips, ATS summaries, interview prep, and fit analysis;
-- operate HH flows: auth status, resumes, negotiations, campaigns, API lab, apply plans, approvals, events, templates, and blacklist;
+- operate HH flows: auth, resumes, campaigns, tests/forms, negotiations, Chatik button replies, API lab, approvals, events, cleanup, and blacklist;
+- send non-HH applications through a persistent Playwright profile or a promoted authenticated HAR/session adapter;
+- fill application questions from explicit answers, candidate facts, and the configured AI backend;
 - expose a local web cockpit and MCP tools for agent-driven workflows;
 - research personal API/session adapters from HAR files without printing secrets.
 
@@ -59,7 +61,8 @@ Use Python 3.11+.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[ui]"
+python -m pip install -e ".[browser,ui]"
+python -m playwright install chromium
 python -m work_hunter init
 python -m work_hunter doctor --json
 python -m work_hunter config --json
@@ -67,7 +70,11 @@ python -m work_hunter config --json
 
 ### HH Autopilot
 
-Полный операторский гайд: [docs/hh-autopilot.md](docs/hh-autopilot.md).
+Полный операторский гайд: [docs/hh-autopilot.md](docs/hh-autopilot.md). Сверка
+с `hh-applicant-tool 1.8.26` и `hh-ai-responder 0.2.4`:
+[docs/hh-reference-parity.md](docs/hh-reference-parity.md). Полный аудит доноров
+и форков от 30 августа 2026 года:
+[docs/2026-08-30-upstream-audit.md](docs/2026-08-30-upstream-audit.md).
 
 ```powershell
 python -m pip install -e ".[browser,ui]"
@@ -100,8 +107,14 @@ Sync, score, and list jobs:
 
 ```powershell
 python -m work_hunter sync --source habr --limit 20
+python -m work_hunter sync --source linkedin --limit 20
+python -m work_hunter sync --source indeed --limit 20
 python -m work_hunter score
 python -m work_hunter list --limit 20 --min-score 50
+python -m work_hunter apply-plan 123
+python -m work_hunter apply 123 --letter-file .\letter.txt --confirm
+python -m work_hunter browser-login linkedin
+python -m work_hunter browser-login indeed
 ```
 
 Run the local UI:
@@ -115,7 +128,7 @@ python -m work_hunter ui --host 127.0.0.1 --port 8787
 The Apple HIG-inspired cockpit has eight destinations:
 
 - **Today** — readiness, up to three priority actions, fresh matches, upcoming events, and pending decisions;
-- **Vacancies** — search, filters, scoring, saved items, vacancy details, letters, and guarded HH apply;
+- **Vacancies** — search, filters, scoring, saved items, vacancy details, letters, and one apply flow for every supported source;
 - **Applications** — pipeline, agent approvals/runs, and automation tools;
 - **Calendar** — interviews, follow-ups, reminders, and tasks;
 - **Assistant** — job-aware chat and drafting;
@@ -141,13 +154,13 @@ Inspect source capabilities:
 python -m work_hunter source-capabilities
 ```
 
-## HH Agent Safety
+## Application Execution
 
 Real job actions must be treated as sensitive.
 
-- Prefer dry-run, plan, and approval flows first.
-- Real HH apply/reply/cleanup requires explicit user intent and an auditable path.
-- MCP must not silently send real applications.
+- The same plan/confirm contract is used for HH, LinkedIn, and external boards.
+- A literal confirmation sends the application; browser and session transports are first-class execution paths.
+- MCP exposes `apply_job` and can send when `confirm=true` is passed literally.
 - Never print access tokens, refresh tokens, cookies, client secrets, Telegram bot tokens, SMTP passwords, or full auth headers.
 - HH vacancy tests, supported forms, and application CAPTCHA resolve automatically when AI/browser settings are present; exhausted or unknown challenge states escalate per vacancy.
 
@@ -169,7 +182,7 @@ python -m work_hunter api-recon-har .\session.har --host example.com
 python -m work_hunter external-adapter-plan .\session.har --source example --host example.com
 ```
 
-External session mutating calls are intentionally guarded.
+Raw external-session calls remain a low-level laboratory interface. Normal applications do not require `--unsafe-lab`; the confirmed `apply` flow invokes the configured adapter directly.
 
 ```powershell
 python -m work_hunter external-session call example POST https://example.com/api/apply --data-file .\payload.json --real --unsafe-lab

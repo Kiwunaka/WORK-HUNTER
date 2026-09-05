@@ -18,12 +18,12 @@ Create a separate `work-hunter` project in the current workspace.
 
 HH search should prefer the official API when an `HH_ACCESS_TOKEN` or local access token is configured. Because current HH vacancy search is no longer reliably anonymous, MVP also keeps a personal-use HTML fallback for collecting visible search results.
 
-Habr Career and GeekJob start as read-only sources:
+Habr Career, GeekJob, LinkedIn, and the public boards are searchable sources with application adapters:
 
 - Habr Career: RSS from search pages first, HTML fallback when needed.
 - GeekJob: HTML vacancy pages first, Telegram channel URLs stored as discoverable external sources.
 
-Real apply automation outside HH is out of MVP scope. For non-HH vacancies, the UI/MCP should prepare a message and open the original vacancy/contact.
+Real apply automation outside HH is in scope. The preferred order is a stable authenticated API/session adapter discovered from the owner's traffic, then a persistent Playwright browser adapter. The UI, CLI, and MCP use the same plan/confirm/apply contract.
 
 ## Architecture
 
@@ -71,7 +71,7 @@ Primary screens:
 Important UI behavior:
 
 - HH apply requires explicit user action.
-- Non-HH apply opens the source/contact and stores a prepared letter.
+- Non-HH apply uses its configured session or persistent-browser adapter and stores the result.
 - Every automated skip must show a human-readable reason.
 - Secrets and tokens must not be rendered in the UI.
 

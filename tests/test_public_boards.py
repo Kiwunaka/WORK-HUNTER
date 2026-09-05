@@ -326,6 +326,30 @@ def test_parse_public_board_anchor_fallback_job_card():
     assert "JetBrains" in jobs[0].description
 
 
+def test_parse_indeed_redirect_job_card():
+    html = """
+    <div class="job_seen_beacon">
+      <a class="jcs-JobTitle" href="/rc/clk?jk=abc123&amp;from=serp">
+        Senior Python Backend Engineer
+      </a>
+      <span data-testid="company-name">Acme</span>
+      <div data-testid="text-location">Remote</div>
+    </div>
+    """
+
+    jobs = parse_public_board_html(
+        html,
+        source="indeed",
+        base_url="https://www.indeed.com",
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0].source == "indeed"
+    assert jobs[0].url == "https://www.indeed.com/rc/clk?jk=abc123&from=serp"
+    assert jobs[0].title == "Senior Python Backend Engineer"
+    assert jobs[0].remote is True
+
+
 def test_public_board_source_collects_query_pages_and_dedupes():
     calls: list[str] = []
 

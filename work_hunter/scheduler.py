@@ -14,8 +14,10 @@ SAFE_TASKS = {
     "score",
     "hh-refresh-token",
     "hh-update-resumes",
+    "hh-job-search-active",
     "hh-sync-negotiations",
     "hh-reply-employers",
+    "hh-chatik-reply",
     "hh-employer-enrich",
     "hh-email-followups",
     "hh-negotiation-cleanup",
@@ -143,6 +145,13 @@ class SafeTaskRunner:
                     }
                 else:
                     result = self.app.update_hh_resumes(confirm=True)
+            elif task_name == "hh-job-search-active":
+                real = _explicit_real(task)
+                result = self.app.set_hh_job_search_active(
+                    account=_optional_text(task.get("account")),
+                    dry_run=not real,
+                    confirm=real,
+                )
             elif task_name == "hh-sync-negotiations":
                 result = self.app.sync_hh_negotiations(
                     status=str(task.get("status") or "active"),
@@ -171,6 +180,33 @@ class SafeTaskRunner:
                     ),
                     send_delay_max_seconds=float(
                         task.get("send_delay_max_seconds", 3.0)
+                    ),
+                )
+            elif task_name == "hh-chatik-reply":
+                real = _explicit_real(task)
+                result = self.app.reply_hh_chatik(
+                    account=_optional_text(task.get("account")),
+                    template=str(task.get("template") or ""),
+                    use_ai=bool(task.get("use_ai", False)),
+                    system_prompt=str(task.get("system_prompt") or ""),
+                    message_prompt=str(task.get("message_prompt") or ""),
+                    max_pages=_optional_int(task.get("max_pages")),
+                    max_age_hours=_optional_float(task.get("max_age_hours")),
+                    history_limit=_optional_int(task.get("history_limit")),
+                    message_limit=_optional_int(task.get("message_limit")),
+                    limit=_optional_int(task.get("limit")),
+                    leave_discarded=(
+                        bool(task["leave_discarded"])
+                        if "leave_discarded" in task
+                        else None
+                    ),
+                    dry_run=not real,
+                    confirm=real,
+                    send_delay_min_seconds=_optional_float(
+                        task.get("send_delay_min_seconds")
+                    ),
+                    send_delay_max_seconds=_optional_float(
+                        task.get("send_delay_max_seconds")
                     ),
                 )
             elif task_name == "hh-employer-enrich":
@@ -343,6 +379,12 @@ def _optional_text(value: Any) -> str | None:
         return None
     parsed = str(value).strip()
     return parsed or None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _invalid_autopilot_parameters(task_name: str, task: dict[str, Any]) -> bool:

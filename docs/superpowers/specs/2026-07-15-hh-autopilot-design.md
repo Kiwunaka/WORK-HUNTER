@@ -452,7 +452,7 @@ The default attempts are bounded and persisted. Delay is exponential with bounde
 
 Work Hunter provides browser-assisted login by password or one-time code, cookie import, token refresh, logout, profile selection, and session diagnostics through the existing HH account profile boundary. Login OTP and login CAPTCHA remain interactive, matching the reference authorization operation. Application CAPTCHA is automatic when `captcha_mode=vision_then_manual`. Refreshed tokens and cookies are written atomically to the active profile and reused by API and browser transports.
 
-The implementation does not depend on undeclared or decompiled third-party client credentials. Required OAuth client configuration must be user-provided or otherwise legally distributable.
+OAuth client configuration may be supplied by the user, imported from a local compatible tool, or recovered from an APK owned/downloaded by the operator. Recovered material stays in ignored local configuration and is never committed or printed in reports.
 
 ## Reference Feature Parity
 

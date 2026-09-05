@@ -183,13 +183,15 @@ class HHVacancyTestTransport:
     def _http_session(self) -> Any:
         http = self.http_factory()
         headers = getattr(http, "headers", None)
-        if self.user_agent and hasattr(headers, "update"):
-            headers.update({"User-Agent": self.user_agent})
+        update_headers = getattr(headers, "update", None)
+        if self.user_agent and callable(update_headers):
+            update_headers({"User-Agent": self.user_agent})
         jar = getattr(http, "cookies", None)
+        set_cookie = getattr(jar, "set", None)
         for cookie in self.browser_session.cookies:
-            if not callable(getattr(jar, "set", None)):
+            if not callable(set_cookie):
                 break
-            jar.set(
+            set_cookie(
                 str(cookie.get("name") or ""),
                 str(cookie.get("value") or ""),
                 domain=str(cookie.get("domain") or ".hh.ru"),
@@ -364,13 +366,14 @@ class HHNativeApplicationTransport:
         api_session = getattr(self.client, "session", None)
         http = getattr(api_session, "http", None)
         jar = getattr(http, "cookies", None)
-        if not callable(getattr(jar, "set", None)):
+        set_cookie = getattr(jar, "set", None)
+        if not callable(set_cookie):
             return
         for cookie in browser_session.cookies:
             name = str(cookie.get("name") or "").strip()
             if not name:
                 continue
-            jar.set(
+            set_cookie(
                 name,
                 str(cookie.get("value") or ""),
                 domain=str(cookie.get("domain") or ".hh.ru"),
@@ -384,6 +387,8 @@ class HHNativeApplicationTransport:
         api_session = getattr(self.client, "session", None)
         http = getattr(api_session, "http", None)
         jar = getattr(http, "cookies", None)
+        if jar is None:
+            return
         try:
             api_cookies = list(jar)
         except TypeError:
