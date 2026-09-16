@@ -81,7 +81,11 @@ class HHMCPToolHandlers:
             ),
             Tool(
                 name="hh_research_vacancies",
-                description="Research HH vacancies in dry-run mode.",
+                description=(
+                    "Research HH vacancies in dry-run mode. "
+                    "Planned items include job_id and next_actions for "
+                    "hh_apply_vacancy/apply_job with literal confirmation."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -93,7 +97,11 @@ class HHMCPToolHandlers:
             ),
             Tool(
                 name="hh_apply_vacancy",
-                description="Plan or send one HH vacancy application with literal confirm_apply=true.",
+                description=(
+                    "Send one HH application for a vacancy already stored locally "
+                    "(e.g. from hh_research_and_apply job_id) with literal "
+                    "confirm_apply=true. Without confirmation only builds a plan."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -106,7 +114,12 @@ class HHMCPToolHandlers:
             ),
             Tool(
                 name="hh_research_and_apply",
-                description="Research and plan HH applications in dry-run mode.",
+                description=(
+                    "Research HH vacancies and store dry-run apply plans "
+                    "(job_id + next_actions per planned item). Real sending is "
+                    "always one vacancy at a time via hh_apply_vacancy "
+                    "(confirm_apply=true); confirm_apply here stays blocked."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {

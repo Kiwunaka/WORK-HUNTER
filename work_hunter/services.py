@@ -6661,9 +6661,17 @@ class WorkHunter:
             return {
                 "status": "blocked",
                 "reason": "real_apply_blocked",
-                "message": "Research operations only produce dry-run apply plans.",
+                "message": (
+                    "Research operations only produce dry-run apply plans. "
+                    "Send one vacancy at a time with hh_apply_vacancy "
+                    "(confirm_apply=true) or apply_job (confirm=true)."
+                ),
                 "counts": {"planned": 0, "blocked": 1, "applied": 0},
                 "items": [],
+                "next_actions": [
+                    "hh_apply_vacancy {\"vacancy_id\": \"<id>\", \"resume_id\": \"<resume>\", \"confirm_apply\": true}",
+                    "apply_job {\"job_id\": <job_id>, \"confirm\": true}",
+                ],
             }
         limit = max(1, min(int(limit or 20), 100))
         client = self._hh_research_client()
@@ -6688,6 +6696,7 @@ class WorkHunter:
         }
         for search_result in results[:limit]:
             item = search_result.to_dict()
+            job_id: int | None = None
             try:
                 vacancy = service.get_vacancy_details(search_result.vacancy_id)
                 analysis = service.analyze_vacancy(vacancy, resume_id=resume_id, run_id=run_id)
@@ -6714,6 +6723,13 @@ class WorkHunter:
                         }
                     )
                     counts[attempt.status] = counts.get(attempt.status, 0) + 1
+                    if attempt.status == "planned":
+                        job_id = self._ensure_research_job(search_result, vacancy)
+                        item["job_id"] = job_id
+                        item["next_actions"] = [
+                            f"hh_apply_vacancy {{\"vacancy_id\": \"{search_result.vacancy_id}\", \"resume_id\": \"{resume_id}\", \"confirm_apply\": true}}",
+                            f"apply_job {{\"job_id\": {job_id}, \"confirm\": true}}",
+                        ]
                 else:
                     item["attempt_status"] = "not_planned"
             except Exception as exc:
@@ -6742,6 +6758,33 @@ class WorkHunter:
 
     def _hh_research_client(self) -> Any:
         return self._hh_client()
+
+    def _ensure_research_job(self, search_result: Any, vacancy: dict[str, Any]) -> int:
+        from .models import Job
+
+        employer = vacancy.get("employer") or {}
+        if not isinstance(employer, dict):
+            employer = {}
+        return self.storage.upsert_job(
+            Job(
+                source="hh",
+                source_id=str(search_result.vacancy_id),
+                url=str(
+                    vacancy.get("alternate_url")
+                    or search_result.alternate_url
+                    or ""
+                ),
+                title=str(
+                    vacancy.get("name")
+                    or search_result.name
+                    or search_result.vacancy_id
+                ),
+                company=str(
+                    employer.get("name") or search_result.employer_name or ""
+                ),
+                description=clean_text(str(vacancy.get("description") or "")),
+            )
+        )
 
     def _build_hh_research_service(
         self,

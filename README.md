@@ -247,9 +247,19 @@ python -m build
 
 Известные ограничения (проверять по тестам, а не на слово):
 
-- часть MCP-путей HH — plan/dry-run, сквозную автоматизацию заявлять рано;
 - backend ИИ: direct OpenAI-совместимый HTTP и OpenCode; реестр провайдеров под подписки Codex/OpenCode ещё чистить;
 - статусу источников в UI нужна более богатая агрегация.
+
+## MCP для HH: честная связка research → точечный отклик
+
+MCP-путь HH — это два шага, а не одна кнопка «откликнуться на всё»:
+
+1. `hh_research_and_apply` / `hh_research_vacancies` — только ищут, оценивают и складывают dry-run планы. Каждый `planned` item уже содержит `job_id` и готовые `next_actions`. Массовая отправка пачкой здесь заблокирована навсегда: `confirm_apply=true` внутри research отвечает `real_apply_blocked`.
+2. `hh_apply_vacancy` (`confirm_apply=true`) или `apply_job` (`confirm=true`) — отправка по одной вакансии. Вакансия обязана уже лежать в локальной базе (research её туда кладёт сам через `job_id`), иначе получите `blocked: not in local storage`.
+
+Почему так: пачка откликов одним вызовом обходит гранты автопилота, квоты и попарную проверку тестов/форм. Точечный confirm идёт через тот же движок, что ручной отклик, — с авторизацией, дедупом и записью в историю (`hh_autopilot_history`).
+
+Сквозной сценарий для агента: research → взять `job_id` из `planned` items → `hh_apply_vacancy` по каждой вакансии отдельно → проверить `hh_autopilot_history`. Тесты связки: `tests/test_hh_agent_mcp.py`.
 
 Полный операторский гайд HH: [docs/hh-autopilot.md](docs/hh-autopilot.md). Сверка с донорами: [hh-reference-parity](docs/hh-reference-parity.md), [аудит 30.08](docs/2026-08-30-upstream-audit.md), [аудит 08.09](docs/2026-09-08-upstream-readiness-audit.md).
 

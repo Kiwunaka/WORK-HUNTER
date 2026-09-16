@@ -250,6 +250,51 @@ def test_mcp_research_and_apply_is_dry_run(monkeypatch, tmp_path):
     assert analyses[0].model == "test-model"
 
 
+def test_mcp_research_and_apply_links_planned_item_to_point_confirm(monkeypatch, tmp_path):
+    monkeypatch.setattr(mcp_server, "_root", tmp_path)
+    monkeypatch.setattr(WorkHunter, "_hh_research_client", lambda self: FakeResearchHHClient())
+    monkeypatch.setattr(WorkHunter, "_build_hh_research_service", fake_research_service)
+
+    result = asyncio.run(
+        mcp_server.call_tool(
+            "hh_research_and_apply",
+            {"text": "python", "limit": 3, "resume_id": "res-1"},
+        )
+    )
+    payload = decode(result)
+    item = payload["items"][0]
+    app = WorkHunter(root=tmp_path)
+    stored = app.storage.get_job(int(item["job_id"]))
+
+    assert stored is not None
+    assert stored.source == "hh"
+    assert stored.source_id == "vac-1"
+    assert item["next_actions"][0] == (
+        'hh_apply_vacancy {"vacancy_id": "vac-1", "resume_id": "res-1", "confirm_apply": true}'
+    )
+    assert item["next_actions"][1] == f'apply_job {{"job_id": {item["job_id"]}, "confirm": true}}'
+
+    calls = []
+
+    def fake_confirm(self, job_id, **kwargs):
+        calls.append({"job_id": job_id, **kwargs})
+        return {"status": "sent"}
+
+    monkeypatch.setattr(WorkHunter, "confirm_apply", fake_confirm)
+    sent = decode(
+        asyncio.run(
+            mcp_server.call_tool(
+                "hh_apply_vacancy",
+                {"vacancy_id": "vac-1", "resume_id": "res-1", "confirm_apply": True},
+            )
+        )
+    )
+
+    assert sent["status"] == "sent"
+    assert calls[0]["job_id"] == int(item["job_id"])
+    assert calls[0]["confirm"] is True
+
+
 def test_mcp_research_and_apply_blocks_confirm_apply(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_server, "_root", tmp_path)
     monkeypatch.setattr(WorkHunter, "_hh_research_client", lambda self: FakeResearchHHClient())
@@ -266,3 +311,5 @@ def test_mcp_research_and_apply_blocks_confirm_apply(monkeypatch, tmp_path):
     assert payload["status"] == "blocked"
     assert payload["reason"] == "real_apply_blocked"
     assert payload["items"] == []
+    assert "hh_apply_vacancy" in payload["next_actions"][0]
+    assert "apply_job" in payload["next_actions"][1]
