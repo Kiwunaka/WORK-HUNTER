@@ -1,98 +1,12 @@
-# Work Hunter
+# Work Hunter — локальный центр поиска работы
 
-Personal local job-search command center for finding vacancies, scoring fit, preparing applications, and sending applications across HH, LinkedIn, and external job boards.
+Приватный local-first инструмент: собирает вакансии, оценивает соответствие вашему опыту, готовит сопроводительные и ведёт автоотклики на HH — с явными подтверждениями опасных действий.
 
-This repository is a **private local-first tool**, not a public SaaS product. It is built around one user, local secrets, local SQLite state, and explicit safety gates for real job applications.
+- Секреты, куки, токены и база живут только локально в `.work-hunter/` и никогда не коммитятся.
+- Реальные отклики требуют буквального `confirm: true` — строки `"true"` ничего не разрешают.
+- Письма и ответы строятся только по вашей базе фактов: неизвестное уходит на уточнение, а не выдумывается.
 
-## What This Is
-
-Work Hunter helps with the full job-search loop:
-
-- collect vacancies from HH, LinkedIn, Indeed, Habr, GeekJob, Telegram, GetMatch, Relocate.me, HireHi, CareerSpace, Another-IT, and Jabka;
-- score jobs against a local profile;
-- draft cover letters, resume tips, ATS summaries, interview prep, and fit analysis;
-- operate HH flows: auth, resumes, campaigns, tests/forms, negotiations, Chatik button replies, API lab, approvals, events, cleanup, and blacklist;
-- send non-HH applications through a persistent Playwright profile or a promoted authenticated HAR/session adapter;
-- fill application questions from explicit answers, candidate facts, and the configured AI backend;
-- expose a local web cockpit and MCP tools for agent-driven workflows;
-- research personal API/session adapters from HAR files without printing secrets.
-
-The guiding product idea: the market is noisy, ATS/AI filters are brutal, and manual job search burns time. Work Hunter is the private automation layer that helps the candidate fight back while keeping risky actions auditable.
-
-## Подготовка до входа в HH
-
-В **Настройки → Профиль** заполните имя и контакты. В **Резюме → База опыта**
-сохраните реальные должности, даты, проекты, личный вклад, результаты и навыки.
-Пожелания к вакансии хранятся отдельно и не считаются подтверждением опыта.
-
-1. Укажите целевую должность и нажмите **Собрать резюме из фактов**. Это
-   редактируемая заготовка без генерации вымышленных достижений. Для другой роли
-   создайте отдельную версию и расставьте акценты в её тексте.
-2. Сделайте нужную версию основной и скачайте PDF или DOCX. Экспорт автоматически
-   читает файл обратно и проверяет наличие и порядок текста. PDF требует
-   установленного browser extra и Chromium. Проверка текста не оценивает правила
-   ATS работодателя.
-3. В **AI** сохраните настройки и нажмите **Проверить запросом**. Это реальный
-   запрос к провайдеру; показываются ошибки и известная стоимость запросов.
-   В блоке **Модели по задачам** можно отдельно выбрать оценку вакансий,
-   письма, ответы, подготовку к собеседованию, анкеты и тесты. Пустое поле
-   использует основную модель. Для GLM 5.3 Flash отмеченные провайдеры передаются
-   в OpenRouter через `provider.only`; другие провайдеры использоваться не будут.
-4. В **Площадки и автоотклики** нажмите **Проверить без входа в HH**. Та же
-   диагностика доступна через `work-hunter --root . launch-readiness --json`.
-   Она не обращается к HH и не включает отправки.
-
-После входа свяжите локальную версию с ID опубликованного резюме нужного
-аккаунта HH. Эта привязка выбирает резюме для автопилота; она не публикует
-и не переписывает текст на HH. Сверьте обе версии перед контрольным откликом.
-Автопилот сохраняет снимок выбранного HH-резюме и фактов перед отправкой;
-статистика группируется по аккаунту, резюме, версии и поиску.
-
-Оценка соответствия вакансии показывает цитаты из требований и базы опыта.
-Неизвестные обязательные требования отмечаются для просмотра. Успешная оценка
-неизменённой вакансии и резюме кешируется. Вопросы работодателей, которым
-не хватает фактов, сохраняются в очереди согласования; перед одобрением
-нужно записать ответ в `reply.message`. Одобрение сохраняет ответ для следующего
-запуска обработчика, само по себе сообщение не отправляет.
-
-## Repository Map
-
-| Path | Purpose |
-|---|---|
-| `work_hunter/cli.py` | CLI entrypoint and command routing. |
-| `work_hunter/services.py` | Main application service facade. Most workflows pass through `WorkHunter`. |
-| `work_hunter/storage.py` | SQLite schema and persistence methods. |
-| `work_hunter/sources/` | Vacancy source adapters. |
-| `work_hunter/hh_transport/` | HH API/browser/cookie/XSRF transport helpers. |
-| `work_hunter/hh_agent/` | HH agent policy, approvals, research, Telegram, events, forms, MCP handlers. |
-| `work_hunter/llm/` and `work_hunter/ai_backends.py` | Provider-neutral LLM helpers and OpenCode/direct backend support. |
-| `work_hunter/web/` | Local HTTP server and static UI. |
-| `tests/` | Pytest suite. Treat tests as the executable contract. |
-| `docs/` | Plans, safety notes, API recon notes, and historical implementation context. |
-| `.opencode/agents/work-hunter-ai.md` | Safe OpenCode agent prompt for local AI drafting/analysis. |
-
-## Do Not Commit
-
-These are intentionally ignored and must stay local:
-
-- `.work-hunter/`: config, SQLite DB, HH local state, logs, tokens, cookies;
-- `external/`, `.codex_compare/`, `.compare-forks/`, `.compare-hh-applicant-tool/`: donor and research repos;
-- `.venv/`, `.pytest_cache/`, `__pycache__/`, `work_hunter.egg-info/`;
-- `.research/`, `.playwright-mcp/`, HAR/session/cookie dumps;
-- any `*.db`, `*.sqlite3`, `*.log`, `*.har`, `*.pem`, `*.key`, `.env*`.
-
-Before committing, run a staged-only secret/path check.
-
-```powershell
-git diff --cached --name-only | rg "^(\.work-hunter/|external/|\.venv/|\.research/|\.codex_compare/|\.compare-forks/|\.compare-hh-applicant-tool/|\.playwright-mcp/|.*\.(db|sqlite|sqlite3|log|har|pem|key|p12|pfx)$)"
-git grep --cached -n -I -E "(-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[A-Za-z0-9_-]{20,}|sk-or-v1-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,})"
-```
-
-No output is the desired result.
-
-## Quick Start
-
-Use Python 3.11+.
+## Быстрый старт за 5 минут
 
 ```powershell
 python -m venv .venv
@@ -101,23 +15,32 @@ python -m pip install -e ".[browser,ui]"
 python -m playwright install chromium
 python -m work_hunter init
 python -m work_hunter doctor --json
-python -m work_hunter config --json
+python -m work_hunter ui --host 127.0.0.1 --port 8787
 ```
 
-### HH Autopilot
+Откройте `http://127.0.0.1:8787` и пройдите 4 шага:
 
-Полный операторский гайд: [docs/hh-autopilot.md](docs/hh-autopilot.md). Сверка
-с `hh-applicant-tool 1.8.26` и `hh-ai-responder 0.2.4`:
-[docs/hh-reference-parity.md](docs/hh-reference-parity.md). Полный аудит доноров
-и форков от 30 августа 2026 года:
-[docs/2026-08-30-upstream-audit.md](docs/2026-08-30-upstream-audit.md).
-Актуальная повторная проверка, исправления и ограничения живого запуска:
-[аудит от 8 сентября 2026](docs/2026-09-08-upstream-readiness-audit.md).
+| № | Что сделать | Где |
+|---|---|---|
+| 1 | Заполните имя и контакты | Настройки → Профиль |
+| 2 | Сохраните реальный опыт: должности, даты, проекты, вклад, результаты, навыки | Резюме → База опыта |
+| 3 | Выберите ИИ и нажмите «Проверить запросом» (рекомендуется Muse, см. ниже) | Настройки → AI |
+| 4 | Нажмите «Проверить без входа в HH» — диагностика без обращений к HH | Площадки и автоотклики |
+
+Та же диагностика доступна из CLI без платных вызовов:
 
 ```powershell
-python -m pip install -e ".[browser,ui]"
-python -m playwright install chromium
-work-hunter hh auth login --account default
+python -m work_hunter launch-readiness --json
+```
+
+## Вход в HH и запуск автооткликов
+
+1. Нажмите **«Войти и продолжить»** — откроется одно окно Chromium. Войдите (пароль/код/капча — руками), дождитесь самозакрытия окна. Повторный клик второе окно не открывает: увидите «Окно входа уже открыто».
+2. Проверка: `python -m work_hunter hh web status` → `"status": "ok"`, `"can_chatik": true`. Статус `hh auth status = invalid_access_token` при этом нормален — автопилот работает по web-кукам.
+3. Свяжите локальную версию резюме с ID опубликованного резюме HH (привязка выбирает резюме для откликов, текст на HH не меняет).
+4. Прогоните безопасный цикл:
+
+```powershell
 work-hunter hh autopilot validate --account default
 work-hunter hh autopilot shadow --account default
 work-hunter hh autopilot canary --account default --resume RESUME_ID --vacancy VACANCY_ID --confirm
@@ -125,23 +48,84 @@ work-hunter hh autopilot enable --account default --confirm
 work-hunter runner --plan examples/hh-autopilot-runner.json
 ```
 
-Defaults are validated and configurable: `50/day`, `10/run`, `45-120s`, `08:00-21:00 Europe/Moscow`, hourly, and up to `20 x 100` search results. Fresh installs remain disabled with no grant.
+Лимиты по умолчанию: `50 откликов/день`, `10 за запуск`, пауза `45–120 с`, окно `08:00–21:00 Europe/Moscow`. Без `enable --confirm` отправок нет, флаг `allow_broad_apply` ничего не разрешает.
 
-## Common Commands
+## Почему по умолчанию Muse Spark 1.3 Contributor
 
-Initialize local config:
+Мы прогнали Muse, GLM и DeepSeek через одинаковые 7 заданий (2 отбора, письмо, 2 ответа работодателю, шпаргалка к собесу, SQL на данных) и оставили основную модель по итогам, а не по рекламным рейтингам.
 
-```powershell
-python -m work_hunter init
+| Проверка (финал 10.09.2026, режим high/max) | Muse high | GLM 5.3 Flash max | DeepSeek V4.1 Flash high |
+|---|---|---|---|
+| Отбор: стаж 4/5 лет | consider, корректно | ошибка цитаты | consider, корректно |
+| Отбор: неизвестные dbt/English | review, корректно | review, корректно | review, корректно |
+| Письмо | факты сохранены | лишний акцент на стаже | факты сохранены, есть повторы |
+| Ответ без фактов | 3 уточнения, без выдумок | 3 уточнения | 3 уточнения |
+| Ответ по фактам | первое лицо, парсер пройден | третье лицо (править руками) | первое лицо |
+| SQL на данных | верно | верно | верно |
+| Шпаргалка | ошибка COUNT(*) после LEFT JOIN | доли без группировки | аккуратнее всех, но рамка окна неполная |
+| Цена 7 заданий | **$0.0031** | $0.0036 | $0.0252 (×8 от Muse) |
+| Медиана времени | 31 с | 12 с | 9 с |
+
+Коротко: Muse — единственная, кто корректно прошла оба отбора, сохранила факты в письме и ответила от первого лица, оставшись самой дешёвой. GLM low/high вообще не прошли отбор (0/2) и путали неизвестное с отсутствием опыта; DeepSeek в 8 раз дороже за тот же набор — он настроен только резервом на случай недоступности Muse. Слабые места Muse тоже известны: шпаргалки к собесу проверяйте руками (ошибка COUNT(*) подтверждена контрпримером на данных).
+
+Детали и методология: [первый прогон Muse](docs/2026-09-08-ai-model-reasoning-evaluation.md), [GLM/DeepSeek-перепроверка](docs/2026-09-08-glm-deepseek-recheck.md), [дешёвые модели](docs/2026-09-09-cheap-models-benchmark.md), [бюджет ×10](docs/2026-09-09-tenfold-model-budget.md), [финал Muse/GLM/V4.1](docs/2026-09-10-final-model-comparison.md).
+
+### Как это настроено
+
+```jsonc
+{
+  "model": "meta/muse-spark-1.3-contributor",
+  "reasoning": { "effort": "high" },
+  "model_fallbacks": { "meta/muse-spark-1.3-contributor": "deepseek/deepseek-v4.1-flash" },
+  "model_max_prices": { "meta/muse-spark-1.3-contributor": { "prompt": 0.1, "completion": 0.2 } }
+}
 ```
 
-Check HH auth state without printing tokens:
+Резерв срабатывает только при 404/410/503 или удалённом ID модели — ошибки ключа, баланса и 403 не переключают модель. Лимит цены ($0.10/$0.20 за млн токенов = текущий тариф Contributor) защищает от подорожавших маршрутов. Пустые поля в «Моделях по задачам» наследуют основную модель — отдельно ничего настраивать не нужно.
+
+## Что внутри (карта репозитория)
+
+| Путь | Назначение |
+|---|---|
+| `work_hunter/cli.py` | CLI: точка входа и маршрутизация команд. |
+| `work_hunter/services.py` | Фасад `WorkHunter` — через него идут почти все сценарии. |
+| `work_hunter/storage.py` | SQLite-схема и хранение. |
+| `work_hunter/sources/` | Адаптеры источников вакансий. |
+| `work_hunter/hh_transport/` | Транспорт HH: API, браузер, куки, XSRF. |
+| `work_hunter/hh_agent/` | Агент HH: политика, согласования, формы, события. |
+| `work_hunter/llm/` и `work_hunter/ai_backends.py` | Работа с ИИ: direct OpenAI-совместимый HTTP и OpenCode. |
+| `work_hunter/web/` | Локальный HTTP-сервер и статический UI. |
+| `tests/` | Pytest: исполняемый контракт поведения. |
+| `docs/` | Планы, безопасность, заметки recon, отчёты о моделях. |
+
+## Не коммитить
+
+Локальное и только локальное (уже в `.gitignore`):
+
+- `.work-hunter/` — конфиг, SQLite, состояние HH, логи, токены, куки;
+- `external/`, `.codex_compare/`, `.compare-forks/`, `.compare-hh-applicant-tool/` — доноры и исследования;
+- `.venv/`, `.pytest_cache/`, `__pycache__/`, `work_hunter.egg-info/`;
+- `.research/`, `.playwright-mcp/`, дампы HAR/сессий/кук;
+- любые `*.db`, `*.sqlite3`, `*.log`, `*.har`, `*.pem`, `*.key`, `.env*`.
+
+Проверка перед коммитом (пустой вывод — хорошо):
 
 ```powershell
+git diff --cached --name-only | rg "^(\.work-hunter/|external/|\.venv/|\.research/|\.codex_compare/|\.compare-forks/|\.compare-hh-applicant-tool/|\.playwright-mcp/|.*\.(db|sqlite|sqlite3|log|har|pem|key|p12|pfx)$)"
+git grep --cached -n -I -E "(-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[A-Za-z0-9_-]{20,}|sk-or-v1-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,})"
+```
+
+## Частые команды
+
+Проверка состояния (токены не печатаются):
+
+```powershell
+python -m work_hunter doctor --json
 python -m work_hunter hh-auth-status
+python -m work_hunter launch-readiness --json
 ```
 
-Sync, score, and list jobs:
+Сбор, оценка и список вакансий:
 
 ```powershell
 python -m work_hunter sync --source habr --limit 20
@@ -149,69 +133,58 @@ python -m work_hunter sync --source linkedin --limit 20
 python -m work_hunter sync --source indeed --limit 20
 python -m work_hunter score
 python -m work_hunter list --limit 20 --min-score 50
+```
+
+План отклика и отправка (только с `--confirm`):
+
+```powershell
 python -m work_hunter apply-plan 123
 python -m work_hunter apply 123 --letter-file .\letter.txt --confirm
 python -m work_hunter browser-login linkedin
 python -m work_hunter browser-login indeed
 ```
 
-Run the local UI:
+Локальный UI и MCP:
 
 ```powershell
 python -m work_hunter ui --host 127.0.0.1 --port 8787
-```
-
-### Local UI
-
-The Apple HIG-inspired cockpit has eight destinations:
-
-- **Today** — readiness, up to three priority actions, fresh matches, upcoming events, and pending decisions;
-- **Vacancies** — search, filters, scoring, saved items, vacancy details, letters, and one apply flow for every supported source;
-- **Applications** — pipeline, agent approvals/runs, and automation tools;
-- **Calendar** — interviews, follow-ups, reminders, and tasks;
-- **Assistant** — job-aware chat and drafting;
-- **Analytics** — funnel, score distribution, source performance, and trends;
-- **Sources** — connection health, last sync, errors, and retry;
-- **Settings** — profiles, resumes, searches, HH/AI configuration, appearance, help, and advanced API Lab tools.
-
-On a genuine first run, a three-step sheet reviews the search goal, enabled sources, and active resume. **Set up later** defers it only for the current browser tab and does not pretend setup is complete. Progress survives reloads, including the case where a resume was created but activation must be retried.
-
-Use **Settings → Help → Repeat introduction** to review setup again. **Show tips again** resets contextual coach marks. The interface adapts from a full sidebar to a compact icon sidebar and then to a mobile menu sheet.
-
-Autonomous HH applications require an active account- and policy-bound HH Autopilot grant created by explicit `enable --confirm`. The legacy `sources.hh.allow_broad_apply` flag is ignored for authorization. UI actions that create, revoke, or replace authority use a dedicated confirmation sheet and literal JSON `confirm: true`; server-side checks remain authoritative.
-
-Run the MCP server:
-
-```powershell
 python -m work_hunter mcp
-```
-
-Inspect source capabilities:
-
-```powershell
 python -m work_hunter source-capabilities
 ```
 
-## Application Execution
+### Экраны интерфейса
 
-Real job actions must be treated as sensitive.
+- **Сегодня** — готовность, до трёх приоритетных действий, свежие совпадения, события и решения;
+- **Вакансии** — поиск, фильтры, оценка, избранное, письма и единый сценарий отклика;
+- **Отклики** — воронка, согласования агента и автоматизация;
+- **Календарь** — собеседования, follow-up, напоминания, задачи;
+- **Ассистент** — чат и черновики с учётом вакансий;
+- **Аналитика** — воронка, распределение оценок, эффективность источников;
+- **Источники** — здоровье подключений, последний синк, ошибки;
+- **Настройки** — профили, резюме, поиск, HH/AI, внешний вид, помощь, API Lab.
 
-- The same plan/confirm contract is used for HH, LinkedIn, and external boards.
-- A literal confirmation sends the application; browser and session transports are first-class execution paths.
-- MCP exposes `apply_job` and can send when `confirm=true` is passed literally.
-- Never print access tokens, refresh tokens, cookies, client secrets, Telegram bot tokens, SMTP passwords, or full auth headers.
-- HH vacancy tests, supported forms, and application CAPTCHA resolve automatically when AI/browser settings are present; exhausted or unknown challenge states escalate per vacancy.
+При первом запуске — мастер из трёх шагов (цель, источники, резюме). **«Настроить позже»** откладывает только на текущую вкладку. Повтор — через **Настройки → Помощь → Пройти введение заново**.
 
-Relevant tests:
+## Отправка откликов: правила безопасности
+
+Отклики — чувствительные действия, поэтому везде один контракт «план → подтверждение»:
+
+- Отправка только по буквальному `confirm: true` (в CLI — `--confirm`). Строка `"true"` не разрешает ничего.
+- Автономные отклики HH — только при активном гранте `enable --confirm` на конкретный аккаунт и политику.
+- В UI действия с полномочиями идут через отдельный экран подтверждения; сервер перепроверяет всё сам.
+- Токены, куки, client secret, Telegram-токены и полные auth-заголовки никогда не печатаются.
+- Тесты/формы вакансий и CAPTCHA при отклике решаются автоматически при настроенном AI; непонятные случаи уходят на ручной разбор по конкретной вакансии.
+
+Проверки:
 
 ```powershell
 pytest tests/test_mcp_safety.py tests/test_hh_agent_mcp.py -q
 pytest tests/test_hh_agent_approval.py tests/test_hh_agent_research.py -q
 ```
 
-## API Recon And External Sessions
+## API Recon и внешние сессии
 
-The API recon tools are for the owner’s own accounts and sessions. They should redact secrets in reports.
+Инструменты recon — только для ваших собственных аккаунтов и сессий, секреты в отчётах затираются:
 
 ```powershell
 python -m work_hunter api-discover-url https://example.com --host example.com
@@ -220,23 +193,23 @@ python -m work_hunter api-recon-har .\session.har --host example.com
 python -m work_hunter external-adapter-plan .\session.har --source example --host example.com
 ```
 
-Raw external-session calls remain a low-level laboratory interface. Normal applications do not require `--unsafe-lab`; the confirmed `apply` flow invokes the configured adapter directly.
+Прямые вызовы `external-session call` — лабораторный интерфейс нижнего уровня. Обычным откликам `--unsafe-lab` не нужен: подтверждённый `apply` сам вызывает настроенный адаптер.
 
 ```powershell
 python -m work_hunter external-session call example POST https://example.com/api/apply --data-file .\payload.json --real --unsafe-lab
 ```
 
-Use this only when the user explicitly asks for a real personal-account lab call.
+Только по явной просьбе владельца для реального вызова из личного аккаунта.
 
-## Tests
+## Тесты
 
-Run the full suite:
+Полный прогон:
 
 ```powershell
 pytest -q
 ```
 
-Useful targeted suites:
+Точечные наборы:
 
 ```powershell
 pytest tests/test_config.py tests/test_ai_backend.py -q
@@ -245,9 +218,11 @@ pytest tests/test_hh_auth.py tests/test_hh_transport.py -q
 pytest tests/test_external_sessions.py tests/test_api_recon.py -q
 ```
 
-For behavior changes, write or update focused tests first. The project already has good coverage around secret masking, HH safety, agent storage, API lab, scheduler reports, and external session redaction.
+Правило: сначала допишите/обновите точечный тест под новое поведение. Покрыты маскирование секретов, безопасность HH, хранилище агента, API Lab, отчёты планировщика, редактура внешних сессий.
 
-## Development And Release Checks
+## Разработка и релиз
+
+Требуется Python 3.11+.
 
 ```powershell
 python -m pip install --upgrade "pip>=26.1.2"
@@ -259,32 +234,28 @@ mypy work_hunter
 python -m build
 ```
 
-The cockpit is loopback-only. Real HH mutations require a literal confirmation flag. Strings such as `"true"` do not authorize them.
+Кабина слушает только loopback. Проверка секретов и релизная сборка не читают `.work-hunter`; смоуки гоняются на изолированных корнях.
 
-Release verification does not read or copy file contents or secrets from .work-hunter; product smokes use isolated roots.
-
-## Current Agent Notes
-
-Start with these files before making large changes:
+## Доки для старта агента
 
 1. `README.md`
 2. `docs/superpowers/specs/2026-04-26-work-hunter-design.md`
 3. `docs/superpowers/plans/2026-06-09-ultimate-hh-tool-harvest-plan.md`
 4. `docs/superpowers/plans/2026-06-10-external-api-parity.md`
 5. `work_hunter/services.py`
-6. relevant tests under `tests/`
+6. нужные тесты в `tests/`
 
-Known important gaps to verify before building on top:
+Известные ограничения (проверять по тестам, а не на слово):
 
-- some MCP HH agent paths are still plan/dry-run oriented and should be checked against tests before claiming true end-to-end automation;
-- AI backend support exists for direct OpenAI-compatible HTTP and OpenCode, but provider routing needs a clearer registry before adding Codex/OpenCode subscription runtime support;
-- UI source status currently needs richer capability/status aggregation.
+- часть MCP-путей HH — plan/dry-run, сквозную автоматизацию заявлять рано;
+- backend ИИ: direct OpenAI-совместимый HTTP и OpenCode; реестр провайдеров под подписки Codex/OpenCode ещё чистить;
+- статусу источников в UI нужна более богатая агрегация.
 
-## Git Workflow
+Полный операторский гайд HH: [docs/hh-autopilot.md](docs/hh-autopilot.md). Сверка с донорами: [hh-reference-parity](docs/hh-reference-parity.md), [аудит 30.08](docs/2026-08-30-upstream-audit.md), [аудит 08.09](docs/2026-09-08-upstream-readiness-audit.md).
 
-This repository is private. Keep it that way.
+## Git: приватность прежде всего
 
-Recommended baseline flow:
+Репозиторий приватный — таким и остаётся.
 
 ```powershell
 git status --short --ignored
@@ -296,7 +267,7 @@ git commit -m "<short change summary>"
 git push
 ```
 
-Avoid `git add -A` unless you have inspected ignored and untracked paths. The local workspace contains intentionally private runtime data.
+Никакого `git add -A` без просмотра untracked: рядом лежат приватные рантайм-данные.
 
 ## License And Donor Code
 
