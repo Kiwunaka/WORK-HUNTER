@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from work_hunter.external_apply import (
     ExternalApplyDispatcher,
     ExternalApplyRequest,
     _already_applied,
     _application_scope,
     _application_success,
+    _apply_with_session,
     resolve_form_answer,
 )
 from work_hunter.models import Job
@@ -66,7 +69,7 @@ def test_resolve_form_answer_prefers_explicit_and_profile_facts(tmp_path: Path) 
         field_type="radio",
         options=["Yes", "No"],
         request=apply_request,
-    ) == "Yes"
+    ) is None  # An unscoped fuzzy answer is not authorization for a legal assertion.
     assert resolve_form_answer(
         "Email address",
         field_type="email",
@@ -81,7 +84,7 @@ def test_resolve_form_answer_prefers_explicit_and_profile_facts(tmp_path: Path) 
     ) == "Hello Acme"
 
 
-def test_resolve_form_answer_uses_ai_only_for_unknown_fact(tmp_path: Path) -> None:
+def test_resolve_form_answer_does_not_turn_ai_text_into_candidate_facts(tmp_path: Path) -> None:
     apply_request = request(
         tmp_path,
         ai_config={
@@ -105,8 +108,8 @@ def test_resolve_form_answer_uses_ai_only_for_unknown_fact(tmp_path: Path) -> No
         completion=completion,
     )
 
-    assert answer == "3"
-    assert len(calls) == 1
+    assert answer is None
+    assert calls == []
 
 
 def test_session_plan_requires_endpoint_fields(tmp_path: Path) -> None:
@@ -163,7 +166,7 @@ def test_linkedin_form_discovery_is_scoped_to_easy_apply_modal() -> None:
     page = FakePage({".jobs-easy-apply-modal"})
 
     assert _application_scope(page, "linkedin") is not page
-    assert _application_scope(page, "indeed") is page
+    assert _application_scope(page, "indeed") is None
 
 
 def test_linkedin_already_applied_and_success_markers_are_detected() -> None:
@@ -181,3 +184,48 @@ def test_linkedin_url_change_alone_is_not_submission_confirmation() -> None:
         "linkedin",
         "https://www.linkedin.com/jobs/view/123",
     ) is False
+
+
+@pytest.mark.parametrize("path", ["error", "step-2", "thanks", "login"])
+def test_external_redirect_is_not_a_receipt(path):
+    page = FakePage(set(), url=f"https://example.test/{path}")
+    assert not _application_success(page, "habr", "https://example.test/apply")
+
+
+def test_receipt_on_a_different_linkedin_vacancy_is_not_confirmation():
+    page = FakePage({"a.jobs-s-apply__application-link"}, url="https://www.linkedin.com/jobs/view/other")
+    assert not _application_success(page, "linkedin", "https://www.linkedin.com/jobs/view/123")
+
+
+@pytest.mark.parametrize("selector", ['button:has-text("Done")', 'text="Thanks for applying"'])
+def test_generic_text_is_not_a_source_receipt(selector):
+    assert not _application_success(FakePage({selector}), "linkedin", "https://example.test/apply")
+
+
+@pytest.mark.parametrize("code,payload", [
+    (200, {"success": False, "errors": ["invalid"]}),
+    (202, {"status": "processing"}),
+    (200, {"success": True}),
+    (201, {"application_id": "unverified-field"}),
+    (500, {"error": "response failed after commit"}),
+    (0, None),
+])
+def test_session_transport_is_not_a_delivery_verifier(tmp_path, monkeypatch, code, payload):
+    monkeypatch.setattr("work_hunter.external_apply.call_external_session", lambda *a, **kw: {
+        "status": "ok" if 200 <= code < 300 else "http_error",
+        "response": {"status": code, "json_preview": payload},
+    })
+    result = _apply_with_session(request(tmp_path))
+    assert result.status == "submission_unknown"
+    assert not result.applied
+    assert "reconciliation_required" in result.blockers
+
+
+def test_session_timeout_keeps_uncertainty(tmp_path, monkeypatch):
+    def timeout(*args, **kwargs):
+        raise TimeoutError("response lost after POST")
+
+    monkeypatch.setattr("work_hunter.external_apply.call_external_session", timeout)
+    result = _apply_with_session(request(tmp_path))
+    assert result.status == "submission_unknown"
+    assert not result.applied

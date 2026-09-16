@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..candidate import candidate_facts, candidate_prompt
+
 
 @dataclass
 class PersonaContext:
@@ -31,7 +33,7 @@ def persona_from_profile(profile: dict[str, Any], about: dict[str, Any] | None =
         "name": profile.get("name", ""),
         "title": profile.get("title", ""),
         "desired_roles": ", ".join(str(item) for item in profile.get("desired_roles") or []),
-        "skills": ", ".join(str(item) for item in about.get("all_skills") or profile.get("must_have_skills") or []),
+        "skills": ", ".join(str(item) for item in about.get("all_skills") or []),
         "summary": about.get("summary", ""),
     }
     for key in (
@@ -50,7 +52,8 @@ def persona_from_profile(profile: dict[str, Any], about: dict[str, Any] | None =
     ):
         if key not in facts and profile.get(key):
             facts[key] = profile.get(key)
-    body = "\n".join(str(value) for value in facts.values() if value).strip()
+    facts["candidate_facts"] = candidate_facts(profile, about)
+    body = candidate_prompt(profile, about)
     return PersonaContext(body=body, facts={key: value for key, value in facts.items() if value})
 
 

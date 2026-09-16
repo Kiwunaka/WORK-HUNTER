@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from work_hunter.cli import main as cli_main
 from work_hunter.external_sessions import (
@@ -8,9 +12,50 @@ from work_hunter.external_sessions import (
     call_external_session,
     import_external_session_from_har,
     list_external_sessions,
+    request_with_external_session,
     sessions_file,
     show_external_session,
 )
+
+
+@pytest.mark.parametrize("url", ["http://hirehi.ru/jobs", "https://hirehi.ru:8443/jobs", "https://user@hirehi.ru/jobs"])
+def test_session_rejects_scheme_port_and_userinfo_changes(tmp_path, url):
+    har_path = tmp_path / "session.har"
+    har_path.write_text(json.dumps(_har()), encoding="utf-8")
+    import_external_session_from_har(tmp_path, "hirehi", har_path, allowed_hosts={"hirehi.ru"})
+    calls = []
+    result = call_external_session(tmp_path, "hirehi", "GET", url, real=True,
+                                   requester=lambda *args, **kwargs: calls.append(args))
+    assert result["reason"] == "origin_not_in_session"
+    assert not calls
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_session_transport_never_follows_redirect_with_credentials(code):
+    seen = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            self.send_response(code if self.path == "/start" else 200)
+            if self.path == "/start":
+                self.send_header("Location", "/other")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        result = request_with_external_session("GET", f"http://127.0.0.1:{server.server_port}/start",
+            headers={"Cookie": "fixture-secret", "Authorization": "Bearer fixture-secret"}, data=None, timeout=5)
+        assert result.status == code
+        assert seen == ["/start"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def _har() -> dict:
@@ -49,7 +94,8 @@ def test_import_external_session_from_har_stores_secrets_but_returns_masked_summ
     assert summary["headers"]["hirehi.ru"]["User-Agent"] == "Browser UA"
 
     stored = json.loads(sessions_file(tmp_path).read_text(encoding="utf-8"))
-    assert stored["sessions"]["hirehi"]["headers_by_host"]["hirehi.ru"]["Cookie"] == "sessionid=very-secret-cookie"
+    assert "ciphertext" in stored
+    assert "very-secret-cookie" not in json.dumps(stored)
 
     listed = list_external_sessions(tmp_path)
     assert listed[0]["headers"]["hirehi.ru"]["X-CSRF-Token"] == "***"

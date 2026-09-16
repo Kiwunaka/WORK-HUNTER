@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   tests:
     strategy:
@@ -14,6 +17,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,16 +25,23 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade "pip>=26.1.2"
-      - run: python -m pip install "setuptools>=75,<81" "wheel>=0.44,<1"
+      - run: python -m pip install "setuptools>=83,<85" "wheel>=0.44,<1"
       - run: python -m pip install -e ".[dev,ui,release]"
       - name: Deterministic suite
-        run: python -m pytest -q -m "not live_canary" --ignore=tests/test_web_ui_browser.py
+        run: python -m pytest -q -m "not live_canary" --ignore=tests/test_web_ui_browser.py --ignore=tests/test_telegram_chat_infographic_browser.py --ignore=tests/test_external_apply_browser.py --junitxml=test-results/deterministic.xml
       - name: HH autopilot restart and concurrency contracts
         if: matrix.python-version == '3.12'
-        run: python -m pytest tests/test_hh_autopilot_e2e.py -m "restart or concurrency" -q
+        run: python -m pytest tests/test_hh_autopilot_e2e.py -m "restart or concurrency" -q --junitxml=test-results/recovery.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tests-${{ matrix.python-version }}
+          path: test-results/
+          retention-days: 7
 
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,17 +49,29 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install --upgrade "pip>=26.1.2"
-      - run: python -m pip install "setuptools>=75,<81" "wheel>=0.44,<1"
+      - run: python -m pip install "setuptools>=83,<85" "wheel>=0.44,<1"
       - run: python -m pip install -e ".[dev,release]"
-      - run: ruff check .
+      - name: Dependency diagnostics
+        run: |
+          mkdir -p test-results
+          python -VV > test-results/python.txt
+          python -m pip freeze > test-results/dependencies.txt
+      - run: ruff check . --output-format json --output-file test-results/ruff.json
       - run: mypy work_hunter
       - run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
       - run: python -m build
       - run: python -m pip check
       - run: python -m pip_audit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-diagnostics
+          path: test-results/
+          retention-days: 7
 
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,6 +82,12 @@ jobs:
       - run: python -m pip install -e ".[dev,browser,ui]"
       - run: python -m playwright install --with-deps chromium
       - name: Browser UI
-        run: python -m pytest tests/test_web_ui_browser.py -q
+        run: python -m pytest tests/test_web_ui_browser.py tests/test_telegram_chat_infographic_browser.py tests/test_external_apply_browser.py -q --junitxml=test-results/browser.xml
       - name: HH autopilot browser fixtures
-        run: python -m pytest tests/test_hh_autopilot_challenges.py -q
+        run: python -m pytest tests/test_hh_autopilot_challenges.py -q --junitxml=test-results/challenges.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-fixtures
+          path: test-results/
+          retention-days: 7

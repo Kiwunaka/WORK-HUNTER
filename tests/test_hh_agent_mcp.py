@@ -98,6 +98,9 @@ def test_mcp_productivity_tools_are_callable(monkeypatch, tmp_path):
     monkeypatch.setattr(WorkHunter, "summarize_job", lambda self, job_id: f"TLDR:{job_id}")
     monkeypatch.setattr(WorkHunter, "interview_questions", lambda self, job_id: f"Q:{job_id}")
     monkeypatch.setattr(WorkHunter, "experience_pitch", lambda self, job_id: f"STAR:{job_id}")
+    monkeypatch.setattr(
+        WorkHunter, "interview_stage_prep", lambda self, job_id, stage: f"STUDY:{job_id}:{stage}"
+    )
 
     ats = decode(
         asyncio.run(
@@ -130,6 +133,7 @@ def test_mcp_productivity_tools_are_callable(monkeypatch, tmp_path):
     assert brief["tldr"] == f"TLDR:{job_id}"
     assert brief["questions"] == f"Q:{job_id}"
     assert brief["star_pitch"] == f"STAR:{job_id}"
+    assert brief["study_guide"] == f"STUDY:{job_id}:tech"
     assert calendar["status"] == "saved"
     assert calendar["calendar"] == "local"
     saved = WorkHunter(root=tmp_path).storage.list_events()

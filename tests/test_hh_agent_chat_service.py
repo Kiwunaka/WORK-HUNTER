@@ -103,6 +103,7 @@ def test_scheduled_reply_waits_until_due_and_requires_confirm_before_send(tmp_pa
     planned = service.plan_reply(
         _negotiation(),
         persona={"facts": {"summary": "I build Python APIs."}},
+        template="I build Python APIs.",
         delay_minutes=30,
         now="2026-06-10T10:00:00",
     )

@@ -946,6 +946,13 @@ class StructuredAIRanker:
                 resume.get("education"),
                 maximum_blocks=10,
             )
+        facts = candidate.get("facts") or {}
+        if facts:
+            payload["candidate_facts"] = {
+                "summary": cls._safe_scalar(facts, ("summary",), 2_000),
+                "skills": cls._safe_list(facts, ("all_skills",), 100),
+                "experience": cls._safe_blocks(facts.get("experience"), maximum_blocks=10),
+            }
         return payload
 
     @staticmethod
@@ -1051,7 +1058,8 @@ class StructuredAIRanker:
             return []
         if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
             raise TypeError("structured AI blocks must be a sequence")
-        allowed = ("role", "position", "company", "project", "summary", "details")
+        allowed = ("role", "position", "company", "project", "summary", "details",
+                   "start", "end", "contribution", "results", "tech")
         blocks: list[dict[str, str]] = []
         if len(value) > maximum_blocks:
             value = value[:maximum_blocks]

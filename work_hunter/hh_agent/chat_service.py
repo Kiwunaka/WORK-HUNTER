@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
+from ..candidate import content_hash
+
 from .approval import ApprovalQueue, should_escalate
 
 
@@ -113,6 +115,16 @@ class HHChatAgentService:
             raise ValueError("Negotiation id is required")
         messages = self.client.list_negotiation_messages(negotiation_id)
         classification = classify_chat_messages(messages)
+        fingerprint = content_hash({"id": classification.last_message_id, "text": classification.last_message_text})
+        for existing in self.storage.list_hh_agent_outbox(channel="hh_reply"):
+            if existing.target == negotiation_id and existing.payload.get("source_message_fingerprint") == fingerprint:
+                return {"status": existing.status, "outbox_id": existing.id,
+                        "pending_message_id": existing.payload.get("pending_message_id"),
+                        "reply": existing.payload.get("reply"), "deduplicated": True}
+        if classification.action == "reply" and not template:
+            classification.confidence = 0.0
+            classification.risk_flags.append("needs_answer")
+            classification.reasons.append("no_answer_provided")
         decision_id = self.approvals.persist_ai_decision(
             action_type="reply",
             target_id=negotiation_id,
@@ -142,6 +154,7 @@ class HHChatAgentService:
             "reply": reply.to_dict(),
             "classification": classification.to_dict(),
             "ai_decision_id": decision_id,
+            "source_message_fingerprint": fingerprint,
         }
         outbox_status = "scheduled" if reply.send_after else "planned"
         pending_id: int | None = None
@@ -154,12 +167,14 @@ class HHChatAgentService:
                 "reply": reply.to_dict(),
                 "classification": classification.to_dict(),
                 "risk_flags": classification.risk_flags,
+                "question": classification.last_message_text,
+                "candidate_facts": (persona or {}).get("facts", {}),
             }
             pending_id = self.approvals.escalate_to_user(
                 action_type="reply",
                 payload=pending_payload,
                 confidence=classification.confidence,
-                reason="risky_reply",
+                reason="needs_answer" if not template else "risky_reply",
                 ai_decision_id=decision_id,
             )
             outbox_payload["pending_message_id"] = pending_id
@@ -252,13 +267,7 @@ def draft_reply(
     if template:
         message = template.format_map(_SafeDict(context)).strip()
     else:
-        employer_name = context["employer_name"] or "there"
-        summary = context["summary"]
-        message = f"Hello {employer_name}! Thank you for the message."
-        if summary:
-            message += f" {summary}"
-        if context["vacancy_name"]:
-            message += f" I am interested in {context['vacancy_name']} and can share more details."
+        message = ""
     return ReplyDraft(
         negotiation_id=context["negotiation_id"],
         chat_id=context["chat_id"],

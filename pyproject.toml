@@ -18,6 +18,9 @@ dependencies = [
   "pydantic-settings>=2.14.2,<3",
   "python-multipart>=0.0.31,<1",
   "urllib3>=2.7,<3",
+  "jsonschema>=4.23,<5",
+  "python-docx>=1.2,<2",
+  "pypdf>=6,<7",
   "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 
@@ -27,6 +30,7 @@ dev = [
   "pytest>=8,<10",
   "ruff>=0.5,<1",
   "types-requests>=2.32",
+  "types-jsonschema>=4.23,<5",
 ]
 browser = [
   "beautifulsoup4>=4.12,<5",
@@ -56,4 +60,6 @@ include = ["work_hunter*"]
 work_hunter = [
   "migrations/*.sql",
   "web/static/*",
+  "web/static/vendor/brands/*",
+  "web/static/vendor/phosphor/*",
 ]

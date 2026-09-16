@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from .ai_backends import chat_completion
+from .candidate import candidate_prompt
 from .models import Job
 
 logger = logging.getLogger(__name__)
@@ -12,18 +13,13 @@ logger = logging.getLogger(__name__)
 def draft_cover_letter(job: Job, profile: dict[str, Any]) -> str:
     """Quick template-based cover letter (no AI)."""
     name = str(profile.get("name") or "Кандидат")
-    skills = [str(skill) for skill in profile.get("must_have_skills") or []]
-    nice = [str(skill) for skill in profile.get("nice_to_have_skills") or []]
-    skills_text = ", ".join((skills + nice)[:6]) or "релевантным стеком"
     company = job.company or "вашей компании"
     title = job.title or "вакансии"
 
     return (
         f"Здравствуйте! Меня зовут {name}.\n\n"
         f"Хочу откликнуться на позицию {title} в {company}. "
-        f"По описанию вижу хороший матч с моим опытом: {skills_text}. "
-        "Мне близок формат, где нужно быстро разбираться в задачах, аккуратно "
-        "доводить решения до результата и общаться с командой без лишней воды.\n\n"
+        "Мой опыт описан в приложенном резюме.\n\n"
         "Буду рад обсудить, чем могу быть полезен, и ответить на вопросы по опыту."
     )
 
@@ -41,8 +37,7 @@ def draft_cover_letter_ai(
 
     backend = str(ai_config.get("backend") or "direct").lower()
     if backend != "opencode" and (not api_key or not base_url or not model):
-        logger.warning("AI config incomplete, falling back to template")
-        return draft_cover_letter(job, profile)
+        raise ValueError("AI config incomplete: configure the AI provider before generating a letter")
 
     name = profile.get("name", "Кандидат")
     title_role = profile.get("title", "Developer")
@@ -98,14 +93,11 @@ def draft_cover_letter_ai(
 5. Не используй слова "уважаемый", "с уважением", "позвольте представиться"
 """
 
-    try:
-        return chat_completion(
+    user_prompt += "\n\n" + candidate_prompt(profile, about)
+    return chat_completion(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             ai_config,
-        )
-    except Exception as exc:
-        logger.error("AI cover letter generation failed: %s", exc)
-        return draft_cover_letter(job, profile)
+    )

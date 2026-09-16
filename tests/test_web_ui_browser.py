@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import socket
 import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -15,6 +17,58 @@ from playwright.sync_api import expect, sync_playwright
 from work_hunter.models import CalendarEvent, Job, Resume
 from work_hunter.services import WorkHunter
 from work_hunter.web.server import make_handler
+
+
+def test_pipeline_reads_every_page_and_ignores_discovery_filters(browser_app):
+    page, base_url, app = browser_app
+    for number in range(205):
+        job_id = app.storage.upsert_job(Job(source="fixture", source_id=f"ledger-{number}",
+            url=f"https://example.test/{number}", title=f"Ledger {number}"))
+        app.storage.save_application(job_id, status="applied", transport="api")
+    page.goto(f"{base_url}/applications?tab=pipeline")
+    expect(page.locator("#pipeline-total")).to_have_text("205")
+    expect(page.locator('[data-pipeline-column="sent"] .pipeline-card')).to_have_count(205)
+    page.evaluate("document.querySelector('#min-score-filter').value = '90'")
+    page.evaluate("loadJobs()")
+    expect(page.locator("#pipeline-total")).to_have_text("205")
+    expect(page.locator('[data-pipeline-column="sent"] .pipeline-card').last).to_contain_text("Ledger 204")
+    additional = app.storage.upsert_job(Job(source="fixture", source_id="late-ledger",
+        url="https://example.test/late", title="New application"))
+    app.storage.save_application(additional, status="submission_unknown", transport="fixture")
+    page.locator("#agent-refresh-button").click()
+    expect(page.locator("#pipeline-total")).to_have_text("206")
+    expect(page.locator('[data-pipeline-column="unknown"] .pipeline-card')).to_have_count(1)
+
+
+@pytest.mark.parametrize("flow", ["detail", "letter", "note"])
+def test_late_response_for_a_does_not_replace_b(browser_app, flow):
+    page, base_url, app = browser_app
+    second = app.storage.upsert_job(Job(source="browser-fixture", source_id="second",
+        url="https://example.test/second", title="Second Job"))
+    page.goto(base_url)
+    page.locator("#jobs-body tr").filter(has_text="Second Job").click()
+    expect(page.locator("#job-detail h2")).to_have_text("Second Job")
+    pending = []
+    endpoint = "/api/jobs/1" + {"detail": "", "letter": "/letter-ai", "note": "/note"}[flow]
+    page.route(f"**{endpoint}", lambda route: pending.append(route))
+    page.locator("#jobs-body tr").filter(has_text="Browser Fixture Job").click()
+    if flow == "letter":
+        expect(page.locator("#job-detail h2")).to_have_text("Browser Fixture Job")
+        page.locator("#job-detail summary").filter(has_text="Подготовить").click()
+        page.get_by_role("button", name="AI-письмо", exact=True).click()
+    page.locator("#jobs-body tr").filter(has_text="Second Job").click()
+    expect(page.locator("#job-detail h2")).to_have_text("Second Job")
+    assert pending, "fixture must hold A until B has rendered"
+    payload = app.storage.get_job(1).to_dict() if flow == "detail" else {"body": "Late answer for A"}
+    for route in pending:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+    # A ping completes after the released route has had a chance to settle.
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    expect(page.locator("#job-detail h2")).to_have_text("Second Job")
+    assert page.evaluate("state.selectedId") == second
+    assert "Late answer for A" not in page.locator("#job-detail").inner_text()
+    assert page.locator("#job-notes-input").input_value() != "Late answer for A"
+    assert page.locator("#detail-letter-box").input_value() != "Late answer for A"
 
 
 class BrowserTestHTTPServer(ThreadingHTTPServer):
@@ -88,7 +142,7 @@ def _serve_local_stun(
 
 
 @pytest.fixture
-def browser_app(tmp_path):
+def browser_app(tmp_path, browser_artifacts):
     app = WorkHunter(tmp_path)
     app.storage.upsert_job(
         Job(
@@ -166,7 +220,8 @@ def browser_app(tmp_path):
 
                 page.on("console", capture_console_error)
                 try:
-                    yield page, base_url, app
+                    with browser_artifacts(context):
+                        yield page, base_url, app
                 finally:
                     context.close()
             finally:
@@ -994,6 +1049,67 @@ def test_selected_status_refreshes_detail_for_explicit_job_id(browser_app):
     expect(job_row.locator("td").nth(4)).to_have_text("Сохранена")
 
 
+def test_ai_task_models_save_reload_and_probe_selected_model(browser_app, monkeypatch):
+    page, base_url, _ = browser_app
+    seen = []
+    monkeypatch.setattr("work_hunter.services.chat_completion", lambda messages, config: seen.append(config) or "готово")
+    page.goto(f"{base_url}/settings?section=ai", wait_until="networkidle")
+    page.locator("#ai-key-input").fill("fixture-key")
+    page.locator("#ai-model-input").fill("openai/gpt-5.6-luna")
+    page.locator('[data-ai-purpose="ranking"]').fill("z-ai/glm-5.3-flash")
+    page.locator('[data-ai-purpose="cover_letters"]').fill("meta/muse-spark-1.3-contributor")
+    with page.expect_response(lambda response: response.url.endswith("/api/config") and response.request.method == "POST"):
+        page.locator("#save-ai-button").click()
+    page.reload(wait_until="networkidle")
+    expect(page.locator('[data-ai-purpose="ranking"]')).to_have_value("z-ai/glm-5.3-flash")
+    expect(page.locator('[data-ai-purpose="cover_letters"]')).to_have_value("meta/muse-spark-1.3-contributor")
+    expect(page.locator("[data-glm-provider]:checked")).to_have_count(4)
+    page.locator('[data-ai-probe="ranking"]').click()
+    expect(page.locator("#ai-connection-note")).to_contain_text("z-ai/glm-5.3-flash")
+    assert seen[0]["model"] == "z-ai/glm-5.3-flash"
+    assert seen[0]["model_providers"]["z-ai/glm-5.3-flash"] == ["novita", "z-ai", "streamlake", "modal"]
+
+
+def test_candidate_facts_to_downloaded_resume_and_readiness(browser_app, tmp_path):
+    from work_hunter.resume_export import extract_resume_text
+
+    page, base_url, app = browser_app
+    page.goto(f"{base_url}/settings?section=resumes", wait_until="networkidle")
+    page.locator("#candidate-summary").fill("BI-аналитик с опытом построения отчётности")
+    page.locator("#candidate-skills").fill("SQL, Power BI")
+    page.locator("#candidate-add-experience").click()
+    experience = page.locator("[data-candidate-experience]").last
+    for key, value in {"role": "Аналитик", "company": "Пример", "start": "2022-01",
+                       "end": "2025-12", "contribution": "Создала витрины данных",
+                       "results": "Сократила подготовку отчёта с 4 часов до 20 минут",
+                       "tech": "SQL, Power BI"}.items():
+        experience.locator(f'[data-fact-field="{key}"]').fill(value)
+    page.locator("#candidate-resume-role").fill("BI-аналитик")
+    page.locator("#candidate-create-resume").click()
+    expect(page.locator("#resume-body-input")).to_have_value(re.compile("20 минут"))
+    page.locator('[data-ui-action="hide-resume-form"]').click()
+    resume = app.storage.list_resumes("default")[0]
+    for format in ("docx", "pdf"):
+        with page.expect_download() as download:
+            page.locator(f'[data-export-resume="{resume.id}"][data-format="{format}"]').click()
+        exported = tmp_path / f"candidate.{format}"
+        download.value.save_as(exported)
+        text = extract_resume_text(exported)
+        assert "2022-01" in text and "20 минут" in text and "Power BI" in text
+    page.reload(wait_until="networkidle")
+    expect(page.locator("#candidate-summary")).to_have_value("BI-аналитик с опытом построения отчётности")
+    page.locator("#candidate-facts-card").scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / "candidate-desktop.png"))
+    page.set_viewport_size({"width": 680, "height": 900})
+    page.locator("#candidate-facts-card").scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / "candidate-mobile.png"))
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.goto(f"{base_url}/settings?section=platforms", wait_until="networkidle")
+    page.locator("#launch-readiness-refresh").click()
+    expect(page.locator("#launch-readiness")).to_contain_text("Вход в HH")
+    expect(page.locator("#launch-readiness")).to_contain_text("Проверьте генерацию AI")
+
+
 def test_resume_edit_populates_fields_and_preserves_active(browser_app):
     page, base_url, app = browser_app
     resume_id = app.storage.save_resume(
@@ -1269,6 +1385,56 @@ def test_live_action_descriptor_requires_operation_rows(browser_app, operation_t
     )
 
     assert result == {"valid": False, "code": "missing_required_rows"}
+
+
+@pytest.mark.parametrize("outcome", ["submission_unknown", "submitted_unconfirmed", "reconciliation_required"])
+@pytest.mark.parametrize("width", [1280, 390])
+def test_uncertain_submission_stays_visible_without_success_toast(browser_app, outcome, width):
+    page, base_url, _ = browser_app
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(base_url + "/today", wait_until="domcontentloaded")
+    assert page.url == base_url + "/today"
+    expect(page).to_have_title(re.compile("WORK HUNTER", re.IGNORECASE))
+    page.evaluate(
+        """outcome => {
+          window.liveExecuted = 0;
+          WorkHunterUI.feedback.openLiveAction({
+            operationType:'apply', title:'Отправить отклик?', consequence:'Площадка получит отклик.',
+            targetRows:[
+              {key:'vacancy', label:'Вакансия', safeValue:'Тестовая вакансия'},
+              {key:'company', label:'Компания', safeValue:'Тестовая компания'},
+              {key:'resume', label:'Резюме', safeValue:'Тестовое резюме'},
+              {key:'letter', label:'Письмо', safeValue:'Тестовое письмо'}
+            ],
+            riskFlags:[], acknowledgement:'Я проверил пакет', confirmLabel:'Отправить', fingerprint:'fixture',
+            revalidate:async () => ({
+              status:'executable', fingerprint:'fixture', auth:{status:'ready'},
+              capability:{available:true, code:'ok'}, blockers:[], riskFlags:[], canExecute:true
+            }),
+            execute:async () => { window.liveExecuted++; return {status:outcome}; }
+          });
+        }""", outcome,
+    )
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-status]")).to_contain_text("Отправка не подтверждена")
+    expect(page.locator("[data-live-confirm]")).to_be_disabled()
+    expect(page.locator("[data-live-cancel]")).to_be_visible()
+    expect(page.locator("[data-toast-key='success:live-action:apply']")).to_have_count(0)
+    assert page.evaluate("window.liveExecuted") == 1
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), page.evaluate(
+        """JSON.stringify({scrollWidth:document.documentElement.scrollWidth, innerWidth,
+        elements:Array.from(document.querySelectorAll('body *')).map(el => ({
+          name: el.tagName + '#' + el.id + '.' + String(el.className),
+          right: el.getBoundingClientRect().right,
+          width: el.getBoundingClientRect().width
+        })).filter(el => el.right > innerWidth + 1 && el.width > 0)})"""
+    )
+    screenshot_dir = os.environ.get("WORK_HUNTER_QA_SCREENSHOT_DIR")
+    if screenshot_dir and outcome == "submission_unknown":
+        directory = Path(screenshot_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(directory / f"submission-unknown-{width}.png"))
 
 
 def test_live_action_cancel_sends_neither_validation_nor_mutation(browser_app):

@@ -38,6 +38,8 @@ env/
 .superpowers/
 .worktrees/
 .research/
+outputs/audit-*/
+test-results/
 scratch.py
 
 # Donor/research repos kept out of the first product baseline

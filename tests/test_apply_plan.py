@@ -206,11 +206,13 @@ def test_apply_plan_cli_outputs_plan_for_any_source(tmp_path, capsys):
         )
     )
 
-    cli_main(["--root", str(tmp_path), "apply-plan", str(job_id), "--resume-id", "resume-1"])
+    from work_hunter.models import Resume
+    resume_id = app.storage.save_resume(Resume(name="Fixture CV", body="Fixture candidate"))
+    cli_main(["--root", str(tmp_path), "apply-plan", str(job_id), "--resume-id", str(resume_id)])
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["source"] == "habr"
-    assert payload["resume_id"] == "resume-1"
+    assert payload["resume_id"] == str(resume_id)
     assert payload["mode"] == "browser"
     assert payload["raw_result"]["next_actions"][0] == {
         "type": "open_url",

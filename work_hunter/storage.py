@@ -1247,6 +1247,45 @@ class Storage:
         self.conn.commit()
         return _required_lastrowid(cur)
 
+    def claim_external_apply(self, plan_id: int) -> dict[str, Any] | None:
+        """Commit uncertainty before dispatch; return a prior unresolved attempt.
+
+        External sources currently share one browser identity per source. Lock
+        the vacancy across resume choices; changing a CV must not bypass recovery.
+        A process crash never expires this claim into permission to send again.
+        """
+        with self._schema_transaction():
+            plan = self.conn.execute(
+                "SELECT job_id, source, status FROM apply_plans WHERE id = ?", (plan_id,),
+            ).fetchone()
+            if plan is None or plan["source"] == "hh" or plan["status"] != "ready":
+                raise ValueError("A ready external apply plan is required")
+            previous = self.conn.execute(
+                """
+                SELECT id, status FROM apply_plans
+                WHERE job_id = ? AND id != ?
+                  AND status IN ('submitting', 'submission_unknown', 'submitted_unconfirmed',
+                                 'applied', 'already_applied')
+                ORDER BY id DESC LIMIT 1
+                """, (plan["job_id"], plan_id),
+            ).fetchone()
+            if previous is not None:
+                return {"plan_id": previous["id"], "status": previous["status"]}
+            application = self.conn.execute(
+                """
+                SELECT status FROM applications WHERE job_id = ?
+                  AND status NOT IN ('blocked', 'needs_login', 'needs_answers', 'not_sent')
+                ORDER BY id DESC LIMIT 1
+                """, (plan["job_id"],),
+            ).fetchone()
+            if application is not None:
+                return {"status": application["status"]}
+            self.conn.execute(
+                "UPDATE apply_plans SET status = 'submitting', confirmed_at = ? WHERE id = ?",
+                (utc_now(), plan_id),
+            )
+        return None
+
     def get_apply_plan(self, plan_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             "SELECT * FROM apply_plans WHERE id = ?",
@@ -1332,6 +1371,43 @@ class Storage:
             account_profile_id=row["account_profile_id"],
             resume_id=row["resume_id"],
         )
+
+    def application_ledger(self, *, after: int = 0, limit: int = 200) -> dict[str, Any]:
+        """Application rows independent of discovery filters, with stable ID pagination."""
+        limit = max(1, min(limit, 200))
+        rows = self.conn.execute(
+            """
+            SELECT a.id AS application_id, a.job_id AS id, a.status, a.transport,
+                   a.account_profile_id, a.resume_id, a.updated_at,
+                   j.title, j.company, j.source, j.url
+            FROM applications a JOIN jobs j ON j.id = a.job_id
+            WHERE a.id > ? ORDER BY a.id LIMIT ?
+            """, (max(0, after), limit + 1),
+        ).fetchall()
+        items = []
+        for row in rows[:limit]:
+            item = dict(row)
+            status = item["status"]
+            if status in {"submitting", "submission_unknown", "submitted_unconfirmed", "reconciling"}:
+                stage = "unknown"
+            elif status in {"applied", "sent", "submitted"}:
+                stage = "sent" if item["transport"] else "manual"
+            elif status in {"replied", "response", "responded"}:
+                stage = "replied"
+            elif status in {"interview", "interview_scheduled"}:
+                stage = "interview"
+            elif status in {"offer", "rejected"}:
+                stage = status
+            elif status in {"draft", "prepared", "ready", "saved"}:
+                stage = "prepared"
+            elif status in {"manual", "manually_applied"}:
+                stage = "manual"
+            else:
+                stage = "attention"
+            item["stage"] = stage
+            items.append(item)
+        return {"items": items,
+                "next_cursor": items[-1]["application_id"] if len(rows) > limit else None}
 
     def list_applications(self) -> list[Application]:
         rows = self.conn.execute(
@@ -2797,7 +2873,9 @@ class Storage:
             """
             SELECT COUNT(*) AS cnt
             FROM applications a
-            WHERE a.id = (
+            WHERE a.status NOT IN ('submission_unknown', 'submitted_unconfirmed', 'submitting',
+                                   'blocked', 'needs_login', 'needs_answers', 'not_sent', 'error')
+              AND a.id = (
                 SELECT latest.id
                 FROM applications latest
                 WHERE latest.job_id = a.job_id
@@ -2888,8 +2966,9 @@ class Storage:
         if resume.id == 0:
             cur = self.conn.execute(
                 """
-                INSERT INTO resumes (name, body, profile_id, is_active, ats_score, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO resumes (name, body, profile_id, is_active, ats_score, created_at, updated_at, file_path,
+                                     target_role, hh_resume_id, hh_account_profile_id, facts_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     resume.name,
@@ -2899,6 +2978,8 @@ class Storage:
                     resume.ats_score,
                     now,
                     now,
+                    resume.file_path,
+                    resume.target_role, resume.hh_resume_id, resume.hh_account_profile_id, resume.facts_hash,
                 ),
             )
             self.conn.commit()
@@ -2912,7 +2993,8 @@ class Storage:
                     profile_id = ?,
                     is_active = ?,
                     ats_score = ?,
-                    updated_at = ?
+                    updated_at = ?, file_path = ?, target_role = ?, hh_resume_id = ?,
+                    hh_account_profile_id = ?, facts_hash = ?
                 WHERE id = ?
                 """,
                 (
@@ -2922,11 +3004,48 @@ class Storage:
                     int(resume.is_active),
                     resume.ats_score,
                     now,
+                    resume.file_path,
+                    resume.target_role, resume.hh_resume_id, resume.hh_account_profile_id, resume.facts_hash,
                     resume.id,
                 ),
             )
             self.conn.commit()
             return resume.id
+
+    def record_ai_request(self, profile_id: str, data: dict[str, Any]) -> None:
+        self.conn.execute(
+            """INSERT INTO ai_requests
+               (profile_id, backend, model, status, error_code, prompt_tokens,
+                completion_tokens, cost_usd, duration_ms, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (profile_id, data["backend"], data["model"], data["status"], data["error_code"],
+             data.get("prompt_tokens"), data.get("completion_tokens"), data.get("cost_usd"),
+             data["duration_ms"], utc_now()),
+        )
+        self.conn.commit()
+
+    def ai_usage_report(self, profile_id: str) -> dict[str, Any]:
+        totals = self.conn.execute(
+            """SELECT COUNT(*) AS requests, SUM(status = 'error') AS errors,
+               SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens,
+               SUM(cost_usd) AS reported_cost_usd, COUNT(cost_usd) AS requests_with_cost
+               FROM ai_requests WHERE profile_id = ?""", (profile_id,),
+        ).fetchone()
+        recent = self.conn.execute(
+            "SELECT * FROM ai_requests WHERE profile_id = ? ORDER BY id DESC LIMIT 20", (profile_id,),
+        ).fetchall()
+        return {**dict(totals), "recent": [dict(row) for row in recent]}
+
+    def get_candidate_fit(self, cache_key: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT result_json FROM candidate_fit_cache WHERE cache_key = ?", (cache_key,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_candidate_fit(self, cache_key: str, result: dict[str, Any]) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO candidate_fit_cache VALUES (?, ?, ?)",
+            (cache_key, json.dumps(result, ensure_ascii=False), utc_now()),
+        )
+        self.conn.commit()
 
     def get_resume(self, resume_id: int) -> Resume | None:
         row = self.conn.execute(
@@ -2940,6 +3059,9 @@ class Storage:
             name=row["name"],
             body=row["body"],
             profile_id=row["profile_id"],
+            file_path=row["file_path"],
+            target_role=row["target_role"], hh_resume_id=row["hh_resume_id"],
+            hh_account_profile_id=row["hh_account_profile_id"], facts_hash=row["facts_hash"],
             is_active=bool(row["is_active"]),
             ats_score=row["ats_score"],
             created_at=row["created_at"],
@@ -2961,6 +3083,9 @@ class Storage:
                 name=row["name"],
                 body=row["body"],
                 profile_id=row["profile_id"],
+                file_path=row["file_path"],
+                target_role=row["target_role"], hh_resume_id=row["hh_resume_id"],
+                hh_account_profile_id=row["hh_account_profile_id"], facts_hash=row["facts_hash"],
                 is_active=bool(row["is_active"]),
                 ats_score=row["ats_score"],
                 created_at=row["created_at"],

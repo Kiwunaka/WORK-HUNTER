@@ -79,6 +79,8 @@ def main(argv: list[str] | None = None) -> None:
 
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
+    readiness = sub.add_parser("launch-readiness")
+    readiness.add_argument("--json", action="store_true")
 
     sync = sub.add_parser("sync")
     sync.add_argument("--source", action="append", choices=SYNC_SOURCE_CHOICES)
@@ -657,6 +659,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "doctor":
         payload = app.doctor()
         print_json(payload) if args.json else print(_format_doctor(payload))
+    elif args.command == "launch-readiness":
+        print_json(app.launch_readiness())
         return
     if args.command == "init":
         path = app.init()

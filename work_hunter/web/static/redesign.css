@@ -558,6 +558,13 @@ label { color: #5f655c; font-weight: 620; }
   background: #efede6;
 }
 
+.application-pipeline .pipeline-list {
+  max-height: 480px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+
 .application-pipeline > section h3 {
   margin: 0 2px 12px;
   padding-bottom: 10px;
@@ -723,6 +730,7 @@ label { color: #5f655c; font-weight: 620; }
 
 /* Sources */
 .source-kpis { gap: 10px; }
+.source-kpis article > div { min-width: 0; overflow-wrap: anywhere; }
 .source-kpis article { border-color: var(--line); border-radius: 13px; background: rgba(255, 253, 248, .75); box-shadow: none; }
 .source-account-card { overflow: hidden; padding: 22px; border-radius: 15px; }
 .account-connection-row { min-height: 72px; border-color: var(--line); }
@@ -966,7 +974,7 @@ label { color: #5f655c; font-weight: 620; }
   .settings-card-grid,
   .settings-fields-grid { grid-template-columns: 1fr; }
   .settings-status-card { align-items: flex-start; flex-wrap: wrap; }
-  .settings-status-card dl { width: 100%; margin-left: 57px; }
+  .settings-status-card dl { width: calc(100% - 57px); margin-left: 57px; }
   .source-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-connection-row { align-items: flex-start; grid-template-columns: 1fr; }
   .account-connection-row .actions { width: 100%; }

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .ai_backends import chat_completion
 from .external_sessions import call_external_session
@@ -40,6 +43,7 @@ class ExternalApplyRequest:
     source_config: dict[str, Any]
     global_config: dict[str, Any]
     resume_id: str | None = None
+    bundle: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,6 +58,7 @@ class ExternalApplyResult:
     steps: list[str] = field(default_factory=list)
     screenshot: str = ""
     raw_result: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -185,7 +190,7 @@ class BrowserApplyAdapter:
                         )
                     steps.append("login_completed")
 
-                if _already_applied(page, request.job.source):
+                if str(page.url) == request.job.url and _already_applied(page, request.job.source):
                     return ExternalApplyResult(
                         status="already_applied",
                         mode="browser",
@@ -227,11 +232,12 @@ class BrowserApplyAdapter:
                     if page is not None
                     else ""
                 )
+                possibly_sent = "final_submit_started" in steps
                 return ExternalApplyResult(
-                    status="error",
+                    status="submission_unknown" if possibly_sent else "error",
                     mode="browser",
                     message=str(exc),
-                    blockers=["browser_apply_error"],
+                    blockers=["reconciliation_required" if possibly_sent else "browser_apply_error"],
                     steps=steps,
                     screenshot=screenshot,
                 )
@@ -337,6 +343,18 @@ def browser_profile_dir(request: ExternalApplyRequest) -> Path:
     return request.root / ".work-hunter" / "browser" / request.job.source
 
 
+@dataclass(frozen=True)
+class FormAnswer:
+    field_id: str
+    category: str
+    value: str | None
+    provenance: str
+
+    @property
+    def status(self) -> str:
+        return "answered" if self.value is not None else "needs_answer"
+
+
 def resolve_form_answer(
     label: str,
     *,
@@ -344,66 +362,87 @@ def resolve_form_answer(
     options: list[str] | None,
     request: ExternalApplyRequest,
     completion: Callable[[list[dict[str, Any]], dict[str, Any]], str] = chat_completion,
+    field_id: str = "",
 ) -> str | None:
-    """Resolve a form field from explicit answers, profile facts, or AI."""
+    """Compatibility wrapper: generated text is never evidence of a candidate fact."""
+    del completion
+    return resolve_typed_answer(label, field_type=field_type, options=options,
+                                request=request, field_id=field_id).value
+
+
+def resolve_typed_answer(
+    label: str, *, field_type: str, options: list[str] | None,
+    request: ExternalApplyRequest, field_id: str = "",
+) -> FormAnswer:
+    normalized = _normalize_label(label)
+    identity = _normalize_label(field_id)
+    category = "unknown"
+    aliases = {
+        "employer_name": {"company name", "employer name", "company", "название компании", "работодатель"},
+        "first_name": {"first name", "firstname", "given name", "имя"},
+        "last_name": {"last name", "lastname", "surname", "family name", "фамилия"},
+        "name": {"full name", "fullname", "name", "фио", "полное имя", "имя и фамилия"},
+        "email": {"email", "email address", "e mail", "e mail address", "электронная почта", "почта"},
+        "phone": {"phone", "phone number", "mobile", "mobile number", "телефон", "номер телефона"},
+        "city": {"city", "location", "город", "местоположение"},
+        "linkedin_url": {"linkedin", "linkedin url"},
+        "portfolio_url": {"portfolio", "github", "website", "сайт", "портфолио"},
+        "cover_letter": {"cover letter", "сопроводительное письмо", "message", "сообщение"},
+    }
+    for key, names in aliases.items():
+        if identity == _normalize_label(key) or identity in names:
+            category = key
+            break
+    if category == "unknown":
+        for key, names in aliases.items():
+            if normalized in names:
+                category = key
+                break
+    if field_type == "checkbox":
+        category = "consent_or_attestation"
+    elif field_type == "file":
+        category = "resume_file"
+
+    def answer(value: Any, provenance: str) -> FormAnswer:
+        text = str(value) if value is not None and value != "" else None
+        return FormAnswer(field_id or label, category,
+                          _match_option(text, options) if text is not None else None, provenance)
 
     settings = adapter_settings(request)
-    normalized = _normalize_label(label)
-    explicit = _explicit_answer(normalized, settings.get("answers"))
-    if explicit is not None:
-        return _match_option(explicit, options)
+    decisions = settings.get("answers") or {}
+    if isinstance(decisions, dict):
+        decision = decisions.get(field_id) if field_id else None
+        if decision is None:
+            decision = decisions.get(normalized)
+        if isinstance(decision, dict):
+            try:
+                expiry = datetime.fromisoformat(str(decision.get("expires_at") or ""))
+                current = expiry.tzinfo is not None and expiry > datetime.now(timezone.utc)
+            except ValueError:
+                current = False
+            if (current and decision.get("source") == "user"
+                    and decision.get("origin") == _origin(request.job.url)
+                    and str(decision.get("job_id")) == request.job.source_id
+                    and decision.get("label") == normalized):
+                value = decision.get("value")
+                if field_type == "checkbox":
+                    value = "true" if value is True else "false" if value is False else None
+                return answer(value, "user_decision")
+        # Legacy exact answers remain usable for ordinary contact fields only.
+        elif category in aliases and category != "cover_letter" and decision is not None:
+            return answer(decision, "user_contact_answer")
+    if category == "resume_file":
+        return answer(request.profile.get("resume_path"), "selected_resume_artifact")
+    if category == "cover_letter":
+        return answer(request.letter, "approved_letter")
+    if category in aliases:
+        return answer(request.profile.get(category), f"profile.{category}")
+    return answer(None, "unknown")
 
-    profile = request.profile
-    facts: tuple[tuple[tuple[str, ...], Any], ...] = (
-        (("full name", "name", "имя", "фио"), profile.get("name")),
-        (("first name", "имя"), profile.get("first_name") or profile.get("name")),
-        (("last name", "фамили"), profile.get("last_name")),
-        (("email", "e-mail", "почт"), profile.get("email")),
-        (("phone", "mobile", "телефон"), profile.get("phone")),
-        (("city", "location", "город", "локац"), profile.get("city")),
-        (("linkedin",), profile.get("linkedin_url")),
-        (("portfolio", "github", "website", "сайт"), profile.get("portfolio_url")),
-        (("salary", "compensation", "зарплат"), profile.get("salary_min")),
-        (("cover letter", "сопровод", "message", "сообщение"), request.letter),
-    )
-    for needles, value in facts:
-        if value not in (None, "") and any(needle in normalized for needle in needles):
-            return _match_option(str(value), options)
 
-    if field_type == "file":
-        resume_path = str(profile.get("resume_path") or "").strip()
-        return resume_path or None
-    if not bool(settings.get("answer_with_ai", True)):
-        return None
-    ai_config = _forms_ai_config(request.ai_config)
-    if not _ai_configured(ai_config):
-        return None
-    option_text = "\n".join(f"- {item}" for item in (options or []))
-    prompt = (
-        f"Поле анкеты: {label}\n"
-        f"Тип: {field_type}\n"
-        f"Варианты:\n{option_text or '- нет'}\n"
-        f"Профиль: {json.dumps(profile, ensure_ascii=False)}\n"
-        f"Факты: {json.dumps(request.about, ensure_ascii=False)}\n"
-        "Верни только значение поля. Не выдумывай отсутствующие факты; "
-        "если ответа нет, верни __UNKNOWN__."
-    )
-    answer = completion(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Ты заполняешь анкету соискателя правдиво по переданным фактам. "
-                    "Верни только значение."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        ai_config,
-    ).strip()
-    if not answer or answer == "__UNKNOWN__":
-        return None
-    return _match_option(answer, options)
+def _origin(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
 
 
 def _apply_with_session(request: ExternalApplyRequest) -> ExternalApplyResult:
@@ -422,26 +461,32 @@ def _apply_with_session(request: ExternalApplyRequest) -> ExternalApplyResult:
         body = None
     else:
         body = _format_value(str(raw_body), context)
-    response = call_external_session(
-        request.root,
-        str(settings.get("session_name") or request.job.source),
-        method,
-        url,
-        data=body,
-        real=True,
-        unsafe_lab=True,
-        timeout=max(1, int(settings.get("timeout_seconds", 30) or 30)),
-    )
-    status = "applied" if response.get("status") == "ok" else "error"
+    try:
+        response = call_external_session(
+            request.root,
+            str(settings.get("session_name") or request.job.source),
+            method,
+            url,
+            data=body,
+            real=True,
+            unsafe_lab=True,
+            timeout=max(1, int(settings.get("timeout_seconds", 30) or 30)),
+        )
+    except Exception:  # noqa: BLE001 - any transport failure after dispatch leaves delivery unknown
+        # Once dispatch starts, even a timeout may follow a committed remote POST.
+        response = {"status": "transport_unknown"}
+    # This transport has no verified source-specific receipt contract yet.
+    # Neither a 2xx nor an arbitrary JSON field proves delivery (or non-delivery).
+    blocked = response.get("status") == "blocked"
     return ExternalApplyResult(
-        status=status,
+        status="blocked" if blocked else "submission_unknown",
         mode="session",
         message=(
-            "Application sent through the authenticated session."
-            if status == "applied"
-            else str(response.get("reason") or response.get("status") or "Session apply failed.")
+            str(response.get("reason") or "Session dispatch was blocked.")
+            if blocked
+            else "Delivery is unconfirmed. Check the application on the site before any retry."
         ),
-        applied=status == "applied",
+        blockers=[] if blocked else ["reconciliation_required", "source_verifier_missing"],
         raw_result=response,
     )
 
@@ -455,6 +500,12 @@ def _complete_browser_form(
     max_steps = max(1, int(settings.get("max_steps", 12) or 12))
     for step in range(max_steps):
         scope = _application_scope(page, request.job.source)
+        if scope is None:
+            return ExternalApplyResult(
+                status="blocked", mode="browser",
+                message="A single application form or dialog could not be identified.",
+                blockers=["application_scope_unknown"], steps=steps,
+            )
         blockers = _fill_visible_fields(scope, request)
         if blockers:
             screenshot = _capture_apply_screenshot(
@@ -470,11 +521,26 @@ def _complete_browser_form(
                 steps=steps,
                 screenshot=screenshot,
             )
+        next_action = _find_next_action(scope, request.job.source, settings)
+        if next_action is not None:
+            next_action.click()
+            page.wait_for_timeout(500)
+            steps.append(f"form_step_{step + 1}")
+            continue
         submit = _find_submit_action(scope, request.job.source, settings)
         if submit is not None:
             previous_url = str(page.url or "")
-            submit.click()
-            page.wait_for_timeout(1_250)
+            # Record before click: click itself can time out after remote acceptance.
+            steps.append("final_submit_started")
+            try:
+                submit.click()
+                page.wait_for_timeout(1_250)
+            except Exception:  # noqa: BLE001 - browser libraries may fail after a committed click
+                return ExternalApplyResult(
+                    status="submission_unknown", mode="browser",
+                    message="The final submit may have reached the site. Verification is required.",
+                    blockers=["reconciliation_required"], steps=steps,
+                )
             steps.append("submitted")
             if not _application_success(page, request.job.source, previous_url):
                 screenshot = _capture_apply_screenshot(
@@ -483,13 +549,13 @@ def _complete_browser_form(
                     "submit-unconfirmed",
                 )
                 return ExternalApplyResult(
-                    status="submitted_unconfirmed",
+                    status="submission_unknown",
                     mode="browser",
                     message=(
                         "The submit control was clicked, but the site did not expose "
                         "a success marker. Check the browser screenshot before retrying."
                     ),
-                    blockers=["submission_confirmation_missing"],
+                    blockers=["submission_confirmation_missing", "reconciliation_required"],
                     steps=steps,
                     screenshot=screenshot,
                     raw_result={"final_url": page.url},
@@ -501,25 +567,14 @@ def _complete_browser_form(
                 applied=True,
                 steps=steps,
                 raw_result={"final_url": page.url},
+                evidence={"kind": "source_receipt", "source": request.job.source, "url": page.url},
             )
-        next_action = _find_next_action(scope, request.job.source, settings)
-        if next_action is None:
-            screenshot = _capture_apply_screenshot(
-                page,
-                request,
-                f"stalled-{step + 1}",
-            )
-            return ExternalApplyResult(
-                status="blocked",
-                mode="browser",
-                message="Application form stalled before a submit/review action.",
-                blockers=["form_navigation_missing"],
-                steps=steps,
-                screenshot=screenshot,
-            )
-        next_action.click()
-        page.wait_for_timeout(500)
-        steps.append(f"form_step_{step + 1}")
+        screenshot = _capture_apply_screenshot(page, request, f"stalled-{step + 1}")
+        return ExternalApplyResult(
+            status="blocked", mode="browser",
+            message="Application form stalled before a submit/review action.",
+            blockers=["form_navigation_missing"], steps=steps, screenshot=screenshot,
+        )
     screenshot = _capture_apply_screenshot(page, request, "step-limit")
     return ExternalApplyResult(
         status="blocked",
@@ -548,6 +603,7 @@ def _fill_visible_fields(page: Any, request: ExternalApplyRequest) -> list[str]:
               tag: el.tagName.toLowerCase(),
               type: (el.type || el.tagName).toLowerCase(),
               name: el.name || '',
+              id: el.id || el.name || '',
               label: (el.labels && el.labels[0] && el.labels[0].innerText) ||
                      el.getAttribute('aria-label') || el.placeholder || el.name || el.id || '',
               required: !!el.required || el.getAttribute('aria-required') === 'true',
@@ -561,6 +617,7 @@ def _fill_visible_fields(page: Any, request: ExternalApplyRequest) -> list[str]:
         )
         field_type = str(meta.get("type") or "text")
         label = str(meta.get("label") or meta.get("name") or f"field-{index}")
+        field_id = str(meta.get("id") or meta.get("name") or "")
         required = bool(meta.get("required"))
         if field_type in {"submit", "button", "image", "reset"}:
             continue
@@ -572,13 +629,34 @@ def _fill_visible_fields(page: Any, request: ExternalApplyRequest) -> list[str]:
                 request=request,
             )
             if answer and Path(answer).expanduser().is_file():
-                field.set_input_files(str(Path(answer).expanduser()))
+                path = Path(answer).expanduser()
+                data = path.read_bytes()
+                expected = request.profile.get("resume_sha256")
+                if expected and hashlib.sha256(data).hexdigest() != expected:
+                    blockers.append("resume_artifact_changed")
+                    continue
+                accepted = str(field.get_attribute("accept") or "").lower()
+                if accepted and path.suffix.lower() not in accepted and "*" not in accepted:
+                    mime = {".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".txt": "text/plain", ".md": "text/markdown"}.get(path.suffix.lower(), "")
+                    if not mime or mime not in accepted:
+                        blockers.append(f"resume_format_not_accepted:{accepted}")
+                        continue
+                field.set_input_files({"name": path.name, "mimeType": "application/octet-stream", "buffer": data})
             elif required:
                 blockers.append(f"resume_file:{label}")
             continue
         if field_type == "checkbox":
-            if required and not bool(meta.get("checked")):
+            decision = resolve_typed_answer(label, field_type=field_type, options=None,
+                                            request=request, field_id=field_id)
+            if decision.value == "true":
                 field.check()
+            elif decision.value == "false":
+                field.uncheck()
+                if required:
+                    blockers.append(f"consent_declined:{label}")
+            elif required:
+                # A prechecked control is not evidence of the user's decision.
+                blockers.append(f"needs_consent:{label}")
             continue
         if field_type == "radio":
             name = str(meta.get("name") or label)
@@ -598,6 +676,7 @@ def _fill_visible_fields(page: Any, request: ExternalApplyRequest) -> list[str]:
                 field_type="radio",
                 options=options,
                 request=request,
+                field_id=field_id,
             )
             if answer is not None:
                 for radio_index, option in enumerate(options):
@@ -621,9 +700,8 @@ def _fill_visible_fields(page: Any, request: ExternalApplyRequest) -> list[str]:
             field_type=field_type,
             options=options or None,
             request=request,
+            field_id=field_id,
         )
-        if answer is None and field_type == "select-one" and len(options) == 1:
-            answer = options[0]
         if answer is not None:
             if field_type == "select-one":
                 selected = False
@@ -692,8 +770,6 @@ def _find_submit_action(page: Any, source: str, settings: dict[str, Any]) -> Any
             'button:has-text("Submit application")',
             'button:has-text("Отправить отклик")',
             'button:has-text("Отправить заявку")',
-            'form button[type="submit"]',
-            'form input[type="submit"]',
         ]
     )
     return _first_visible(page, selectors)
@@ -723,7 +799,14 @@ def _application_scope(page: Any, source: str) -> Any:
                 candidate = locator.nth(index)
                 if candidate.is_visible():
                     return candidate
-    return page
+    for selector in ('[role="dialog"]', "form"):
+        locator = page.locator(selector)
+        visible = [locator.nth(index) for index in range(locator.count()) if locator.nth(index).is_visible()]
+        if len(visible) == 1:
+            return visible[0]
+        if len(visible) > 1:
+            return None
+    return None
 
 
 def _already_applied(page: Any, source: str) -> bool:
@@ -733,40 +816,19 @@ def _already_applied(page: Any, source: str) -> bool:
         page,
         [
             "a.jobs-s-apply__application-link",
-            '[aria-label*="Applied"]',
-            'span:has-text("Applied")',
         ],
     ) is not None
 
 
 def _application_success(page: Any, source: str, previous_url: str) -> bool:
-    selectors = [
-        '[role="alert"]:has-text("Application submitted")',
-        'text="Application submitted"',
-        'text="Application sent"',
-        'text="Your application was sent"',
-        'text="Your application has been submitted"',
-        'text="Thanks for applying"',
-        'text="Отклик отправлен"',
-        'text="Заявка отправлена"',
-    ]
-    if source == "linkedin":
-        selectors = [
-            'button:has-text("Done")',
-            '[data-test-modal-id="easy-apply-done"]',
-            "a.jobs-s-apply__application-link",
-            *selectors,
-        ]
-    if _first_visible(page, selectors) is not None:
-        return True
-    current_url = str(page.url or "")
-    return bool(
-        source != "linkedin"
-        and previous_url
-        and current_url
-        and current_url != previous_url
-        and not _login_required(page)
-    )
+    # Only source-specific receipt UI is evidence. A generic Done button, page
+    # text, redirect or a wizard's next step cannot confirm an application.
+    if source != "linkedin" or str(page.url or "") != previous_url:
+        return False
+    return _first_visible(page, [
+        '[data-test-modal-id="easy-apply-done"]',
+        "a.jobs-s-apply__application-link",
+    ]) is not None
 
 
 def _login_required(page: Any) -> bool:

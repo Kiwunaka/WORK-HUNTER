@@ -532,7 +532,7 @@
 
       const eyebrow = document.createElement("div");
       eyebrow.className = "live-action-eyebrow";
-      eyebrow.textContent = "Реальное действие HH";
+      eyebrow.textContent = "Реальное действие";
       const title = document.createElement("h2");
       title.textContent = descriptor.title;
       const consequence = document.createElement("p");
@@ -626,7 +626,15 @@
           }
           confirm.textContent = descriptor.confirmLabel ? `${descriptor.confirmLabel}…` : "Выполняю…";
           const result = await descriptor.execute(true);
-          if (result?.status === "blocked" || result?.status === "error") {
+          if (["submission_unknown", "submitted_unconfirmed", "reconciliation_required"].includes(result?.status)) {
+            submitting = false;
+            blocked = true;
+            checkbox.checked = false;
+            confirm.textContent = idleLabel;
+            status.textContent = "Отправка не подтверждена. Проверьте отклик на сайте площадки. Повторная отправка заблокирована.";
+            return;
+          }
+          if (["blocked", "error", "needs_login", "needs_answers"].includes(result?.status)) {
             submitting = false;
             blocked = true;
             checkbox.checked = false;

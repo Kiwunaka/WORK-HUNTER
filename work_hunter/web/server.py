@@ -67,11 +67,89 @@ SOURCE_BROWSER_LOGIN_IDS = frozenset(
 )
 
 
+_HH_LOGIN_PROCESSES: dict[tuple[str, str], int] = {}
+_HH_LOGIN_LAST_START: dict[tuple[str, str], float] = {}
+_HH_LOGIN_DEBOUNCE_SECONDS = 20.0
+
+
+def _hh_login_marker_path(root: Path, account_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", account_id.strip() or "default")
+    return Path(root) / ".work-hunter" / "private" / "hh-login" / f"{safe}.pid"
+
+
+def _hh_login_guard(root: Path, account_id: str) -> dict[str, Any] | None:
+    """Return an already-running payload when a login is in flight."""
+    key = (str(root), account_id)
+    candidates: list[int] = []
+    known = _HH_LOGIN_PROCESSES.get(key)
+    if known:
+        candidates.append(known)
+    try:
+        marker = _hh_login_marker_path(root, account_id)
+        raw = marker.read_text(encoding="utf-8").strip()
+        if raw.isdigit():
+            candidates.append(int(raw))
+    except OSError:
+        pass
+    for pid in candidates:
+        if _is_running_pid(pid):
+            _HH_LOGIN_PROCESSES[key] = pid
+            return {"status": "already_running", "account": account_id, "pid": pid}
+    _HH_LOGIN_PROCESSES.pop(key, None)
+    try:
+        _hh_login_marker_path(root, account_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+    started_at = _HH_LOGIN_LAST_START.get(key, 0.0)
+    if time.monotonic() - started_at < _HH_LOGIN_DEBOUNCE_SECONDS:
+        return {
+            "status": "already_running",
+            "account": account_id,
+            "pid": None,
+            "note": "login started recently; check the opened browser window",
+        }
+    return None
+
+
+def _is_running_pid(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            process = kernel32.OpenProcess(0x1000, False, pid)
+            if not process:
+                return False
+            try:
+                exit_code = ctypes.c_ulong(0)
+                if not kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code)):
+                    return False
+                return exit_code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(process)
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 def _launch_hh_auth_login(root: Path, account: str) -> dict[str, Any]:
     """Start the interactive HH login without blocking the local UI server."""
     account_id = account.strip() or "default"
     if not HH_ACCOUNT_ID_PATTERN.fullmatch(account_id):
         raise ValueError("Invalid HH account id")
+    already = _hh_login_guard(Path(root), account_id)
+    if already is not None:
+        return already
     command = [
         sys.executable,
         "-m",
@@ -94,6 +172,14 @@ def _launch_hh_auth_login(root: Path, account: str) -> dict[str, Any]:
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     process = subprocess.Popen(command, **popen_kwargs)
+    _HH_LOGIN_PROCESSES[(str(root), account_id)] = process.pid
+    _HH_LOGIN_LAST_START[(str(root), account_id)] = time.monotonic()
+    try:
+        marker = _hh_login_marker_path(Path(root), account_id)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(process.pid), encoding="utf-8")
+    except OSError:
+        pass
     return {"status": "started", "account": account_id, "pid": process.pid}
 
 
@@ -397,7 +483,7 @@ def make_handler(root: Path):
             if path == "/api/resumes":
                 app = WorkHunter(root)
                 query = parse_qs(parsed.query)
-                profile_id = _str_arg(query, "profile_id") or "default"
+                profile_id = _str_arg(query, "profile_id") or app.active_profile_id()
                 profiles = app.config.get("profiles") or {}
                 if profile_id not in profiles:
                     self._send_json(
@@ -585,6 +671,13 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 self._send_json(app.strategy_report(_str_arg(query, "name") or "active-profile"))
                 return
+            if path == "/api/applications":
+                query = parse_qs(parsed.query)
+                app = WorkHunter(root)
+                self._send_json(app.storage.application_ledger(
+                    after=_int_arg(query, "after", 0), limit=_int_arg(query, "limit", 200),
+                ))
+                return
             if path == "/api/applications/export":
                 query = parse_qs(parsed.query)
                 app = WorkHunter(root)
@@ -621,6 +714,13 @@ def make_handler(root: Path):
             if path == "/api/about":
                 app = WorkHunter(root)
                 self._send_json(app.config.get("about", {}))
+                return
+            if path in {"/api/launch-readiness", "/api/ai/usage", "/api/resumes/outcomes"}:
+                app = WorkHunter(root)
+                result = (app.launch_readiness() if path == "/api/launch-readiness" else
+                          app.storage.ai_usage_report(app.active_profile_id()) if path == "/api/ai/usage" else
+                          app.resume_outcomes())
+                self._send_json(result)
                 return
             if path == "/api/stats":
                 app = WorkHunter(root)
@@ -988,6 +1088,36 @@ def make_handler(root: Path):
                 if path == "/api/config":
                     self._send_json(app.update_config_from_client(body))
                     return
+                if path == "/api/about":
+                    self._send_json(app.update_candidate_facts(body))
+                    return
+                if path == "/api/ai/probe":
+                    self._send_json(app.probe_ai(str(body.get("purpose") or "")))
+                    return
+                if path == "/api/resumes/from-facts":
+                    self._send_json(app.create_resume_version(str(body.get("role") or "")))
+                    return
+                if path.startswith("/api/resumes/") and path.endswith("/use-for-hh"):
+                    resume_id = _path_int(path.removesuffix("/use-for-hh"), "/api/resumes/")
+                    self._send_json(app.use_resume_for_hh(resume_id, str(body.get("account") or "default")))
+                    return
+                if path.startswith("/api/resumes/") and path.endswith("/export"):
+                    resume_id = _path_int(path.removesuffix("/export"), "/api/resumes/")
+                    result = app.export_resume(resume_id, str(body.get("format") or "pdf"))
+                    if result["validation"]["status"] != "ok":
+                        self._send_json(result, HTTPStatus.UNPROCESSABLE_ENTITY)
+                        return
+                    if body.get("download") is True:
+                        export_bytes = Path(result["path"]).read_bytes()
+                        self.send_response(HTTPStatus.OK)
+                        self.send_header("Content-Type", "application/pdf" if result["format"] == "pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        self.send_header("Content-Disposition", f'attachment; filename="resume-{resume_id}.{result["format"]}"')
+                        self.send_header("Content-Length", str(len(export_bytes)))
+                        self.end_headers()
+                        self.wfile.write(export_bytes)
+                    else:
+                        self._send_json(result)
+                    return
                 if path.startswith("/api/jobs/") and path.endswith("/status"):
                     job_id = _path_int(path.removesuffix("/status"), "/api/jobs/")
                     app.mark_job(job_id, str(body.get("status") or "saved"), str(body.get("note") or ""))
@@ -1038,6 +1168,7 @@ def make_handler(root: Path):
                             resume_id=body.get("resume_id"),
                             letter=body.get("letter"),
                             confirm=is_literal_confirmation(body.get("confirm")),
+                            expected_bundle_hash=body.get("bundle_hash"),
                         )
                     )
                     return
@@ -1110,6 +1241,11 @@ def make_handler(root: Path):
                         profile_id=body.get("profile_id", "default"),
                         is_active=body.get("is_active", False),
                         ats_score=ats_score,
+                        file_path=str(body.get("file_path") or ""),
+                        target_role=str(body.get("target_role") or ""),
+                        hh_resume_id=str(body.get("hh_resume_id") or ""),
+                        hh_account_profile_id=str(body.get("hh_account_profile_id") or ""),
+                        facts_hash=str(body.get("facts_hash") or ""),
                     )
                     if body.get("id"):
                         resume.id = int(body["id"])

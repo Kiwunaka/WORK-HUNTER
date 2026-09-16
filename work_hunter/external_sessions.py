@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from .api_recon import _trim_json, redact_sensitive_value
+from .api_recon import _sanitize_url, _trim_json, redact_sensitive_value
 from .config import data_dir
-
+from .secret_store import seal, unseal
 
 SESSION_FILENAME = "external_sessions.json"
 SESSION_HEADER_NAMES = {
@@ -51,6 +54,7 @@ def import_external_session_from_har(
     with Path(har_path).open("r", encoding="utf-8-sig") as fh:
         har = json.load(fh)
     headers_by_host: dict[str, dict[str, str]] = {}
+    origins: set[str] = set()
     for entry in ((har.get("log") or {}).get("entries") or []):
         request = entry.get("request") or {}
         url = str(request.get("url") or "")
@@ -60,11 +64,15 @@ def import_external_session_from_har(
         captured = _capture_headers(request.get("headers") or [])
         if captured:
             headers_by_host.setdefault(host, {}).update(captured)
+            origin = _origin(url)
+            if origin:
+                origins.add(origin)
     sessions = _load_sessions(root)
     sessions.setdefault("sessions", {})[name] = {
         "name": name,
         "hosts": sorted(headers_by_host),
         "headers_by_host": headers_by_host,
+        "origins": sorted(origins),
     }
     _save_sessions(root, sessions)
     return _session_summary(sessions["sessions"][name])
@@ -107,9 +115,13 @@ def call_external_session(
             "host": host,
             "allowed_hosts": session.get("hosts") or [],
         }
+    # Legacy imports were intended for HTTPS on the default port only.
+    allowed_origins = session.get("origins") or [f"https://{item}" for item in session.get("hosts", [])]
+    if not _origin(url) or _origin(url) not in allowed_origins:
+        return {"status": "blocked", "reason": "origin_not_in_session", "name": name}
     request_view = {
         "method": method.upper(),
-        "url": url,
+        "url": _sanitize_url(url),
         "headers": _mask_headers(headers),
         "data": _mask_data(data),
     }
@@ -143,7 +155,10 @@ def request_with_external_session(
     body = data.encode("utf-8") if data is not None else None
     req = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        # A redirect is a result to inspect, never permission to forward credentials
+        # or replay a mutating request (including on the same host).
+        opener = urllib.request.build_opener(_NoSessionRedirect())
+        with opener.open(req, timeout=timeout) as response:
             text = response.read(4096).decode(response.headers.get_content_charset() or "utf-8", errors="replace")
             return ExternalHTTPResponse(
                 status=int(response.status),
@@ -161,20 +176,49 @@ def request_with_external_session(
         return ExternalHTTPResponse(status=0, headers={}, body="", error=str(exc.reason))
 
 
+class _NoSessionRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _origin(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            return ""
+        port = parsed.port
+        return f"https://{parsed.hostname.lower()}" + (f":{port}" if port not in {None, 443} else "")
+    except ValueError:
+        return ""
+
+
 def _load_sessions(root: str | Path) -> dict[str, Any]:
     path = sessions_file(root)
     if not path.exists():
         return {"sessions": {}}
     with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        stored = json.load(fh)
+    if "protection" in stored:
+        return unseal(stored)
+    # Legacy data is readable, then atomically upgraded before being used.
+    _save_sessions(root, stored)
+    return stored
 
 
 def _save_sessions(root: str | Path, sessions: dict[str, Any]) -> None:
     path = sessions_file(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(sessions, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    encrypted = seal(sessions)
+    descriptor, filename = tempfile.mkstemp(dir=path.parent)
+    temporary = Path(filename)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
+            json.dump(encrypted, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _capture_headers(headers: list[dict[str, Any]]) -> dict[str, str]:
@@ -239,7 +283,7 @@ def _response_view(response: ExternalHTTPResponse) -> dict[str, Any]:
         "content_type": content_type,
         "json_preview": _json_preview(safe_body, content_type),
         "body_preview": safe_body[:500],
-        "error": response.error,
+        "error": redact_sensitive_value(response.error),
     }
 
 

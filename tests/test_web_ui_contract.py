@@ -142,6 +142,7 @@ def test_hh_auth_login_route_starts_interactive_login_without_blocking(tmp_path,
         return {"status": "started", "account": account, "pid": 1234}
 
     monkeypatch.setattr(web_server, "_launch_hh_auth_login", fake_launch)
+    monkeypatch.setattr(web_server, "_hh_login_guard", lambda root, account: None)
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -151,6 +152,25 @@ def test_hh_auth_login_route_starts_interactive_login_without_blocking(tmp_path,
         assert status == 202
         assert body == {"status": "started", "account": "default", "pid": 1234}
         assert calls == [(tmp_path, "default")]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_hh_auth_login_route_reports_already_running(tmp_path, monkeypatch):
+    def fake_guard(root, account):
+        return {"status": "already_running", "account": account, "pid": 777}
+
+    monkeypatch.setattr(web_server, "_hh_login_guard", fake_guard)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        status, body = _post_json(base, "/api/hh/auth/login", {"account": "default"})
+        assert status == 202
+        assert body == {"status": "already_running", "account": "default", "pid": 777}
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -279,7 +299,7 @@ def test_resume_api_rejects_invalid_ats_score(tmp_path):
         server.server_close()
 
 
-def test_resume_api_filters_by_valid_profile_and_preserves_default_route(tmp_path):
+def test_resume_api_uses_active_profile_and_allows_explicit_profile(tmp_path):
     app = WorkHunter(tmp_path)
     app.config["profiles"]["backend"] = {
         **app.config["profiles"]["default"],
@@ -297,6 +317,10 @@ def test_resume_api_filters_by_valid_profile_and_preserves_default_route(tmp_pat
         backend_status, backend_payload = _get_json(
             base, "/api/resumes?profile_id=backend"
         )
+        app.config["profile"] = "backend"
+        app.save_config(app.config)
+        active_status, active_payload = _get_json(base, "/api/resumes")
+        explicit_status, explicit_payload = _get_json(base, "/api/resumes?profile_id=default")
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -306,6 +330,10 @@ def test_resume_api_filters_by_valid_profile_and_preserves_default_route(tmp_pat
     assert [item["name"] for item in default_payload] == ["Default CV"]
     assert backend_status == 200
     assert [item["name"] for item in backend_payload] == ["Backend CV"]
+    assert active_status == 200
+    assert [item["name"] for item in active_payload] == ["Backend CV"]
+    assert explicit_status == 200
+    assert [item["name"] for item in explicit_payload] == ["Default CV"]
 
 
 def test_resume_api_rejects_unknown_profile(tmp_path):

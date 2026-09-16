@@ -36,6 +36,7 @@ def test_configured_cover_letters_render_template_ai_and_cache(monkeypatch, tmp_
         }
     )
     app.config["about"]["summary"] = "Разрабатываю backend-сервисы."
+    app.config["about"]["all_skills"] = ["Python", "PostgreSQL"]
     application = app.config["sources"]["hh"]["autopilot"]["application"]
     application.update(
         {

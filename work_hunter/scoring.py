@@ -54,7 +54,10 @@ def _contains(text: str, needle: str) -> bool:
     needle = _normalize(needle)
     if not needle:
         return False
-    return needle in text
+    aliases = {"go": ("go", "golang"), "js": ("js", "javascript"),
+               "javascript": ("javascript", "js"), "postgres": ("postgres", "postgresql")}
+    return any(re.search(r"(?<!\w)" + re.escape(value) + r"(?!\w)", text)
+               for value in aliases.get(needle, (needle,)))
 
 
 def _title_score(title: str, profile: dict[str, Any], reasons: list[str]) -> int:
@@ -96,10 +99,27 @@ def _salary_score(job: Job, profile: dict[str, Any], reasons: list[str]) -> int:
     best = job.salary_to or job.salary_from
     if best is None:
         reasons.append("Salary is not specified")
-        return 3
+        return 0
+    salary_text = job.salary_text.casefold()
+    period = next((unit for unit, pattern in (
+        ("month", r"(?:/month|per month|в месяц|/мес)"),
+        ("year", r"(?:/year|per year|annual|в год|/год)"),
+        ("hour", r"(?:/hour|per hour|в час|/час)"),
+    ) if re.search(pattern, salary_text)), "")
+    gross = True if re.search(r"\bgross\b|до вычета налог", salary_text) else (
+        False if re.search(r"\bnet\b|на руки|после вычета налог", salary_text) else None)
+    comparable = (
+        bool(job.currency) and job.currency.upper() == str(profile.get("salary_currency") or "").upper()
+        and bool(period) and period == profile.get("salary_period")
+        and gross is not None and type(profile.get("salary_gross")) is bool
+        and gross == profile["salary_gross"]
+    )
+    if not comparable:
+        reasons.append("Salary fit unknown: currency, period or gross/net are missing or incomparable")
+        return 0
     if best >= salary_min:
         reasons.append(f"Salary reaches configured floor: {job.salary_text}")
-        return 10
+        return 20
     reasons.append(f"Salary appears below configured floor: {job.salary_text}")
     return -5
 
@@ -114,6 +134,9 @@ def _remote_score(
     if job.remote is True:
         reasons.append("Remote-compatible vacancy")
         return 10
+    if job.remote is None:
+        reasons.append("Remote eligibility unknown: vacancy does not specify the work arrangement")
+        return 0
     if remote_only:
         red_flags.append("Remote-only profile, but vacancy is not marked remote")
         return -10

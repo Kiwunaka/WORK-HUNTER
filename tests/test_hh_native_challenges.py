@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import requests
 
 from work_hunter.hh_autopilot.browser import (
@@ -53,7 +54,8 @@ def test_challenge_ai_uses_supplied_ids_and_vision_image() -> None:
     assert calls[1][1]["model"] == "vision-model"
 
 
-def test_native_vacancy_test_builds_hh_task_payload(tmp_path) -> None:
+@pytest.mark.parametrize("quote", ['"', "&#34;", "&quot;"])
+def test_native_vacancy_test_builds_hh_task_payload(tmp_path, quote) -> None:
     browser_session = HHBrowserSession(cookie_path=tmp_path / "hh.json")
     browser_session.update_from_playwright_context(
         [
@@ -69,7 +71,7 @@ def test_native_vacancy_test_builds_hh_task_payload(tmp_path) -> None:
         '{"id":2,"description":"Почему вы?","candidateSolutions":[]}'
         "]}}}</script>"
     )
-    http = _FakeHTTP(html)
+    http = _FakeHTTP(html.replace('"', quote))
 
     def completion(messages, _config):
         prompt = str(messages[-1]["content"])

@@ -134,7 +134,7 @@ def test_reply_hh_employers_ai_paginates_and_deduplicates_source_message(
 
     def fake_completion(messages, config):
         prompts.append(messages)
-        return "Да, расскажу подробнее о Python backend."
+        return '{"answer":"Да, расскажу подробнее о Python backend.","missing_facts":[],"evidence":[]}'
 
     monkeypatch.setattr("work_hunter.services.HHApplyClient", PaginatedReplyClient)
     monkeypatch.setattr("work_hunter.services.chat_completion", fake_completion)

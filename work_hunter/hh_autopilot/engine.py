@@ -728,6 +728,11 @@ class HHAutopilot:
                 if self._stop_requested(run, authorization):
                     return "interrupted"
             try:
+                mapping = next(value for value in context.mappings if value.resume_id.strip().casefold() == item.resume_id)
+                self.repository.save_dispatch_resume_snapshot(
+                    item.id, resume={**mapping.resume, "id": mapping.resume_id}, candidate=context.candidate_profile,
+                    expected_version=item.version, fencing_token=lease.fencing_token,
+                )
                 result = self.executor.execute(
                     item.id,
                     authorization,

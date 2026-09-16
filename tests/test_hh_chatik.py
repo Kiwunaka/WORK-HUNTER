@@ -383,7 +383,7 @@ def test_service_ai_button_must_return_exact_option(monkeypatch: pytest.MonkeyPa
     fake = FakeChatikClient(_chatik_page())
     app = WorkHunter(root=tmp_path)
     monkeypatch.setattr(app, "_hh_chatik_client", lambda **kwargs: fake)
-    monkeypatch.setattr("work_hunter.services.chat_completion", lambda messages, config: "Наверное, да")
+    monkeypatch.setattr("work_hunter.services.chat_completion", lambda messages, config: '{"answer":"Наверное, да","missing_facts":[],"evidence":[]}')
 
     result = app.reply_hh_chatik(use_ai=True, dry_run=True)
 

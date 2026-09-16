@@ -27,6 +27,21 @@ _root: Path = Path.cwd()
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
+        Tool(name="launch_readiness", description="Check local candidate, CV, AI and quota readiness without contacting HH.",
+             inputSchema={"type": "object", "properties": {}}),
+        Tool(name="candidate_facts", description="Read the candidate fact base, or update explicitly supplied facts locally.",
+             inputSchema={"type": "object", "properties": {"update": {"type": "object"}}}),
+        Tool(name="create_resume_version", description="Create an editable local CV for a role using only saved facts.",
+             inputSchema={"type": "object", "properties": {"role": {"type": "string"}}, "required": ["role"]}),
+        Tool(name="export_resume", description="Export a local CV to PDF/DOCX and verify extracted text order.",
+             inputSchema={"type": "object", "properties": {"resume_id": {"type": "integer", "minimum": 1},
+                           "format": {"enum": ["pdf", "docx"]}}, "required": ["resume_id", "format"]}),
+        Tool(name="candidate_fit", description="Compare a saved vacancy with candidate facts and return requirement evidence.",
+             inputSchema={"type": "object", "properties": {"job_id": {"type": "integer", "minimum": 1}}, "required": ["job_id"]}),
+        Tool(name="ai_usage", description="Read recorded AI requests, provider costs and errors.",
+             inputSchema={"type": "object", "properties": {}}),
+        Tool(name="resume_outcomes", description="Compare recorded HH delivery and observed states by CV version and search.",
+             inputSchema={"type": "object", "properties": {}}),
         Tool(
             name="doctor",
             description="Report local installation, auth, source, UI, and MCP readiness.",
@@ -139,6 +154,7 @@ async def list_tools() -> list[Tool]:
             name="prepare_interview_brief",
             description=(
                 "Prepare a Russian interview brief for a stored job: TL;DR, "
+                "technical study guide with short answers and practice tasks, "
                 "questions for the employer, and a candidate STAR pitch."
             ),
             inputSchema={
@@ -301,6 +317,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return _json(hh_handlers.handle(name, args))
         if name == "doctor":
             return _json(service.doctor())
+        if name == "launch_readiness":
+            return _json(service.launch_readiness())
+        if name == "candidate_facts":
+            return _json(service.update_candidate_facts(args["update"]) if "update" in args else service.config.get("about", {}))
+        if name == "create_resume_version":
+            return _json(service.create_resume_version(str(args["role"])))
+        if name == "export_resume":
+            return _json(service.export_resume(int(args["resume_id"]), str(args["format"])))
+        if name == "candidate_fit":
+            return _json(service.ai_fit(int(args["job_id"])))
+        if name == "ai_usage":
+            return _json(service.storage.ai_usage_report(service.active_profile_id()))
+        if name == "resume_outcomes":
+            return _json(service.resume_outcomes())
         if name == "source_capabilities":
             return _json(service.source_capabilities())
         if name == "hh_auth_status":
@@ -370,6 +400,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                         "url": job.url,
                     },
                     "tldr": service.summarize_job(job_id),
+                    "study_guide": service.interview_stage_prep(job_id, "tech"),
                     "questions": service.interview_questions(job_id),
                     "star_pitch": service.experience_pitch(job_id),
                 }

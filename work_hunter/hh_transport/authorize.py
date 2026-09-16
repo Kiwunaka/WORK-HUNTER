@@ -63,6 +63,10 @@ class HHBrowserAuthorizer:
         page.wait_for_function(
             """() => !location.pathname.includes('/account/login') &&
                (!!document.querySelector('[data-qa="mainmenu_applicantProfile"]') ||
+                !!document.querySelector('[data-qa="mainmenu_applicantProfileDesktopDrop"]') ||
+                !!document.querySelector('[data-qa="mainmenu_applicantProfileMobileDrop"]') ||
+                !!document.querySelector('[data-qa="mainmenu_applicantProfilePage"]') ||
+                !!document.querySelector('[data-qa="mainmenu_profileAndResumes"]') ||
                 !!document.querySelector('[data-qa="mainmenu_logout"]'))""",
             timeout=self.authentication_timeout_ms,
         )

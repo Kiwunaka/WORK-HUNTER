@@ -8,10 +8,11 @@ from threading import Barrier
 import pytest
 
 from tests.fakes.hh_autopilot_server import FakeHHServer
-from tests.test_hh_autopilot_executor import _make_case
+from tests.test_hh_autopilot_executor import _make_case, _ready_item, _settings
 from work_hunter.hh_autopilot.reconcile import HHApplicationReconciler
-from work_hunter.hh_autopilot.repository import AutopilotRepository
+from work_hunter.hh_autopilot.repository import AutopilotRepository, QuotaExceeded
 from work_hunter.hh_autopilot.types import AutopilotState
+from work_hunter.models import Job
 from work_hunter.sources.hh import HHApplyClient
 from work_hunter.storage import Storage
 
@@ -71,6 +72,46 @@ def test_real_hh_client_creates_application_and_journals_only_safe_fields(
     assert "private-access-token" not in repr(journal)
     assert "private cover letter" not in repr(journal)
     assert not hasattr(journal, "append")
+
+
+def test_daily_200_dispatches_are_recorded_and_201st_never_reaches_http(fake_hh, tmp_path):
+    case = _make_case(tmp_path, settings=_settings(daily_limit=200, run_limit=200))
+    case.executor.transport = _client(fake_hh)
+    try:
+        for number in range(200):
+            vacancy_id = f"bulk-{number}"
+            case.storage.upsert_job(Job(
+                source="hh", source_id=vacancy_id,
+                url=f"https://hh.ru/vacancy/{vacancy_id}", title="Python developer",
+            ))
+            fake_hh.scenario(vacancy_id, "created")
+            item = _ready_item(case.repo, case.run, case.lease, vacancy_id=vacancy_id)
+            case.repo.save_dispatch_resume_snapshot(
+                item.id, resume={"id": "r-1", "title": "Python developer"},
+                candidate={"facts": {"all_skills": ["Python"]}},
+                expected_version=item.version, fencing_token=case.lease.fencing_token,
+            )
+            result = case.executor.execute(
+                item.id, case.authorization, case.lease, now=case.now,
+            )
+            assert result.state is AutopilotState.APPLIED
+            assert case.repo.count_applications("default", vacancy_id, "r-1") == 1
+
+        assert fake_hh.application_post_count == 200
+        extra = _ready_item(case.repo, case.run, case.lease, vacancy_id="bulk-201")
+        with pytest.raises(QuotaExceeded):
+            case.executor.execute(extra.id, case.authorization, case.lease, now=case.now)
+        assert fake_hh.application_post_count == 200
+        assert case.repo.count_application_attempts() == 200
+        snapshots = case.storage.conn.execute(
+            "SELECT resume_hash, resume_json, candidate_json FROM hh_application_resume_snapshots"
+        ).fetchall()
+        assert len(snapshots) == 200
+        assert len({row["resume_hash"] for row in snapshots}) == 1
+        assert '"Python"' in snapshots[0]["candidate_json"]
+        assert '"r-1"' in snapshots[0]["resume_json"]
+    finally:
+        case.storage.close()
 
 
 @pytest.mark.restart

@@ -1,5 +1,6 @@
 const state = {
   jobs: [],
+  applications: [],
   resumes: [],
   selectedId: null,
   config: null,
@@ -163,7 +164,7 @@ async function loadJobs() {
     if (status) params.set("status", status);
     state.jobs = await api(`/api/jobs?${params.toString()}`);
     renderJobs();
-    renderApplicationPipeline();
+    await loadApplicationLedger();
     updateSummary();
     await applyJobRouteSelection();
     if (state.route?.destination === "vacancies" && !state.selectedId && state.jobs.length) {
@@ -240,22 +241,29 @@ function renderJobs() {
   syncBulkCheckboxes();
 }
 
-function pipelineStage(job) {
-  const status = String(job.status || "new").toLowerCase();
-  if (status.includes("interview")) return "interview";
-  if (["replied", "response", "responded", "offer", "rejected"].some((value) => status.includes(value))) return "replied";
-  if (["applied", "sent", "submitted"].some((value) => status.includes(value))) return "sent";
-  if (["saved", "draft", "prepared", "ready"].some((value) => status.includes(value))) return "prepared";
-  return null;
+let ledgerSequence = 0;
+async function loadApplicationLedger() {
+  const sequence = ++ledgerSequence;
+  const items = [];
+  let after = 0;
+  do {
+    const page = await api(`/api/applications?after=${after}&limit=200`);
+    if (sequence !== ledgerSequence) return;
+    items.push(...page.items);
+    after = page.next_cursor;
+  } while (after !== null);
+  state.applications = items;
+  renderApplicationPipeline();
 }
 
 function renderApplicationPipeline() {
   const root = $("#application-pipeline");
   if (!root) return;
-  const grouped = { prepared: [], sent: [], replied: [], interview: [] };
-  for (const job of state.jobs) {
-    const stage = pipelineStage(job);
-    if (stage) grouped[stage].push(job);
+  const grouped = { prepared: [], sent: [], replied: [], interview: [], offer: [], rejected: [], unknown: [], manual: [], attention: [] };
+  const stageLabels = { prepared: "Подготовлен", sent: "Подтверждён", replied: "Ответ получен", interview: "Собеседование", offer: "Оффер", rejected: "Отказ", unknown: "Не подтверждён", manual: "Отмечен вручную", attention: "Требует внимания" };
+  for (const job of state.applications) {
+    const stage = job.stage;
+    (grouped[stage] || grouped.attention).push(job);
   }
   for (const [stage, jobs] of Object.entries(grouped)) {
     const column = root.querySelector(`[data-pipeline-column="${stage}"]`);
@@ -263,13 +271,16 @@ function renderApplicationPipeline() {
     const count = column.querySelector("h3 span");
     const list = column.querySelector(".pipeline-list");
     count.textContent = String(jobs.length);
+    list.tabIndex = 0;
+    list.setAttribute("role", "region");
+    list.setAttribute("aria-label", column.querySelector("h3").textContent);
     list.replaceChildren();
-    for (const job of jobs.slice(0, 8)) {
+    for (const job of jobs) {
       const card = document.createElement("article");
       card.className = "pipeline-card";
       card.innerHTML = `
         <div class="pipeline-card-head"><span class="metric-icon blue"><i class="ph ph-briefcase" aria-hidden="true"></i></span><span><strong>${escapeHtml(job.title || "Вакансия")}</strong><small>${escapeHtml(job.company || "Компания не указана")}</small></span></div>
-        <div class="meta"><span class="job-source">${sourceLogoMarkup(job.source, "compact")}${escapeHtml(SOURCE_META[String(job.source || "").toLowerCase()]?.label || job.source || "источник")}</span><span>${escapeHtml(job.status || "")}</span></div>
+        <div class="meta"><span class="job-source">${sourceLogoMarkup(job.source, "compact")}${escapeHtml(SOURCE_META[String(job.source || "").toLowerCase()]?.label || job.source || "источник")}</span><span>${escapeHtml(stageLabels[stage] || stageLabels.attention)}</span></div>
         <button type="button"><i class="ph ph-arrow-right" aria-hidden="true"></i>Открыть вакансию</button>`;
       card.querySelector("button").addEventListener("click", () => {
         window.WorkHunterUI.route.activate(
@@ -282,7 +293,7 @@ function renderApplicationPipeline() {
     if (!jobs.length) {
       const empty = document.createElement("div");
       empty.className = "pipeline-empty";
-      empty.textContent = stage === "prepared" ? "Сохраните подходящую вакансию" : "Пока пусто";
+      empty.textContent = "Пока пусто";
       list.append(empty);
     }
   }
@@ -292,10 +303,15 @@ function renderApplicationPipeline() {
   $("#pipeline-interviews").textContent = String(grouped.interview.length);
 }
 
+let selectionSequence = 0;
 async function selectJob(id) {
+  const sequence = ++selectionSequence;
   state.selectedId = id;
+  $("#job-detail").replaceChildren();
+  $("#ai-panels").style.display = "none";
   renderJobs();
   const job = await api(`/api/jobs/${id}`);
+  if (sequence !== selectionSequence || state.selectedId !== id) return;
   renderDetail(job);
   updateChatContext();
   loadJobNote();
@@ -410,18 +426,22 @@ async function markSelected(status) {
 
 async function prepareLetter() {
   if (!state.selectedId) return;
-  const draft = await api(`/api/jobs/${state.selectedId}/letter`, { method: "POST", body: "{}" });
+  const id = state.selectedId, sequence = selectionSequence;
+  const draft = await api(`/api/jobs/${id}/letter`, { method: "POST", body: "{}" });
+  if (sequence !== selectionSequence || id !== state.selectedId) return;
   setLetterValue(draft.body);
 }
 
 async function prepareLetterAi() {
   if (!state.selectedId) return;
+  const id = state.selectedId, sequence = selectionSequence;
   setBusy('[data-ui-action="prepare-letter-ai"]', true);
   try {
-    const draft = await api(`/api/jobs/${state.selectedId}/letter-ai`, { method: "POST", body: "{}" });
+    const draft = await api(`/api/jobs/${id}/letter-ai`, { method: "POST", body: "{}" });
+    if (sequence !== selectionSequence || id !== state.selectedId) return;
     setLetterValue(draft.body);
   } catch (err) {
-    $("#action-output").textContent = `Ошибка AI: ${err.message}. Проверь API-ключ в настройках.`;
+    if (sequence === selectionSequence) $("#action-output").textContent = `Ошибка AI: ${err.message}`;
   } finally {
     setBusy('[data-ui-action="prepare-letter-ai"]', false);
   }
@@ -436,6 +456,7 @@ function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
     letter,
     vacancy: job.title || `#${jobId}`,
     company: job.company || "Не указана",
+    bundleHash: plan.bundle?.hash || null,
   };
   const fingerprint = stableActionFingerprint(review);
   let descriptor;
@@ -446,7 +467,9 @@ function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
     targetRows: [
       { key: "vacancy", label: "Вакансия", safeValue: review.vacancy },
       { key: "company", label: "Компания", safeValue: review.company },
-      { key: "resume", label: "Резюме", safeValue: `#${plan.resume_id}` },
+      { key: "resume", label: "Резюме", safeValue: plan.bundle?.resume?.name ? `${plan.bundle.resume.name} · ${plan.bundle.resume.sha256.slice(0, 12)}` : (plan.resume_id ? `#${plan.resume_id}` : "Файл не выбран") },
+      { key: "candidate", label: "Профиль", safeValue: plan.bundle?.candidate_profile || "HH" },
+      { key: "destination", label: "Куда", safeValue: plan.bundle?.destination || plan.external_url || "HH" },
       { key: "letter", label: "Письмо", safeValue: letter ? `${letter.length} символов` : "Без письма" },
     ],
     preview: letter || null,
@@ -477,7 +500,7 @@ function buildApplyMutationDescriptor({ jobId, letter, plan, trigger }) {
     execute: async (confirm) => {
       const result = await api(`/api/jobs/${jobId}/confirm-apply`, {
         method: "POST",
-        body: JSON.stringify({ confirm: confirm === true, resume_id: plan.resume_id, letter }),
+        body: JSON.stringify({ confirm: confirm === true, resume_id: plan.resume_id, letter, bundle_hash: plan.bundle?.hash }),
       });
       $("#action-output").textContent = JSON.stringify(result, null, 2);
       if (result?.status === "applied") {
@@ -538,6 +561,8 @@ function renderProfileForm() {
   $("#profile-must-skills").value = (d.must_have_skills || []).join(", ");
   $("#profile-nice-skills").value = (d.nice_to_have_skills || []).join(", ");
   $("#profile-contact-name").value = d.name || "";
+  $("#profile-first-name").value = d.first_name || "";
+  $("#profile-last-name").value = d.last_name || "";
   $("#profile-email").value = d.email || "";
   $("#profile-phone").value = d.phone || "";
   $("#profile-city").value = d.city || "";
@@ -570,6 +595,8 @@ async function saveProfile() {
     must_have_skills: splitList($("#profile-must-skills").value),
     nice_to_have_skills: splitList($("#profile-nice-skills").value),
     name: $("#profile-contact-name").value.trim(),
+    first_name: $("#profile-first-name").value.trim(),
+    last_name: $("#profile-last-name").value.trim(),
     email: $("#profile-email").value.trim(),
     phone: $("#profile-phone").value.trim(),
     city: $("#profile-city").value.trim(),
@@ -609,6 +636,13 @@ async function loadConfig() {
     }
     $("#ai-model-input").value = state.config.ai.model || "google/gemini-2.5-flash";
     $("#ai-backend-select").value = state.config.ai.backend || "direct";
+    document.querySelectorAll("[data-ai-purpose]").forEach((input) => {
+      input.value = state.config.ai[input.dataset.aiPurpose]?.model || "";
+    });
+    const glmProviders = state.config.ai.model_providers?.["z-ai/glm-5.3-flash"];
+    if (glmProviders) document.querySelectorAll("[data-glm-provider]").forEach((input) => {
+      input.checked = glmProviders.includes(input.dataset.glmProvider);
+    });
     $("#opencode-transport-select").value = state.config.ai.opencode_transport || "cli";
     $("#opencode-command-input").value = state.config.ai.opencode_command || "opencode";
     $("#opencode-model-input").value = state.config.ai.opencode_model || "";
@@ -1121,6 +1155,13 @@ async function saveAiSettings() {
   if (!state.config) return;
 
   if (!state.config.ai) state.config.ai = {};
+  const glmProviders = [...document.querySelectorAll("[data-glm-provider]:checked")].map((input) => input.dataset.glmProvider);
+  if (!glmProviders.length) throw new Error("Выберите хотя бы одного провайдера GLM");
+  state.config.ai.model_providers = { ...state.config.ai.model_providers, "z-ai/glm-5.3-flash": glmProviders };
+  document.querySelectorAll("[data-ai-purpose]").forEach((input) => {
+    const purpose = input.dataset.aiPurpose;
+    state.config.ai[purpose] = { ...state.config.ai[purpose], model: input.value.trim() };
+  });
   if (key) state.config.ai.api_key = key;
   state.config.ai.model = model;
   state.config.ai.backend = $("#ai-backend-select").value;
@@ -1192,7 +1233,7 @@ function setWorkMode(mode) {
   }
 }
 
-function confirmHumanAutopilotStart(trigger) {
+function confirmHumanAutopilotStart(trigger, reauthorize = false) {
   const account = $("#hh-human-account")?.value || "default";
   selectHumanAccount(account);
   const status = selectedHumanAutopilotStatus();
@@ -1214,7 +1255,7 @@ function confirmHumanAutopilotStart(trigger) {
     trigger,
     revalidate: async () => ({ status: "executable", fingerprint, canExecute: true }),
     execute: async () => {
-      if (!status.controls?.enabled) await runHhAutopilotMutation("enable", {}, trigger, true);
+      if (!status.controls?.enabled || reauthorize) await runHhAutopilotMutation("enable", {}, trigger, true);
       return runHhAutopilotMutation("run-now", {}, trigger);
     },
   });
@@ -1226,6 +1267,24 @@ async function handleHumanAutopilotStart(eventOrTrigger) {
   selectHumanAccount(account);
   if (!hhIsConnected()) {
     await startHhLogin({ account, trigger });
+    return;
+  }
+  const readiness = await loadLaunchReadiness();
+  if (readiness.status !== "local_ready") {
+    notify("warning", "hh-autopilot", "not-ready", "Завершите подготовку", "Проверьте список перед запуском ниже.");
+    return;
+  }
+  const selectedResume = $("#hh-human-resume")?.value;
+  if (!selectedResume) {
+    notify("warning", "hh-autopilot", "resume-required", "Выберите версию резюме с привязкой к HH");
+    return;
+  }
+  const selected = await api(`/api/resumes/${requirePositiveInteger(selectedResume)}/use-for-hh`, {
+    method: "POST", body: JSON.stringify({ account }),
+  });
+  await loadHhAutopilot();
+  if (selected.reauthorization_required) {
+    confirmHumanAutopilotStart(trigger, true);
     return;
   }
   const status = selectedHumanAutopilotStatus();
@@ -1332,14 +1391,14 @@ function renderSourceCapabilities(sources, capabilities) {
     const requiresAuth = Boolean(capability.requires_auth);
     const badges = [
       searchAvailable ? '<span class="capability-badge">Поиск</span>' : "",
-      canApply ? `<span class="capability-badge apply">${applyKind === "external_contact" ? "Связаться" : "Автоотклик"}</span>` : "",
+      canApply ? `<span class="capability-badge apply">${applyKind === "external_contact" ? "Связаться" : (capability.auto_apply_verified === true ? "Автоотклик проверен" : "С участием пользователя")}</span>` : "",
       usesBrowser ? '<span class="capability-badge browser">Через браузер</span>' : "",
       requiresAuth ? '<span class="capability-badge auth"><i class="ph ph-lock-key" aria-hidden="true"></i>Нужен вход</span>' : "",
     ].join("");
     const detail = applyKind === "official_api"
       ? "Поиск, отклики и ответы работодателям"
       : (usesBrowser
-        ? (requiresAuth ? "Автоотклик использует сохранённую браузерную сессию" : "Поиск автоматический; отклик откроется в браузере")
+        ? "Отклик через браузер; подтверждение доставки на площадке ещё не проверено"
         : "Вакансии загружаются в общую ленту");
     const actionType = sourceName === "hh" ? "manage" : (requiresAuth ? "login" : "open");
     const actionLabel = sourceName === "hh"
@@ -1357,7 +1416,7 @@ function renderSourceCapabilities(sources, capabilities) {
   const summary = $("#sources-summary");
   if (summary) summary.textContent = `${enabled} площадок включено`;
   const searchCount = entries.filter(([, capability]) => !["", "none"].includes(String(capability.search || ""))).length;
-  const applyCount = entries.filter(([, capability]) => !["", "none"].includes(String(capability.apply || "none"))).length;
+  const applyCount = entries.filter(([, capability]) => capability.auto_apply_verified === true).length;
   const authCount = entries.filter(([, capability]) => capability.requires_auth).length;
   const connectedCount = sources.filter((source) => source.last_sync_at && !source.last_error).length;
   if ($("#sources-search-count")) $("#sources-search-count").textContent = String(searchCount);
@@ -1845,10 +1904,17 @@ async function getAiFit() {
     const result = await api(`/api/jobs/${state.selectedId}/ai-fit`, { method: "POST", body: "{}" });
     const badge = $("#ai-fit-score");
     badge.style.display = "block";
-    badge.textContent = `AI Fit: ${result.score}%`;
+    if (result.status === "error" || result.score == null) {
+      badge.textContent = "Не удалось оценить";
+      $("#ai-fit-reasoning").textContent = result.reasoning || "Повторите оценку позже.";
+      return;
+    }
+    badge.textContent = `Соответствие: ${result.score}/100`;
     badge.style.background = result.score >= 70 ? "#dcfce7" : result.score >= 40 ? "#fef9c3" : "#fee2e2";
     badge.style.color = result.score >= 70 ? "#11845b" : result.score >= 40 ? "#9a5b13" : "#b42318";
-    $("#ai-fit-reasoning").textContent = result.reasoning;
+    const labels = { supported: "Подтверждено", gap: "Добавить в резюме", unknown: "Нужно уточнить", mismatch: "Не соответствует" };
+    $("#ai-fit-reasoning").innerHTML = `<p>${escapeHtml(result.reasoning)}</p>` +
+      (result.requirements?.length ? `<table><thead><tr><th>Требование</th><th>Подтверждение</th><th>Вывод</th></tr></thead><tbody>${result.requirements.map((row) => `<tr><td>${escapeHtml(row.requirement)}${row.required ? " (обязательное)" : ""}</td><td>${escapeHtml(row.evidence || "Нет данных")}</td><td>${escapeHtml(labels[row.status] || row.status)}. ${escapeHtml(row.note)}</td></tr>`).join("")}</tbody></table>` : "");
   } catch (err) {
     $("#ai-fit-reasoning").textContent = `Ошибка: ${err.message}`;
   } finally {
@@ -1884,15 +1950,19 @@ async function getExperiencePitch() {
 
 async function saveJobNote() {
   if (!state.selectedId) return;
+  const id = state.selectedId, sequence = selectionSequence;
   const note = $("#job-notes-input").value;
-  await api(`/api/jobs/${state.selectedId}/note`, { method: "POST", body: JSON.stringify({ body: note }) });
+  await api(`/api/jobs/${id}/note`, { method: "POST", body: JSON.stringify({ body: note }) });
+  if (sequence !== selectionSequence || id !== state.selectedId) return;
   notify("success", "job-note", "saved", "Заметка сохранена");
 }
 
 async function loadJobNote() {
   if (!state.selectedId) return;
+  const id = state.selectedId, sequence = selectionSequence;
   try {
-    const result = await api(`/api/jobs/${state.selectedId}/note`);
+    const result = await api(`/api/jobs/${id}/note`);
+    if (sequence !== selectionSequence || id !== state.selectedId) return;
     $("#job-notes-input").value = result.body || "";
   } catch (e) { /* ignore if endpoint doesn't exist yet */ }
 }
@@ -2382,6 +2452,7 @@ function scheduleGuidance(route) {
 async function loadAgentCockpit({ liveAuth = false } = {}) {
   $("#agent-status-line").textContent = "Загружаю статус агента...";
   await Promise.all([
+    loadApplicationLedger(),
     loadAgentPreflight({ liveAuth }),
     loadAgentDigest(),
     loadAgentOperations(),
@@ -2485,11 +2556,15 @@ async function startHhLogin({ account = "default", trigger = null, refreshChats 
   }
   $("#agent-chats-status").textContent = "Открываю безопасное окно входа HH…";
   try {
-    await api("/api/hh/auth/login", {
+    const started = await api("/api/hh/auth/login", {
       method: "POST",
       body: JSON.stringify({ account }),
     });
-    $("#agent-chats-status").textContent = "Завершите вход в открывшемся окне. Проверяю подключение…";
+    if (started && started.status === "already_running") {
+      $("#agent-chats-status").textContent = "Окно входа уже открыто. Завершите вход в нём — открывать второе не нужно.";
+    } else {
+      $("#agent-chats-status").textContent = "Завершите вход в открывшемся окне. Проверяю подключение…";
+    }
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
       await loadHhConnectionStatus();
@@ -2816,12 +2891,13 @@ function renderAgentApprovals() {
         </div>
         <div class="meta">confidence: ${escapeHtml(String(item.confidence))} · ${escapeHtml(item.reason || "")}</div>
         <pre class="agent-json">${escapeHtml(JSON.stringify(item.payload || {}, null, 2))}</pre>
-        <textarea id="agent-modify-${approvalId}" class="agent-modify" rows="2" placeholder="Что изменить в payload/сообщении"></textarea>
+        <p>${escapeHtml(item.payload?.question || "")}</p>
+        <textarea id="agent-modify-${approvalId}" class="agent-modify" rows="3" placeholder="${item.payload?.reply ? "Ваш точный ответ работодателю" : "Что изменить"}">${escapeHtml(item.payload?.reply?.message || "")}</textarea>
         <div class="agent-row-actions">
-          <button ${numericRecordAction("approve-agent-approval", approvalId, "approval id")}>Approve</button>
-          <button ${numericRecordAction("reject-agent-approval", approvalId, "approval id")}>Reject</button>
-          <button ${numericRecordAction("modify-agent-approval", approvalId, "approval id")}>Modify</button>
-          <button ${numericRecordAction("flag-agent-approval", approvalId, "approval id")}>Flag</button>
+          <button ${numericRecordAction("approve-agent-approval", approvalId, "approval id")}>Одобрить</button>
+          <button ${numericRecordAction("reject-agent-approval", approvalId, "approval id")}>Отклонить</button>
+          <button ${numericRecordAction("modify-agent-approval", approvalId, "approval id")}>Сохранить ответ</button>
+          <button ${numericRecordAction("flag-agent-approval", approvalId, "approval id")}>Отметить</button>
         </div>
       </div>
     `;
@@ -3299,9 +3375,11 @@ async function rejectAgentApproval(id) {
 async function modifyAgentApproval(id) {
   const approvalId = requirePositiveInteger(id, "approval id");
   const instruction = $(`#agent-modify-${approvalId}`)?.value.trim() || "modified_from_ui";
+  const approval = state.agent.approvals.find((item) => Number(item.id) === approvalId);
+  const payload_patch = approval?.payload?.reply ? { reply: { ...approval.payload.reply, message: instruction } } : {};
   await api(`/api/approvals/${approvalId}/modify`, {
     method: "POST",
-    body: JSON.stringify({ instruction, payload_patch: {} }),
+    body: JSON.stringify({ instruction, payload_patch }),
   });
   await Promise.all([loadAgentApprovals(), loadAgentDigest()]);
 }
@@ -3558,11 +3636,15 @@ function bindEnhancedSettingsInteractions() {
     document.querySelectorAll("[data-font-scale]").forEach((button) => button.classList.toggle("active", button.dataset.fontScale === "1"));
   });
   $("#save-notifications-button")?.addEventListener("click", persistLocalSettings);
-  $("#ai-check-button")?.addEventListener("click", () => {
-    const model = $("#ai-model-input")?.value.trim() || $("#opencode-model-input")?.value.trim();
-    notify(model ? "success" : "warning", "settings-ai", "checked", model ? "AI настроен" : "Выберите модель", model ? `Модель: ${model}` : "Укажите модель перед проверкой.");
+  $("#ai-check-button")?.addEventListener("click", () => probeConfiguredAi().catch((error) => notifyError("ai-probe", error)));
+  $("#resumes-sync-hh")?.addEventListener("click", async () => {
+    try {
+      const result = await api("/api/hh/resumes/sync", { method: "POST", body: "{}" });
+      if (result.status === "blocked" || result.status === "error") throw new Error(result.message || "Нужен вход в HH");
+      await Promise.all([loadResumes(), loadHhAutopilot()]);
+      notify("success", "resumes", "synced", "Резюме HH обновлены");
+    } catch (error) { notifyError("resumes-sync", error); }
   });
-  $("#resumes-sync-hh")?.addEventListener("click", () => Promise.allSettled([loadResumes(), loadHhAutopilot()]).then(() => notify("success", "resumes", "synced", "Резюме обновлены")));
   $("#chat-new-button")?.addEventListener("click", () => {
     state.chatMessages = [];
     renderChat();
@@ -3810,14 +3892,20 @@ let editingResumeId = 0;
 function resetResumeForm() {
   editingResumeId = 0;
   $("#resume-name-input").value = "";
+  $("#resume-file-path").value = "";
   $("#resume-body-input").value = "";
+  for (const id of ["resume-target-role", "resume-hh-id", "resume-hh-account"]) $("#" + id).value = "";
 }
 
 function showResumeForm(id = 0) {
   editingResumeId = id ? requirePositiveInteger(id, "resume id") : 0;
   const resume = state.resumes.find((item) => Number(item.id) === editingResumeId);
   $("#resume-name-input").value = resume?.name || "";
+  $("#resume-file-path").value = resume?.file_path || "";
   $("#resume-body-input").value = resume?.body || "";
+  $("#resume-target-role").value = resume?.target_role || "";
+  $("#resume-hh-id").value = resume?.hh_resume_id || "";
+  $("#resume-hh-account").value = resume?.hh_account_profile_id || "";
   $("#save-resume-button").textContent = editingResumeId ? "Обновить" : "Сохранить";
   $("#resume-form").style.display = "block";
   $("#resume-name-input").focus();
@@ -3828,10 +3916,15 @@ function resumePayloadFromForm() {
   return {
     id: editingResumeId,
     name: $("#resume-name-input").value.trim(),
+    file_path: $("#resume-file-path").value.trim(),
     body: $("#resume-body-input").value,
     profile_id: original?.profile_id || state.profile?.active || "default",
     is_active: original?.is_active === true,
     ats_score: original?.ats_score ?? null,
+    target_role: $("#resume-target-role").value.trim(),
+    hh_resume_id: $("#resume-hh-id").value.trim(),
+    hh_account_profile_id: $("#resume-hh-account").value.trim(),
+    facts_hash: original?.facts_hash || "",
   };
 }
 
@@ -3859,7 +3952,7 @@ async function loadResumes() {
       humanResume.replaceChildren();
       if (!resumes.length) humanResume.add(new Option("Сначала добавьте резюме", ""));
       for (const resume of resumes) {
-        humanResume.add(new Option(`${resume.name}${resume.is_active ? " · основное" : ""}`, String(resume.id)));
+        humanResume.add(new Option(`${resume.name}${resume.hh_resume_id ? " · HH " + resume.hh_resume_id : " · нет привязки HH"}`, String(resume.id)));
       }
       if ([...humanResume.options].some((option) => option.value === previous)) humanResume.value = previous;
       else if (resumes.some((resume) => resume.is_active)) humanResume.value = String(resumes.find((resume) => resume.is_active).id);
@@ -3868,12 +3961,13 @@ async function loadResumes() {
     list.innerHTML = "";
     for (const r of resumes) {
       const resumeId = requirePositiveInteger(r.id, "resume id");
-      const score = Number.isFinite(Number(r.ats_score)) ? `${Number(r.ats_score)}%` : "Не проверено";
+      const score = r.ats_score != null && Number.isFinite(Number(r.ats_score)) ? `${Number(r.ats_score)}%` : "Не проверено";
       list.innerHTML += `<article class="resume-card${r.is_active ? " active" : ""}">
         <span class="resume-select-indicator" aria-hidden="true"><i class="ph ${r.is_active ? "ph-check-circle" : "ph-circle"}"></i></span>
         <div class="resume-card-copy"><div class="resume-card-title"><strong>${escapeHtml(r.name)}</strong>${r.is_active ? '<span class="connection-state">Основное</span>' : ""}</div>
         <span class="meta">Локальное резюме · Профиль ${escapeHtml(r.profile_id || state.profile?.active || "default")}</span>
-        <div class="resume-card-meta"><span><i class="ph ph-chart-line-up" aria-hidden="true"></i>ATS: ${escapeHtml(score)}</span><span><i class="ph ph-link" aria-hidden="true"></i>Готово для площадок</span></div>
+        <div class="resume-card-meta"><span><i class="ph ph-chart-line-up" aria-hidden="true"></i>Оценка текста: ${escapeHtml(score)}</span><span><i class="ph ph-link" aria-hidden="true"></i>${r.hh_resume_id ? `HH: ${escapeHtml(r.hh_resume_id)}` : "Локальная версия"}</span></div>
+        <div class="actions"><button type="button" data-export-resume="${resumeId}" data-format="pdf">Скачать PDF</button><button type="button" data-export-resume="${resumeId}" data-format="docx">Скачать DOCX</button></div>
         <div class="resume-card-actions"><button aria-label="Сделать основным ${escapeAttr(r.name)}" ${numericRecordAction("activate-resume", resumeId, "resume id")}><i class="ph ph-check-circle" aria-hidden="true"></i>${r.is_active ? "Основное" : "Сделать основным"}</button><button aria-label="Редактировать резюме ${escapeAttr(r.name)}" ${numericRecordAction("edit-resume", resumeId, "resume id")}><i class="ph ph-pencil-simple" aria-hidden="true"></i>Редактировать</button><button class="danger-action" aria-label="Удалить резюме ${escapeAttr(r.name)}" ${numericRecordAction("delete-resume", resumeId, "resume id")}><i class="ph ph-trash" aria-hidden="true"></i>Удалить</button></div></div>
       </article>`;
     }
@@ -4297,7 +4391,8 @@ async function scoreAtsResume() {
   }
   try {
     const result = await api("/api/resumes/ats-score", { method: "POST", body: JSON.stringify({ resume_text: text }) });
-    notify("info", "ats-score", "result", `ATS Score: ${result.score}/100`, (result.issues || []).join(", "));
+    notify(result.status === "error" ? "error" : "info", "ats-score", "result",
+      result.score == null ? "Не удалось оценить резюме" : `Оценка текста: ${result.score}/100`, (result.issues || []).join(", "));
   } catch (e) { notifyError("ats-score", e, "Не удалось оценить резюме"); }
 }
 

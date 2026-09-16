@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from html import unescape
 from json import JSONDecoder
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit
@@ -113,6 +114,9 @@ class HHVacancyTestTransport:
 
     def _parse_tests(self, html: str) -> Mapping[str, Any]:
         start = html.find(self.TESTS_MARKER)
+        if start < 0:
+            html = unescape(html)
+            start = html.find(self.TESTS_MARKER)
         if start < 0:
             raise ValueError("vacancyTests not found")
         value, _end = JSONDecoder().raw_decode(

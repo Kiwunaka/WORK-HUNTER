@@ -64,6 +64,12 @@ class FakeRepository:
     def active_grant(self, _account_id: str):
         return SimpleNamespace(id=7)
 
+    def save_dispatch_resume_snapshot(self, item_id, *, resume, candidate, expected_version, fencing_token):
+        item = self.get_item(item_id)
+        assert item.version == expected_version
+        assert resume["id"] == item.resume_id
+        self.trace.append(f"snapshot:{item.vacancy_id}")
+
     def acquire_lease(self, account_id, owner_token, *, ttl_seconds, now):
         self.trace.append("lease")
         return LeaseRecord(

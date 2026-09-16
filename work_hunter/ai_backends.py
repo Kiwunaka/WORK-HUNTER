@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
+import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
+
+from .config import MASK
 
 
 def chat_completion(
@@ -13,18 +18,54 @@ def chat_completion(
     ai_config: dict[str, Any],
 ) -> str:
     backend = str(ai_config.get("backend") or "direct").lower()
-    if backend == "opencode":
-        return _opencode_completion(messages, ai_config)
-    return _direct_completion(messages, ai_config)
+    started = time.monotonic()
+    usage: dict[str, Any] = {}
+    status, error_code = "ok", ""
+    try:
+        if backend == "opencode":
+            return _opencode_completion(messages, ai_config)
+        if backend != "direct":
+            raise ValueError(f"Unknown AI backend: {backend}")
+        try:
+            return _direct_completion(messages, ai_config, usage=usage)
+        except requests.HTTPError as exc:
+            fallback = (ai_config.get("model_fallbacks") or {}).get(ai_config.get("model"))
+            response = exc.response
+            unavailable = response is not None and (
+                response.status_code in {404, 410, 503}
+                or (response.status_code == 400 and "not a valid model" in response.text.lower())
+            )
+            # The configured reserve is for text tasks; do not discard image inputs.
+            if not fallback or not unavailable or not all(
+                isinstance(message.get("content"), str) for message in messages
+            ):
+                raise
+            usage.clear()
+            return _direct_completion(messages, {**ai_config, "model": fallback}, usage=usage)
+    except Exception as exc:
+        status = "error"
+        response = getattr(exc, "response", None)
+        error_code = f"http_{response.status_code}" if response is not None else type(exc).__name__
+        raise
+    finally:
+        recorder = ai_config.get("_usage_recorder")
+        if recorder is not None:
+            recorder({"backend": backend,
+                      "model": str(ai_config.get("opencode_model" if backend == "opencode" else "model") or ""),
+                      "status": status, "error_code": error_code,
+                      "duration_ms": round((time.monotonic() - started) * 1000), **usage})
 
 
-def _direct_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]) -> str:
+def _direct_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any],
+                       *, usage: dict[str, Any] | None = None) -> str:
     api_key = ai_config.get("api_key", "")
     base_url = ai_config.get("base_url", "")
     model = ai_config.get("model", "")
 
-    if not api_key or not base_url or not model:
+    if not api_key or api_key == MASK or not base_url or not model:
         raise ValueError("AI config incomplete: api_key, base_url, or model missing")
+    if usage is not None:
+        usage["model"] = model
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -40,6 +81,22 @@ def _direct_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]
         "temperature": ai_config.get("temperature", 0.7),
         "max_tokens": ai_config.get("max_tokens", 1500),
     }
+    if ai_config.get("reasoning") is not None:
+        payload["reasoning"] = ai_config["reasoning"]
+    allowed_providers = (ai_config.get("model_providers") or {}).get(model)
+    if allowed_providers is not None:
+        if not isinstance(allowed_providers, list) or not allowed_providers or not all(
+            isinstance(value, str) and value.strip() for value in allowed_providers
+        ):
+            raise ValueError("Model provider allowlist must contain provider slugs")
+        if urlsplit(base_url).hostname != "openrouter.ai":
+            raise ValueError("Model provider restrictions require OpenRouter")
+        payload["provider"] = {"only": allowed_providers}
+    max_price = (ai_config.get("model_max_prices") or {}).get(model)
+    if max_price is not None:
+        if urlsplit(base_url).hostname != "openrouter.ai":
+            raise ValueError("Model price limits require OpenRouter")
+        payload.setdefault("provider", {})["max_price"] = max_price
 
     response = requests.post(
         base_url,
@@ -49,6 +106,16 @@ def _direct_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]
     )
     response.raise_for_status()
     data = response.json()
+    if usage is not None:
+        usage["model"] = data.get("model") or model
+        reported = data.get("usage") or {}
+        for name in ("prompt_tokens", "completion_tokens"):
+            value = reported.get(name)
+            if type(value) is int and value >= 0:
+                usage[name] = value
+        cost = reported.get("cost")
+        if isinstance(cost, (float, int)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+            usage["cost_usd"] = cost
     content = (
         data.get("choices", [{}])[0]
         .get("message", {})
@@ -62,10 +129,11 @@ def _direct_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]
 def _opencode_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]) -> str:
     transport = str(ai_config.get("opencode_transport") or "cli").lower()
     if transport == "server":
-        try:
-            return _opencode_server_completion(messages, ai_config)
-        except Exception:
-            return _opencode_cli_completion(messages, ai_config)
+        # A server failure can follow a completed generation. Do not silently
+        # spend again in another runtime or conceal authorization failures.
+        return _opencode_server_completion(messages, ai_config)
+    if transport != "cli":
+        raise ValueError(f"Unknown OpenCode transport: {transport}")
     return _opencode_cli_completion(messages, ai_config)
 
 

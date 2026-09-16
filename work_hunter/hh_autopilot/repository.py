@@ -1240,6 +1240,29 @@ class AutopilotRepository:
                 idempotency_key=idempotency_key,
             )
 
+    def save_dispatch_resume_snapshot(
+        self, item_id: int, *, resume: Mapping[str, Any], candidate: Mapping[str, Any],
+        expected_version: int, fencing_token: int,
+    ) -> None:
+        from work_hunter.candidate import content_hash
+
+        resume_data = dict(resume)
+        candidate_data = dict(candidate)
+        with self.immediate():
+            item = self._item_for_update(item_id)
+            self._assert_fence(item.account_id, fencing_token, _instant(None, field="now"))
+            if item.version != expected_version or item.state is not AutopilotState.READY:
+                raise StaleWrite("resume snapshot requires the current ready item")
+            if str(resume_data.get("id") or "").strip().casefold() != item.resume_id:
+                raise ValueError("resume snapshot identity mismatch")
+            self.conn.execute(
+                """INSERT OR REPLACE INTO hh_application_resume_snapshots
+                   (item_id, resume_hash, resume_json, candidate_hash, candidate_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (item_id, content_hash(resume_data), json.dumps(resume_data, ensure_ascii=False),
+                 content_hash(candidate_data), json.dumps(candidate_data, ensure_ascii=False), _utc_now()),
+            )
+
     def _create_item_for_update(
         self,
         origin_run_id: int,

@@ -186,6 +186,21 @@ def test_doctor_blocks_when_package_resources_are_missing(monkeypatch, tmp_path)
     assert "missing_migrations" in doctor["blocked"]
 
 
+def test_package_details_detects_missing_vendor_asset(tmp_path):
+    import shutil
+
+    package_root = tmp_path / "package"
+    shutil.copytree(services_module.PACKAGE_ROOT / "web/static", package_root / "web/static")
+    shutil.copytree(services_module.PACKAGE_ROOT / "migrations", package_root / "migrations")
+    missing = "vendor/phosphor/Phosphor.woff2"
+    (package_root / "web/static" / missing).unlink()
+
+    package = _package_details(package_root)
+
+    assert package["status"] == "error"
+    assert package["static"]["missing"] == [missing]
+
+
 def test_package_details_skips_local_egg_info_before_matching_editable(monkeypatch, tmp_path):
     project_root = tmp_path / "project"
     package_root = project_root / "work_hunter"
@@ -637,7 +652,7 @@ def test_chat_uses_default_score_for_legacy_profile(
     monkeypatch.setattr("work_hunter.services.chat_completion", capture_chat)
 
     assert app.chat([{"role": "user", "content": "fit?"}], job_id=job_id) == "ok"
-    assert "Score: total=73" in captured_messages[0][0]["content"]
+    assert any("Score: total=73" in message["content"] for message in captured_messages[0])
 
 
 def test_prepare_letter_for_existing_job(tmp_path):

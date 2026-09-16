@@ -400,6 +400,11 @@ class Resume:
     ats_score: int | None = None
     created_at: str = ""
     updated_at: str = ""
+    file_path: str = ""
+    target_role: str = ""
+    hh_resume_id: str = ""
+    hh_account_profile_id: str = ""
+    facts_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

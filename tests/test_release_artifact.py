@@ -26,6 +26,13 @@ STATIC_FILES = {
     "ui-onboarding.js",
     "ui-today.js",
 }
+# Include every shipped asset, including nested fonts, logos and their licenses.
+# Keep the baseline names above so accidental source deletion also fails.
+STATIC_FILES |= {
+    path.relative_to(ROOT / "work_hunter/web/static").as_posix()
+    for path in (ROOT / "work_hunter/web/static").rglob("*")
+    if path.is_file()
+}
 MIGRATION_FILES = {
     "0001_backbone.sql",
     "0002_account_aware_applications.sql",
@@ -85,6 +92,9 @@ def _copy_clean_source(destination: Path) -> Path:
         [
             "git",
             "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
             "--",
             "pyproject.toml",
             "README.md",
@@ -151,6 +161,9 @@ def test_release_metadata_declares_safe_bounds_and_build_tools():
         "pydantic-settings>=2.14.2,<3",
         "python-multipart>=0.0.31,<1",
         "urllib3>=2.7,<3",
+        "jsonschema>=4.23,<5",
+        "python-docx>=1.2,<2",
+        "pypdf>=6,<7",
         "tzdata>=2025.2; sys_platform == 'win32'",
     ]
     extras = project["project"]["optional-dependencies"]
@@ -159,6 +172,7 @@ def test_release_metadata_declares_safe_bounds_and_build_tools():
         "pytest>=8,<10",
         "ruff>=0.5,<1",
         "types-requests>=2.32",
+        "types-jsonschema>=4.23,<5",
     ]
     assert extras["browser"] == [
         "beautifulsoup4>=4.12,<5",
@@ -221,6 +235,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
     )
     smoke = textwrap.dedent(
         """
+        import json
         import sys
         from importlib import metadata, resources
         from pathlib import Path
@@ -232,7 +247,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
         assert work_hunter.__version__ == "1.0.0"
         package = resources.files("work_hunter")
         static = package.joinpath("web", "static")
-        for name in ("app.css", "app.js", "index.html", "manifest.json", "sw.js", "ui-core.js", "ui-feedback.js", "ui-onboarding.js", "ui-today.js"):
+        for name in json.loads(sys.argv[2]):
             resource = static.joinpath(name)
             assert resource.is_file()
             assert resource.read_bytes()
@@ -256,7 +271,7 @@ def test_installed_wheel_uses_its_own_runtime_resources(tmp_path):
         """
     )
     completed = subprocess.run(
-        [str(virtualenv_python), "-I", "-c", smoke, str(runtime)],
+        [str(virtualenv_python), "-I", "-c", smoke, str(runtime), json.dumps(sorted(STATIC_FILES))],
         check=True,
         cwd=runtime,
         env=environment,

@@ -488,6 +488,11 @@
           <section data-pipeline-column="sent"><h3>Отправлены <span>0</span></h3><div class="pipeline-list"></div></section>
           <section data-pipeline-column="replied"><h3>Ответили <span>0</span></h3><div class="pipeline-list"></div></section>
           <section data-pipeline-column="interview"><h3>Собеседования <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="offer"><h3>Офферы <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="rejected"><h3>Отказы <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="unknown"><h3>Отправка не подтверждена <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="manual"><h3>Отмечены вручную <span>0</span></h3><div class="pipeline-list"></div></section>
+          <section data-pipeline-column="attention"><h3>Требуют внимания <span>0</span></h3><div class="pipeline-list"></div></section>
         </div>
         <details class="detail-disclosure application-technical-inbox">
           <summary>Служебная очередь агента</summary>
@@ -717,6 +722,8 @@
             <div class="settings-card-title"><span class="metric-icon purple"><i class="ph ph-address-book" aria-hidden="true"></i></span><div><h3>Контакты для откликов</h3><p>Работодатель увидит эти данные в анкете.</p></div></div>
             <div class="settings-fields-grid">
               <label>Имя<input id="profile-contact-name" placeholder="Имя Фамилия"></label>
+              <label>Личное имя<input id="profile-first-name" autocomplete="given-name"></label>
+              <label>Фамилия<input id="profile-last-name" autocomplete="family-name"></label>
               <label>Email<input id="profile-email" type="email" placeholder="you@example.com"></label>
               <label>Телефон<input id="profile-phone" placeholder="+7..."></label>
               <label>Город<input id="profile-city" placeholder="Москва"></label>
@@ -735,6 +742,9 @@
         <section class="settings-status-card resumes-status-card"><span class="metric-icon green"><i class="ph ph-check-circle" aria-hidden="true"></i></span><div><strong>Резюме для автооткликов</strong><p>Активное резюме будет использовано на подключённых площадках и подставлено в формы.</p></div><dl><div><dt>Основное</dt><dd id="resumes-primary-name">Выберите ниже</dd></div><div><dt>Всего</dt><dd id="resumes-total-count">0</dd></div></dl></section>
         <div id="resume-form" class="inline-editor" style="display:none;">
           <label>Название<input id="resume-name-input" placeholder="Python Backend"></label>
+          <label>Целевая должность<input id="resume-target-role" placeholder="BI-аналитик"></label>
+          <div class="settings-fields-grid"><label>ID резюме на HH<input id="resume-hh-id" placeholder="Заполните после входа"></label><label>Аккаунт HH<input id="resume-hh-account" placeholder="default"></label></div>
+          <label>Файл этой версии (PDF, DOCX или TXT)<input id="resume-file-path" placeholder="Полный путь к файлу на этом компьютере"></label>
           <label>Текст резюме<textarea id="resume-body-input" rows="8" placeholder="Вставьте текст резюме..."></textarea></label>
           <div class="actions">
             <button id="save-resume-button" class="primary" data-ui-action="save-resume"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить</button>
@@ -742,19 +752,49 @@
           </div>
         </div>
         <div class="resume-workspace"><div id="resumes-list" class="source-list resumes-card-list"></div><aside id="resume-preview-card" class="resume-preview-card"><span class="metric-icon blue"><i class="ph ph-file-text" aria-hidden="true"></i></span><h3>Выберите резюме</h3><p>Здесь появятся источник, обновление, навыки и площадки.</p></aside></div>
+        <section class="settings-card" id="candidate-facts-card">
+          <h3>База опыта</h3><p>Эти факты используются в резюме, письмах и ответах работодателям. Указывайте только то, что действительно делали.</p>
+          <label>Коротко о себе<textarea id="candidate-summary" rows="3"></textarea></label>
+          <label>Ваши навыки, через запятую<input id="candidate-skills" placeholder="SQL, Power BI, Python"></label>
+          <div id="candidate-experience-list"></div>
+          <div class="actions"><button id="candidate-add-experience" type="button">Добавить место работы или проект</button><button id="candidate-save" type="button" class="primary">Сохранить опыт</button></div>
+          <label>Должность для новой версии резюме<input id="candidate-resume-role" placeholder="BI-аналитик"></label>
+          <button id="candidate-create-resume" type="button">Собрать резюме из фактов</button>
+          <p id="candidate-status" class="meta" role="status"></p>
+        </section>
+        <section class="settings-card"><h3>Результаты по версиям резюме</h3><button id="resume-outcomes-refresh" type="button">Обновить статистику</button><div id="resume-outcomes" class="meta">Появится после откликов с сохранённой версией резюме.</div></section>
       </div>
       <div class="panel settings-page settings-ai-page" data-settings-panel="ai">
         <header class="settings-page-header">
           <div><span class="eyebrow">AI</span><h2>Модель для оценки, писем и ответов</h2><p>Основные функции включаются здесь; технический транспорт спрятан ниже.</p></div>
-          <div class="actions"><button id="ai-check-button" type="button"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Проверить</button><button id="save-ai-button" class="primary"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить</button></div>
+          <div class="actions"><button id="ai-check-button" type="button" title="Отправит короткий запрос через сохранённый API"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Проверить запросом</button><button id="save-ai-button" class="primary"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить</button></div>
         </header>
-        <section class="settings-status-card"><span class="metric-icon green"><i class="ph ph-check-circle" aria-hidden="true"></i></span><div><strong id="ai-connection-title">AI готов к работе</strong><p id="ai-connection-note">Ключ скрыт, а модель можно заменить в любой момент.</p></div><dl><div><dt>Провайдер</dt><dd id="ai-provider-label">OpenAI-совместимый</dd></div><div><dt>Модель</dt><dd id="ai-model-label">Не выбрана</dd></div></dl></section>
+        <section class="settings-status-card"><span class="metric-icon blue"><i class="ph ph-cpu" aria-hidden="true"></i></span><div><strong id="ai-connection-title">Проверка AI</strong><p id="ai-connection-note">Сохраните настройки и выполните пробный запрос.</p></div><dl><div><dt>Провайдер</dt><dd id="ai-provider-label">OpenAI-совместимый</dd></div><div><dt>Модель</dt><dd id="ai-model-label">Не выбрана</dd></div></dl></section>
+        <p id="ai-usage" class="meta">Проверка отправляет короткий запрос через сохранённые настройки AI. Провайдер может списать оплату.</p>
         <div class="settings-card-grid ai-card-grid">
           <section class="settings-card">
             <div class="settings-card-title"><span class="metric-icon blue"><i class="ph ph-cpu" aria-hidden="true"></i></span><div><h3>Провайдер и модель</h3><p>Ключ хранится только на этом устройстве.</p></div></div>
             <label>Способ подключения<select id="ai-backend-select"><option value="direct">OpenAI-совместимый API</option><option value="opencode">OpenCode</option></select></label>
             <label>API-ключ<input type="password" id="ai-key-input" placeholder="sk-or-v1-..."></label>
-            <label>Модель<input type="text" id="ai-model-input" placeholder="google/gemini-2.5-flash"></label>
+            <label>Основная модель — чат и остальные задачи<input type="text" id="ai-model-input" list="ai-model-options" placeholder="ID модели в OpenRouter"></label>
+            <datalist id="ai-model-options"><option value="openai/gpt-5.6-luna"></option><option value="meta/muse-spark-1.3-contributor"></option><option value="z-ai/glm-5.3-flash"></option></datalist>
+          </section>
+          <section class="settings-card">
+            <h3>Модели по задачам</h3><p>Пустое поле использует основную модель. Проверка делает запрос через сохранённые настройки выбранной задачи.</p>
+            <label>Оценка и классификация вакансий<input data-ai-purpose="ranking" list="ai-model-options" placeholder="Основная модель"></label><button type="button" data-ai-probe="ranking">Проверить оценку</button>
+            <label>Сопроводительные письма<input data-ai-purpose="cover_letters" list="ai-model-options" placeholder="Основная модель"></label><button type="button" data-ai-probe="cover_letters">Проверить письма</button>
+            <label>Ответы работодателям<input data-ai-purpose="replies" list="ai-model-options" placeholder="Основная модель"></label><button type="button" data-ai-probe="replies">Проверить ответы</button>
+            <label>Подготовка к собеседованию<input data-ai-purpose="interview" list="ai-model-options" placeholder="Основная модель"></label><button type="button" data-ai-probe="interview">Проверить подготовку</button>
+            <label>Анкеты HH<input data-ai-purpose="forms" list="ai-model-options" placeholder="Основная модель"></label><button type="button" data-ai-probe="forms">Проверить анкеты</button>
+            <label>Тесты HH<input data-ai-purpose="tests" list="ai-model-options" placeholder="Основная модель"></label><button type="button" data-ai-probe="tests">Проверить тесты</button>
+            <label>Распознавание изображений<input data-ai-purpose="captcha" list="ai-model-options" placeholder="Основная модель с поддержкой изображений"></label><button type="button" data-ai-probe="captcha">Проверить подключение</button>
+          </section>
+          <section class="settings-card">
+            <h3>Провайдеры GLM 5.3 Flash</h3><p>Для z-ai/glm-5.3-flash запросы идут только выбранным провайдерам. Если все недоступны, показывается ошибка.</p>
+            <label><input type="checkbox" data-glm-provider="novita" checked> NovitaAI</label>
+            <label><input type="checkbox" data-glm-provider="z-ai" checked> Z.ai</label>
+            <label><input type="checkbox" data-glm-provider="streamlake" checked> StreamLake</label>
+            <label><input type="checkbox" data-glm-provider="modal" checked> Modal</label>
           </section>
           <section class="settings-card">
             <div class="settings-card-title"><span class="metric-icon purple"><i class="ph ph-sparkle" aria-hidden="true"></i></span><div><h3>Как использовать AI</h3><p>Можно отключить отдельные сценарии.</p></div></div>
@@ -828,6 +868,7 @@
             </div>
             <button id="hh-human-start" type="button" class="primary">Запустить автоотклики</button>
           </section>
+          <section class="settings-card"><h3>Проверка перед запуском</h3><button id="launch-readiness-refresh" type="button">Проверить без входа в HH</button><div id="launch-readiness" role="status"></div></section>
 
           <div class="platform-automation-grid">
             <section class="human-card connection-card">
@@ -1039,7 +1080,7 @@
       <section class="source-kpis" aria-label="Сводка по площадкам">
         <article><span class="metric-icon green"><i class="ph ph-link" aria-hidden="true"></i></span><div><span>Синхронизировано</span><strong id="sources-connected-count">—</strong><small>источников</small></div></article>
         <article><span class="metric-icon blue"><i class="ph ph-magnifying-glass" aria-hidden="true"></i></span><div><span>Поиск</span><strong id="sources-search-count">—</strong><small>площадок</small></div></article>
-        <article><span class="metric-icon purple"><i class="ph ph-lightning" aria-hidden="true"></i></span><div><span>Автоотклик</span><strong id="sources-apply-count">—</strong><small>площадок</small></div></article>
+        <article><span class="metric-icon purple"><i class="ph ph-lightning" aria-hidden="true"></i></span><div><span>Проверенный автоотклик</span><strong id="sources-apply-count">—</strong><small>площадок</small></div></article>
         <article><span class="metric-icon orange"><i class="ph ph-user" aria-hidden="true"></i></span><div><span>Нужен вход</span><strong id="sources-auth-count">—</strong><small>площадок</small></div></article>
       </section>
       <section class="source-account-card">
@@ -1180,5 +1221,6 @@
   <script src="/ui-onboarding.js"></script>
   <script src="/ui-today.js"></script>
   <script src="/app.js"></script>
+  <script src="/ui-candidate.js"></script>
 </body>
 </html>

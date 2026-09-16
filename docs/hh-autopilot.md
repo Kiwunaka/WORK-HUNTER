@@ -99,6 +99,27 @@ work-hunter --root . hh auth refresh --account default
 work-hunter --root . hh auth logout --account default --confirm
 ```
 
+Вход считается успешным, когда страница уходит с `/account/login` и в шапке
+появляется меню соискателя (`mainmenu_applicantProfile*`, `mainmenu_profileAndResumes`
+или `mainmenu_logout`). После этого куки (`hhtoken`, `hhuid`, `_xsrf` и остальные)
+атомарно сохраняются в `.work-hunter/private/hh-sessions/<account>.json`
+и UI показывает «Подключено».
+
+Повторный клик «Войти» во время открытого окна не запускает второй браузер:
+`POST /api/hh/auth/login` отвечает `{"status": "already_running", ...}`
+с PID активного процесса (защита — pid-маркер
+`.work-hunter/private/hh-login/<account>.pid` + debounce 20 секунд),
+а UI показывает «Окно входа уже открыто. Завершите вход в нём».
+Не открывайте два окна входа на один аккаунт: второй процесс делит
+Chromium-профиль и мешает первому зафиксировать сессию. Маркер удаляется
+автоматически при завершении `hh auth login`.
+
+Если окно закрыли раньше успеха, сессии нет (`hh web status` →
+`not_configured`), а в профиле лежат только анонимные куки без `_xsrf` —
+просто нажмите «Войти» ещё раз и дождитесь самозакрытия окна.
+`hh auth status` при этом может оставаться `invalid_access_token`:
+автопилот работает по web-кукам, OAuth-токен для этого не требуется.
+
 Импорт Playwright-compatible JSON cookies:
 
 ```powershell
