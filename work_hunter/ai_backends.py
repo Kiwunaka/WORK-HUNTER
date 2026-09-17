@@ -79,8 +79,12 @@ def _direct_completion(messages: list[dict[str, Any]], ai_config: dict[str, Any]
         "model": model,
         "messages": messages,
         "temperature": ai_config.get("temperature", 0.7),
-        "max_tokens": ai_config.get("max_tokens", 1500),
     }
+    # Если лимит не задан явно — не отправляем его: reasoning-модели должны
+    # уметь думать столько, сколько нужно, и не обрезать ответ из-за cap.
+    max_tokens = ai_config.get("max_tokens")
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if ai_config.get("reasoning") is not None:
         payload["reasoning"] = ai_config["reasoning"]
     allowed_providers = (ai_config.get("model_providers") or {}).get(model)

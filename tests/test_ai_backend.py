@@ -42,6 +42,39 @@ def test_direct_backend_uses_openai_compatible_request(monkeypatch):
     assert calls[0]["headers"]["Authorization"] == "Bearer key"
 
 
+def test_direct_backend_omits_max_tokens_when_not_configured(monkeypatch):
+    calls = []
+
+    def fake_post(url, *, headers, json, timeout):
+        calls.append(json)
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        return Response()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    base = {
+        "backend": "direct",
+        "api_key": "key",
+        "base_url": "https://llm.example/v1/chat/completions",
+        "model": "provider/model",
+    }
+
+    chat_completion([{"role": "user", "content": "hi"}], base)
+    assert "max_tokens" not in calls[0]
+
+    chat_completion([{"role": "user", "content": "hi"}], {**base, "max_tokens": None})
+    assert "max_tokens" not in calls[1]
+
+    chat_completion([{"role": "user", "content": "hi"}], {**base, "max_tokens": 2048})
+    assert calls[2]["max_tokens"] == 2048
+
+
 def test_direct_backend_rejects_saved_secret_mask_before_request(monkeypatch):
     def unexpected_post(*args, **kwargs):
         pytest.fail("a masked credential must not be sent to the provider")
