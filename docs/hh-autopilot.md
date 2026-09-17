@@ -169,8 +169,8 @@ Default search — `20 x 100`, но distinct cap остаётся `2000`. Pagina
 
 | Путь | Default | Допустимые значения |
 |---|---|---|
-| `filters.excluded_keywords` | `[]` | 0..1000 строк 1..200, case-insensitive |
-| `filters.required_keywords` | `[]` | 0..1000 строк 1..200 |
+| `filters.excluded_keywords` | `[]` | 0..1000 строк 1..200, case-insensitive; вакансия отклоняется при любом совпадении |
+| `filters.required_keywords` | `[]` | 0..1000 строк 1..200; достаточно совпадения хотя бы одного терма |
 | `filters.allowed_role_families` | `[]` | 0..1000 строк 1..200 |
 | `filters.areas` | `[]` | 0..500 HH numeric ID strings |
 | `filters.remote` | `any` | `any`, `only`, `exclude` |

@@ -664,7 +664,7 @@ def _hh_job_from_vacancy_payload(payload: dict[str, Any]) -> Job:
     else:
         salary_text = ""
     snippet = payload.get("snippet") or {}
-    description = " ".join(
+    description = str(payload.get("description") or "").strip() or " ".join(
         str(part or "")
         for part in (snippet.get("requirement"), snippet.get("responsibility"))
         if part
@@ -1318,12 +1318,22 @@ class _ConfiguredHHCoverLetters:
             "SELECT id FROM jobs WHERE source = 'hh' AND source_id = ?",
             (context.vacancy_id,),
         ).fetchone()
-        if row is None:
-            raise RuntimeError("HH vacancy is missing from local storage")
-        job_id = int(row["id"])
-        job = storage.get_job(job_id)
+        job = storage.get_job(int(row["id"])) if row is not None else None
         if job is None:
-            raise RuntimeError("HH vacancy could not be loaded for cover letter")
+            # Автопилот нашёл вакансию сам, в jobs её ещё нет: сохраняем,
+            # иначе сопроводительное не рендерится и отклик падает
+            # в internal_error до вызова HH.
+            payload = self._service._hh_client_for_account(
+                context.account_id
+            ).get_vacancy(context.vacancy_id)
+            job_id = storage.upsert_job(_hh_job_from_vacancy_payload(payload))
+            job = storage.get_job(job_id)
+            if job is None:
+                raise RuntimeError(
+                    "HH vacancy could not be persisted for cover letter"
+                )
+        else:
+            job_id = int(row["id"])
         maximum = int(application["cover_letter_max_characters"])
         saved = storage.get_latest_letter(job_id)
         manual_template = (
@@ -1483,6 +1493,47 @@ def _draft_hh_cover_letter_ai(
     return str(body or "").strip()
 
 
+_HH_RESUME_VOLATILE_KEYS = frozenset(
+    {
+        "actions",
+        "age",
+        "blocked",
+        "can_publish_or_update",
+        "download",
+        "download_as_employer",
+        "marked",
+        "new_views",
+        "next_publish_at",
+        "paid_services",
+        "similar_vacancies",
+        "total_experience",
+        "total_views",
+        "updated",
+        "updated_at",
+        "views_url",
+    }
+)
+
+
+def _stable_hh_resume_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    """Стабильная проекция резюме для policy_hash и движка.
+
+    HH отдаёт счётчики просмотров, next_publish_at, actions и прочие
+    меняющиеся поля; из-за них policy hash ежедневно менялся и grant
+    автопилота становился недействительным.
+    """
+    stable = {
+        key: copy.deepcopy(value)
+        for key, value in raw.items()
+        if key not in _HH_RESUME_VOLATILE_KEYS
+    }
+    if not any(stable.get(key) for key in ("content_hash", "version_hash", "version")):
+        stable["content_hash"] = hashlib.sha256(
+            json.dumps(stable, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    return stable
+
+
 def _published_hh_resumes(client: HHApplyClient) -> list[dict[str, Any]]:
     try:
         raw_resumes = client.list_resumes()
@@ -1500,12 +1551,7 @@ def _published_hh_resumes(client: HHApplyClient) -> list[dict[str, Any]]:
             status = status.get("id") or status.get("value")
         if status and str(status).strip().casefold() != "published":
             continue
-        resume = copy.deepcopy(raw)
-        if not any(resume.get(key) for key in ("content_hash", "version_hash", "version")):
-            resume["content_hash"] = hashlib.sha256(
-                json.dumps(resume, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-            ).hexdigest()
-        resumes.append(resume)
+        resumes.append(_stable_hh_resume_payload(raw))
     return resumes
 
 

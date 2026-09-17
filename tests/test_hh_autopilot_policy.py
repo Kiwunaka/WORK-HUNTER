@@ -247,14 +247,18 @@ def test_history_id_sets_are_exact_bounded_facts() -> None:
     assert decision.evidence["vacancy_id"] == "v-1"
 
 
-def test_required_keywords_require_every_term() -> None:
+def test_required_keywords_accept_any_configured_term() -> None:
     case = _base_case()
     case["filters"]["required_keywords"] = ["python", "kubernetes"]
+
+    assert _evaluate(case).passed is True
+
+    case["filters"]["required_keywords"] = ["kubernetes", "terraform"]
 
     decision = _evaluate(case)
 
     assert decision.reason == "hard_filter:required_keywords"
-    assert decision.evidence["missing"] == ("kubernetes",)
+    assert decision.evidence["missing"] == ("kubernetes", "terraform")
 
 
 def test_keywords_use_unicode_casefold_and_collapsed_whitespace() -> None:

@@ -560,15 +560,14 @@ class HardFilter:
                 matched=_safe_terms(matched),
             )
         required = _configured_list(self._filters, "required_keywords")
-        missing = tuple(
-            term
-            for term in required
-            if not _matches_any_fact(term, facts)
-        )
-        if missing:
+        # «Хотя бы одно»: список ролей/навыков из правил поиска — это
+        # альтернативы, а не одновременное требование ко всем сразу.
+        if required and not any(
+            _matches_any_fact(term, facts) for term in required
+        ):
             return _reject(
                 "hard_filter:required_keywords",
-                missing=_safe_terms(missing),
+                missing=_safe_terms(required),
             )
         allowed_roles = _configured_list(
             self._filters,

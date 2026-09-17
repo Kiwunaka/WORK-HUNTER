@@ -41,11 +41,19 @@ AI_SCHEMA = {
             "type": "array",
             "items": {"type": "string", "maxLength": 300},
             "maxItems": 20,
+            "description": (
+                "Exact quotes copied verbatim from the supplied facts "
+                "(no paraphrase, no translation, 2-6 short quotes)"
+            ),
         },
         "reasons": {
             "type": "array",
             "items": {"type": "string", "maxLength": 300},
             "maxItems": 20,
+            "description": (
+                "Exact short quotes copied verbatim from the supplied facts "
+                "(no paraphrase, 1-3 quotes)"
+            ),
         },
     },
     "additionalProperties": False,
@@ -59,7 +67,11 @@ AI_OUTPUT_SCHEMA = StructuredOutputSchema(
 _ABSENT = object()
 _SYSTEM_PROMPT = (
     "Judge job suitability using only supplied facts. "
-    "Do not infer or invent candidate experience."
+    "Do not infer or invent candidate experience. "
+    "Every item in evidence and reasons must be an exact substring copied "
+    "from the supplied facts with the same wording. "
+    "Do not paraphrase, translate or explain; quote facts only. "
+    "If facts are insufficient, set confidence below 0.5."
 )
 _PROMPT_LIMITS = {"light": 12_000, "heavy": 20_000}
 
@@ -276,6 +288,34 @@ def _text_coverage(required: Sequence[str], facts: Sequence[str]) -> float:
     )
 
 
+def _role_segment_ids(source: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """HH resume отдаёт роли как professional_role_segments[].professional_role_id."""
+    if "professional_role_segments" not in source:
+        return None
+    raw = source["professional_role_segments"]
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        raise TypeError("professional_role_segments must be a sequence")
+    if not raw:
+        return None
+    result: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        if isinstance(item, Mapping):
+            if "professional_role_id" not in item:
+                raise TypeError(
+                    f"professional_role_segments[{index}] requires professional_role_id"
+                )
+            item = item["professional_role_id"]
+        parsed = _normalized(
+            item,
+            field=f"professional_role_segments[{index}]",
+        )
+        if parsed not in seen:
+            seen.add(parsed)
+            result.append(parsed)
+    return tuple(result)
+
+
 class DeterministicRanker:
     def score(
         self,
@@ -366,6 +406,8 @@ class DeterministicRanker:
             ("professional_role_ids", "professional_roles", "role_family_ids"),
             field="resume.professional_role_ids",
         )
+        if desired_ids is None:
+            desired_ids = _role_segment_ids(resume)
         if desired_ids is None:
             desired_ids = _string_set(
                 candidate,

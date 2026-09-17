@@ -211,7 +211,7 @@ class HHAutopilot:
             error = "lease_lost"
         except Exception as exc:
             status = "failed"
-            error = type(exc).__name__
+            error = f"{type(exc).__name__}: {exc}"[:500]
         finally:
             if lease_keeper is not None:
                 provider.lease_keeper = previous_keeper
@@ -614,6 +614,20 @@ class HHAutopilot:
         *,
         shadow,
     ) -> tuple[RankedCandidate | None, bool]:
+        if not shadow:
+            # Сначала занимаем item: терминальные (skipped/dead/applied)
+            # не переоцениваем. AI-ранжирование дорогое, а после смены
+            # правил поиска сюда попадают сотни уже отклонённых вакансий.
+            lease = self._touch_lease(lease)
+            item = self.repository.create_item(
+                run.id,
+                run.account_id,
+                vacancy.id,
+                mapping.resume_id,
+                mapping.query_key,
+            )
+            if item.state is not AutopilotState.DISCOVERED:
+                return None, False
         filter_decision = self.hard_filter.evaluate(
             vacancy,
             mapping.resume,
@@ -636,6 +650,7 @@ class HHAutopilot:
                 mapping.resume,
                 context.candidate_profile,
             )
+        lease = self._touch_lease(lease)
         if shadow:
             self.repository.save_shadow_result(
                 run.id,
@@ -650,15 +665,6 @@ class HHAutopilot:
             )
             return None, False
 
-        item = self.repository.create_item(
-            run.id,
-            run.account_id,
-            vacancy.id,
-            mapping.resume_id,
-            mapping.query_key,
-        )
-        if item.state is not AutopilotState.DISCOVERED:
-            return None, False
         item = self.repository.record_filter_decision(
             item.id,
             expected_version=item.version,
@@ -715,6 +721,7 @@ class HHAutopilot:
 
     def _finalize_ranked(self, ranked, blocked, context, run, lease) -> None:
         resume_policy = str(context.settings.application["resume_policy"])
+        lease = self._touch_lease(lease)
         for vacancy_id in sorted(ranked):
             candidates = ranked[vacancy_id]
             if vacancy_id in blocked or not candidates:
@@ -743,6 +750,15 @@ class HHAutopilot:
             )
 
     def _dispatch(self, request, context, run, lease, authorization, counters) -> str:
+        if hasattr(self.repository, "adopt_ready_items"):
+            # ready-элементы прерванного прогона принадлежат старому run;
+            # prepare_dispatch их отвергнет, пока не передадим текущему.
+            self.repository.adopt_ready_items(
+                run.account_id,
+                run_id=run.id,
+                fencing_token=lease.fencing_token,
+                limit=context.settings.limits.per_run_success,
+            )
         ready = self.repository.ready_items(
             run.account_id,
             limit=context.settings.limits.per_run_success,
@@ -770,6 +786,7 @@ class HHAutopilot:
                     return "interrupted"
             try:
                 mapping = next(value for value in context.mappings if value.resume_id.strip().casefold() == item.resume_id)
+                lease = self._touch_lease(lease)
                 self.repository.save_dispatch_resume_snapshot(
                     item.id, resume={**mapping.resume, "id": mapping.resume_id}, candidate=context.candidate_profile,
                     expected_version=item.version, fencing_token=lease.fencing_token,
@@ -807,10 +824,22 @@ class HHAutopilot:
         if self.repository.run_stop_requested(run.id):
             return True
         if isinstance(authorization, LiveAuthorization):
-            return self.repository.pause_active(run.account_id) or self.repository.kill_switch_active(
+            return self.repository.pause_active(
                 run.account_id
-            )
+            ) or self.repository.kill_switch_active(run.account_id)
         return False
+
+    def _touch_lease(self, lease):
+        """Продлить lease перед записью после долгих операций.
+
+        AI-ранжирование одной вакансии занимает десятки секунд, а TTL lease
+        по умолчанию 120с. Без явного продления первая же запись после
+        такой паузы падает с LostLease и live-прогон обрывается.
+        """
+        keeper = getattr(self.search_provider, "lease_keeper", None)
+        if keeper is None:
+            return lease
+        return keeper.ensure_current()
 
     def _now(self) -> datetime:
         value = self.clock()

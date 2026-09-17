@@ -507,6 +507,104 @@ def test_transition_updates_item_and_event_in_one_commit(repo) -> None:
     assert "secret" not in repo.list_events(item.id)[-1]["metadata_json"]
 
 
+def test_discovered_item_from_interrupted_run_is_reclaimed(repo) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    lease = repo.acquire_lease("default", "claim-owner", ttl_seconds=300, now=now)
+    assert lease is not None
+    first = repo.create_run(
+        "default",
+        trigger="schedule",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+    item = repo.create_item(first.id, "default", "v-1", "r-1", "preset")
+    repo.finish_run(
+        first.id,
+        status="interrupted",
+        counters={},
+        error="lease_lost",
+        fencing_token=lease.fencing_token,
+    )
+    second = repo.create_run(
+        "default",
+        trigger="schedule",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+
+    claimed = repo.create_item(second.id, "default", "v-1", "r-1", "preset")
+
+    assert claimed.id == item.id
+    assert claimed.origin_run_id == first.id
+    assert claimed.last_run_id == second.id
+    decided = repo.record_filter_decision(
+        claimed.id,
+        expected_version=claimed.version,
+        decision=_filter_decision(),
+        run_id=second.id,
+        fencing_token=lease.fencing_token,
+    )
+    assert decided.state is AutopilotState.ELIGIBLE
+
+
+def test_adopt_ready_items_claims_orphans_for_current_run(repo) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    lease = repo.acquire_lease("default", "adopt-owner", ttl_seconds=300, now=now)
+    assert lease is not None
+    first = repo.create_run(
+        "default",
+        trigger="schedule",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+    item = repo.create_item(first.id, "default", "v-1", "r-1", "preset")
+    eligible = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=first.id,
+        fencing_token=lease.fencing_token,
+    )
+    ranked = repo.record_ranking_decision(
+        eligible.id,
+        expected_version=eligible.version,
+        decision=_ranking_decision(),
+        run_id=first.id,
+        fencing_token=lease.fencing_token,
+    )
+    repo.finalize_ranked_candidates(
+        {ranked.id: ranked.version},
+        selected_item_ids=[ranked.id],
+        resume_policy="best_resume_only",
+        run_id=first.id,
+        fencing_token=lease.fencing_token,
+    )
+    repo.finish_run(
+        first.id,
+        status="interrupted",
+        counters={},
+        error="lease_lost",
+        fencing_token=None,
+    )
+    second = repo.create_run(
+        "default",
+        trigger="schedule",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+
+    adopted = repo.adopt_ready_items(
+        "default",
+        run_id=second.id,
+        fencing_token=lease.fencing_token,
+        limit=10,
+    )
+
+    assert [value.id for value in adopted] == [item.id]
+    assert repo.get_item(item.id).last_run_id == second.id
+    assert repo.get_item(item.id).state is AutopilotState.READY
+
+
 def test_eligibility_retry_persists_backoff_and_exhaustion(repo) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     lease = repo.acquire_lease("default", "retry-owner", ttl_seconds=300, now=now)

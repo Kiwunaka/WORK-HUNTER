@@ -1338,7 +1338,30 @@ class AutopilotRepository:
         ).fetchone()
         if row is None:
             raise StaleWrite("item idempotency collision could not be resolved")
-        return self._item_from_row(row)
+        item = self._item_from_row(row)
+        if item.state is AutopilotState.DISCOVERED and item.last_run_id != origin_run_id:
+            # Прерванный или прошлый run оставил item в discovered.
+            # Передаём его текущему run, иначе record_filter_decision
+            # упадёт с «requires the same run as the item».
+            self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET last_run_id = ?, updated_at = ?
+                WHERE id = ? AND state = ? AND version = ?
+                """,
+                (
+                    origin_run_id,
+                    now,
+                    item.id,
+                    AutopilotState.DISCOVERED.value,
+                    item.version,
+                ),
+            )
+            claimed = self._item_for_update(item.id)
+            if claimed.last_run_id != origin_run_id:
+                raise StaleWrite("item could not be claimed by the current run")
+            return claimed
+        return item
 
     def get_item(self, item_id: int) -> ItemRecord | None:
         item_id = _integer(item_id, field="item_id", minimum=1)
@@ -3092,6 +3115,55 @@ class AutopilotRepository:
         items = [self._item_from_row(row) for row in rows]
         items.sort(key=_ranked_item_sort_key)
         return items[:limit]
+
+    def adopt_ready_items(
+        self,
+        account_id: str,
+        *,
+        run_id: int,
+        fencing_token: int,
+        limit: int,
+    ) -> list[ItemRecord]:
+        """Перевести orphaned ready items прошлых прогонов в текущий run.
+
+        prepare_dispatch требует last_run_id == активного run, поэтому ready,
+        оставшиеся после прерванного прогона, иначе не отправить никогда.
+        """
+        account_id = _canonical_identifier(account_id, field="account_id")
+        run_id = _integer(run_id, field="run_id", minimum=1)
+        fencing_token = _integer(fencing_token, field="fencing_token", minimum=1)
+        limit = _integer(limit, field="limit", minimum=1)
+        instant = _instant(None, field="now")
+        with self.immediate():
+            self._assert_fence(account_id, fencing_token, instant)
+            run = self._run_for_update(run_id)
+            if (
+                run.account_id != account_id
+                or run.status != "running"
+                or run.fencing_token != fencing_token
+            ):
+                raise RepositoryAuthorizationDenied("run_not_active")
+            rows = self.conn.execute(
+                """
+                SELECT id FROM hh_autopilot_items
+                WHERE account_profile_id = ? AND state = 'ready' AND last_run_id != ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (account_id, run_id, limit),
+            ).fetchall()
+            ids = [int(row["id"]) for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                self.conn.execute(
+                    f"""
+                    UPDATE hh_autopilot_items
+                    SET last_run_id = ?, updated_at = ?
+                    WHERE id IN ({placeholders}) AND state = 'ready'
+                    """,
+                    (run_id, _utc_now(), *ids),
+                )
+        return self.ready_items(account_id, limit=limit)
 
     def activate_due_retry(
         self,
