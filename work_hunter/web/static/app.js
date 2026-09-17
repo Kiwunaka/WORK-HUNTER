@@ -1250,12 +1250,52 @@ async function runHhAutopilotMutation(action, extra = {}, trigger = null, confir
   if (trigger) trigger.disabled = true;
   try {
     const result = await api(`/api/hh/autopilot/${action}`, { method: "POST", body: JSON.stringify(payload) });
-    notify("success", "hh-autopilot", action, `HH Autopilot: ${action}`);
+    notifyAutopilotResult(action, result);
     await loadHhAutopilot();
     return result;
   } finally {
     if (trigger) trigger.disabled = false;
   }
+}
+
+function notifyAutopilotResult(action, result) {
+  if (action === "enable") {
+    notify("success", "hh-autopilot", action, "Автопилот включён", "Правила и лимиты зафиксированы, можно запускать отклики.");
+    return;
+  }
+  if (action !== "run-now" || !Array.isArray(result?.runs) || !result.runs.length) {
+    notify("success", "hh-autopilot", action, `HH Autopilot: ${action}`);
+    return;
+  }
+  const run = result.runs[0] || {};
+  const applied = Number(run.applied || 0);
+  const retry = Number(run.retry_wait || 0);
+  const manual = Number(run.manual || 0);
+  const skipped = Number(run.skipped || 0);
+  const parts = [`Отправлено: ${applied}`];
+  if (retry) parts.push(`повтор: ${retry}`);
+  if (manual) parts.push(`вручную: ${manual}`);
+  if (skipped) parts.push(`пропущено: ${skipped}`);
+  const summary = parts.join(" · ");
+  if (run.status === "busy") {
+    notify("warning", "hh-autopilot", action, "Прогон уже идёт", "Дождитесь завершения текущего прогона.");
+    return;
+  }
+  if (run.status === "failed") {
+    notify("error", "hh-autopilot", action, "Прогон не удался", String(run.error || "Неизвестная ошибка"));
+    return;
+  }
+  if (run.status === "interrupted") {
+    notify("warning", "hh-autopilot", action, "Прогон остановлен", summary);
+    return;
+  }
+  notify(
+    "success",
+    "hh-autopilot",
+    action,
+    applied > 0 ? `Отклики отправлены: ${applied}` : "Прогон завершён, новых откликов нет",
+    summary,
+  );
 }
 
 function confirmHhAutopilotMutation(action, title, extra, trigger) {
@@ -1681,6 +1721,9 @@ async function loadToday() {
     }),
     { navigate: navigateFromToday },
   );
+  // Today пересчитывает readiness уже после init: пересобираем подпись
+  // кнопки, иначе она остаётся «Завершить настройку» при готовом профиле.
+  setWorkMode(state.workMode);
   window.queueMicrotask(() => scheduleGuidance("today"));
 }
 

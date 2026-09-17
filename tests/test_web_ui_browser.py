@@ -2185,6 +2185,24 @@ def test_today_record_actions_keep_record_ids_in_canonical_urls(
     expect(page).to_have_url(base_url + expected_url)
 
 
+def test_today_start_button_switches_to_run_label_when_ready(browser_app):
+    page, base_url, app = browser_app
+    active = app.active_profile_id()
+    app.config["profiles"][active]["queries"] = ["python"]
+    app.config["sources"]["hh"]["enabled"] = True
+    app.save_config(app.config)
+    app.storage.save_resume(
+        Resume(name="Ready CV", body="Python", profile_id=active, is_active=True)
+    )
+
+    page.goto(base_url + "/today?__today=1", wait_until="networkidle")
+
+    expect(page.locator("#work-mode-hero")).to_have_attribute("data-readiness", "ready")
+    expect(page.locator("#work-mode-start")).to_have_text("Запустить автоотклики")
+    page.locator("[data-work-mode='search']").first.dispatch_event("click")
+    expect(page.locator("#work-mode-start")).to_have_text("Найти вакансии")
+
+
 def test_vacancy_workspace_exposes_stable_capability_action_ids(browser_app):
     page, base_url, _ = browser_app
     page.goto(base_url + "/jobs", wait_until="networkidle")
