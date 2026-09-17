@@ -16,6 +16,10 @@
 
 - Три отклика отправлены (Ozon, Лента, ProfiStaff): сопроводительные сохранены, HH ответил `success`, в `hh_negotiations` появились записи `response`.
 
+### Запуск
+
+- `start-work-hunter.bat` берёт host/port из конфига, ждёт готовности сервера и только потом открывает браузер; `.gitattributes` фиксирует CRLF для `.bat`, иначе cmd ломает разбор файла.
+
 ## Unreleased - 2026-07-13
 
 ### HH native challenge resolution
