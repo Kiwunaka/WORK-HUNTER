@@ -9,7 +9,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+args = sys.argv[1:]
+flags = {value for value in args if value.startswith("--")}
+root_args = [value for value in args if not value.startswith("--")]
+ROOT = Path(root_args[0] if root_args else ".").resolve()
 
 sys.path.insert(0, str(ROOT))
 
@@ -24,6 +27,14 @@ def main() -> int:
         port = int(ui.get("port") or 8787)
     except Exception:
         host, port = "127.0.0.1", 8787
+    if "--running" in flags:
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(f"http://{host}:{port}", timeout=1):
+                return 0
+        except Exception:
+            return 1
     print(f"{host} {port}")
     return 0
 

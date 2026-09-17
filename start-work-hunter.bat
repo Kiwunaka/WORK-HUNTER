@@ -23,6 +23,13 @@ for /f "tokens=1,2" %%a in ("%UI_ENDPOINT%") do (
 if not defined UI_HOST set "UI_HOST=127.0.0.1"
 if not defined UI_PORT set "UI_PORT=8787"
 
+"%PY%" "%~dp0scripts\ui-endpoint.py" --running
+if %ERRORLEVEL% EQU 0 (
+  echo [Work Hunter] UI уже запущена: http://%UI_HOST%:%UI_PORT%
+  start "" /b "%PY%" "%~dp0scripts\open-when-ready.py" "http://%UI_HOST%:%UI_PORT%" 5
+  exit /b 0
+)
+
 echo [Work Hunter] Проверка окружения...
 call "%PY%" -m work_hunter --root . doctor
 echo.
