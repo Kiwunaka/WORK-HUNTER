@@ -852,7 +852,41 @@ function renderHhAutopilotStatus(payload) {
 
 function hhIsConnected() {
   const status = state.hhWebStatus || {};
-  return status.authorized === true || status.can_search_url === true || status.can_chatik === true;
+  return status.authorized === true || status.apiStatus === "ok" || status.can_search_url === true || status.can_chatik === true;
+}
+
+async function hhAutopilotAuthEvidence(fingerprint) {
+  try {
+    const status = await api("/api/hh/auth/status");
+    const authorized = status.authorized === true || status.status === "ok";
+    if (!authorized) {
+      return {
+        status: "auth_required",
+        fingerprint,
+        auth: {
+          status: "expired",
+          safeMessage: "HH API не авторизован. Получи токен в блоке «API-токен HH» и повтори запуск.",
+        },
+        capability: { available: true, code: "ok" },
+        blockers: [],
+        canExecute: false,
+      };
+    }
+    return {
+      status: "executable",
+      fingerprint,
+      auth: { status: "ready" },
+      capability: { available: true, code: "ok" },
+      blockers: [],
+      canExecute: true,
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      safeMessage: `Не удалось проверить авторизацию HH: ${error?.message || error}`,
+      canExecute: false,
+    };
+  }
 }
 
 function selectedHumanAutopilotStatus() {
@@ -872,6 +906,7 @@ function renderHumanAutopilotStatus() {
   const readyNote = $("#hh-human-ready-note");
   const startButton = $("#hh-human-start");
   const sourceState = $("#source-hh-state");
+  const apiOk = state.hhWebStatus?.authorized === true;
   if (authState) {
     authState.textContent = connected ? "Подключено" : "Нужно войти";
     authState.classList.toggle("warning", !connected);
@@ -881,11 +916,22 @@ function renderHumanAutopilotStatus() {
     sourceState.classList.toggle("warning", !connected);
   }
   if (authNote) {
-    authNote.textContent = connected
-      ? "Аккаунт готов. Можно выбрать резюме и запускать поиск."
-      : "Пароль вводится в отдельном окне HH и не сохраняется в Work Hunter.";
+    const me = state.hhWebStatus?.apiMe || {};
+    const meName = [me.last_name, me.first_name].filter(Boolean).join(" ");
+    const meLabel = meName || me.email || "";
+    authNote.textContent = apiOk
+      ? (meLabel ? `API подключён: ${meLabel}. Можно запускать поиск и отклики.` : "API подключён. Можно запускать поиск и отклики.")
+      : connected
+        ? "Web-вход есть. Для поиска и откликов через API получи токен ниже."
+        : "Пароль вводится в отдельном окне HH и не сохраняется в Work Hunter.";
   }
   if (!readyTitle || !readyNote || !startButton) return;
+  if (apiOk) {
+    readyTitle.textContent = "Всё ок, работаем";
+    readyNote.textContent = "API подключён: поиск, резюме и отклики идут через токен.";
+    startButton.textContent = controls.enabled ? "Запустить сейчас" : "Запустить автоотклики";
+    return;
+  }
   if (!connected) {
     readyTitle.textContent = "Сначала войдите в HH";
     readyNote.textContent = "После входа проверим резюме, правила и доступный лимит.";
@@ -915,12 +961,114 @@ async function loadHhConnectionStatus() {
       api("/api/hh/auth/status"),
       api("/api/hh/web/status"),
     ]);
-    state.hhWebStatus = { ...web, authorized: auth.authorized === true, apiStatus: auth.status };
+    const apiOk = auth.authorized === true || auth.status === "ok";
+    state.hhWebStatus = { ...web, authorized: apiOk, apiStatus: auth.status, apiMe: auth.me || null };
   } catch (_error) {
     state.hhWebStatus = { authorized: false };
   }
   renderHumanAutopilotStatus();
+  renderHhTokenStatus();
   return state.hhWebStatus;
+}
+
+function renderHhTokenStatus() {
+  const line = $("#hh-token-status");
+  if (!line) return;
+  const apiStatus = state.hhWebStatus?.apiStatus || "";
+  if (state.hhWebStatus?.authorized === true) {
+    line.textContent = "Статус токена: API подключён, поиск и отклики через API работают.";
+  } else if (apiStatus === "missing_access_token") {
+    line.textContent = "Статус токена: токена нет. Получи ссылку ниже и обменяй код — всё внутри этой страницы.";
+  } else {
+    line.textContent = `Статус токена: ${apiStatus || "не проверен"}. Поиск вакансий идёт через web, отклики через API пока закрыты.`;
+  }
+}
+
+function hhTokenAccount() {
+  return $("#hh-human-account")?.value || "default";
+}
+
+async function startHhOauth() {
+  const line = $("#hh-oauth-url-line");
+  const link = $("#hh-oauth-url");
+  try {
+    const result = await api("/api/hh/auth/oauth-start", {
+      method: "POST",
+      body: JSON.stringify({ account: hhTokenAccount() }),
+    });
+    if (result.status === "ok" && result.authorize_url) {
+      if (link) {
+        link.href = result.authorize_url;
+        link.textContent = "Открыть вход HH";
+      }
+      if (line) line.hidden = false;
+      window.open(result.authorize_url, "_blank", "noopener,noreferrer");
+      notify("success", "hh-oauth", "started", "Ссылка входа открыта", "Войди, введи SMS-код. Когда браузер покажет ошибку про hhandroid:// — скопируй адрес из адресной строки и вставь ниже.");
+    } else {
+      notifyError("hh-oauth", new Error(result.message || "OAuth недоступен"), "Не удалось получить ссылку входа");
+    }
+  } catch (error) {
+    notifyError("hh-oauth", error, "Не удалось получить ссылку входа");
+  }
+}
+
+async function finishHhOauth() {
+  const input = $("#hh-oauth-redirect-input");
+  const raw = input?.value.trim() || "";
+  if (!raw) {
+    notify("warning", "hh-oauth", "empty", "Вставь адрес или код", "Скопируй адрес вида hhandroid://…?code=… после входа.");
+    return;
+  }
+  const looksLikeUrl = raw.includes("://") || raw.includes("code=");
+  const body = looksLikeUrl
+    ? { account: hhTokenAccount(), redirect_url: raw }
+    : { account: hhTokenAccount(), code: raw };
+  try {
+    const result = await api("/api/hh/auth/oauth-callback", { method: "POST", body: JSON.stringify(body) });
+    if (result.status !== "ok") {
+      notifyError("hh-oauth", new Error(result.message || result.code || "OAuth отклонён"), "Не удалось обменять код на токен");
+      return;
+    }
+    if (input) input.value = "";
+    for (const id of ["#hh-token-access-input", "#hh-token-refresh-input", "#hh-token-client-secret-input"]) {
+      const field = $(id);
+      if (field) field.value = "";
+    }
+    const who = result.whoami || {};
+    const name = [who.last_name, who.first_name].filter(Boolean).join(" ") || who.email || "";
+    notify("success", "hh-oauth", "saved", name ? `Всё ок, работаем: ${name}` : "Всё ок, работаем", "API подключён: поиск, резюме и отклики через токен.");
+    await loadHhConnectionStatus();
+    await loadHhAutopilot().catch(() => {});
+  } catch (error) {
+    notifyError("hh-oauth", error, "Не удалось обменять код на токен");
+  }
+}
+
+async function saveHhTokenManually() {
+  const access = $("#hh-token-access-input")?.value.trim() || "";
+  if (!access) {
+    notify("warning", "hh-token", "empty", "Вставь access_token", "Без него сохранить нечего.");
+    return;
+  }
+  const body = {
+    account: hhTokenAccount(),
+    access_token: access,
+    refresh_token: $("#hh-token-refresh-input")?.value.trim() || "",
+    client_id: $("#hh-token-client-id-input")?.value.trim() || "",
+    client_secret: $("#hh-token-client-secret-input")?.value.trim() || "",
+  };
+  try {
+    await api("/api/hh/auth/import-token", { method: "POST", body: JSON.stringify(body) });
+    for (const id of ["#hh-token-access-input", "#hh-token-refresh-input", "#hh-token-client-id-input", "#hh-token-client-secret-input"]) {
+      const field = $(id);
+      if (field) field.value = "";
+    }
+    notify("success", "hh-token", "saved", "Токен сохранён", "Проверяем подключение…");
+    await loadHhConnectionStatus();
+    await loadHhAutopilot().catch(() => {});
+  } catch (error) {
+    notifyError("hh-token", error, "Не удалось сохранить токен");
+  }
 }
 
 function appendAutopilotRow(target, title, detail, actions = []) {
@@ -1095,7 +1243,8 @@ async function saveHhAutopilotConfig() {
 }
 
 async function runHhAutopilotMutation(action, extra = {}, trigger = null, confirmed = false) {
-  const scope = extra.account ? {} : hhAutopilotScope(action);
+  const account = $("#hh-human-account")?.value || $("#hh-autopilot-account")?.value || "";
+  const scope = extra.account || (account && !account.startsWith("__") ? { account } : hhAutopilotScope(action));
   const payload = { ...scope, ...extra };
   if (confirmed) payload.confirm = true;
   if (trigger) trigger.disabled = true;
@@ -1132,7 +1281,14 @@ function confirmHhAutopilotMutation(action, title, extra, trigger) {
     confirmLabel: "Подтвердить",
     fingerprint,
     trigger,
-    revalidate: async () => ({ status: "executable", fingerprint, canExecute: true }),
+    revalidate: async () => ({
+      status: "executable",
+      fingerprint,
+      auth: { status: "ready" },
+      capability: { available: true, code: "ok" },
+      blockers: [],
+      canExecute: true,
+    }),
     execute: async (confirm) => runHhAutopilotMutation(action, extra, trigger, confirm === true),
   };
   openLiveAction(descriptor);
@@ -1233,10 +1389,9 @@ function setWorkMode(mode) {
   }
 }
 
-function confirmHumanAutopilotStart(trigger, reauthorize = false) {
+function confirmHumanAutopilotStart(trigger) {
   const account = $("#hh-human-account")?.value || "default";
   selectHumanAccount(account);
-  const status = selectedHumanAutopilotStatus();
   const config = state.hhAutopilot.config || {};
   const daily = getAutopilotValue(config, "limits.daily_success") || "по настройкам";
   const fingerprint = stableActionFingerprint({ action: "enable-and-run", account, daily });
@@ -1253,9 +1408,9 @@ function confirmHumanAutopilotStart(trigger, reauthorize = false) {
     confirmLabel: "Запустить",
     fingerprint,
     trigger,
-    revalidate: async () => ({ status: "executable", fingerprint, canExecute: true }),
+    revalidate: async () => hhAutopilotAuthEvidence(fingerprint),
     execute: async () => {
-      if (!status.controls?.enabled || reauthorize) await runHhAutopilotMutation("enable", {}, trigger, true);
+      await runHhAutopilotMutation("enable", {}, trigger, true);
       return runHhAutopilotMutation("run-now", {}, trigger);
     },
   });
@@ -1269,11 +1424,6 @@ async function handleHumanAutopilotStart(eventOrTrigger) {
     await startHhLogin({ account, trigger });
     return;
   }
-  const readiness = await loadLaunchReadiness();
-  if (readiness.status !== "local_ready") {
-    notify("warning", "hh-autopilot", "not-ready", "Завершите подготовку", "Проверьте список перед запуском ниже.");
-    return;
-  }
   const selectedResume = $("#hh-human-resume")?.value;
   if (!selectedResume) {
     notify("warning", "hh-autopilot", "resume-required", "Выберите версию резюме с привязкой к HH");
@@ -1283,10 +1433,9 @@ async function handleHumanAutopilotStart(eventOrTrigger) {
     method: "POST", body: JSON.stringify({ account }),
   });
   await loadHhAutopilot();
-  if (selected.reauthorization_required) {
-    confirmHumanAutopilotStart(trigger, true);
-    return;
-  }
+  // use-for-hh уже записал resume_queries в конфиг; отдельного
+  // «переподтверждения» не нужно — enable выдаст свежий grant под
+  // актуальный policy_hash. Красная строка про повторную авторизацию убрана.
   const status = selectedHumanAutopilotStatus();
   if (status.controls?.paused) {
     await runHhAutopilotMutation("resume", {}, trigger);
@@ -2370,6 +2519,22 @@ function updateSearchRulePreview() {
   if ($("#search-preview-salary")) $("#search-preview-salary").textContent = salary > 0 ? `От ${salary.toLocaleString("ru-RU")} ₽` : "Без минимума";
   if ($("#search-preview-score")) $("#search-preview-score").textContent = `Score от ${score}`;
   if ($("#search-preview-limit")) $("#search-preview-limit").textContent = limit > 0 ? `До ${limit} откликов в день` : "По лимиту площадки";
+}
+
+async function copyProfileToSearchRules() {
+  const d = state.profile?.data || {};
+  const fromProfile = (value) => (Array.isArray(value) ? value : []).join(", ");
+  if ($("#search-rule-query")) {
+    $("#search-rule-query").value = fromProfile(d.queries || d.desired_roles);
+  }
+  if ($("#search-rule-keywords")) {
+    $("#search-rule-keywords").value = fromProfile(d.must_have_skills);
+  }
+  if ($("#search-rule-excluded")) {
+    $("#search-rule-excluded").value = fromProfile(d.stop_words);
+  }
+  updateSearchRulePreview();
+  $("#summary-line").textContent = `Правила заполнены из профиля ${state.profile?.active || ""}. Нажми «Сохранить правила».`;
 }
 
 async function saveHumanSearchRules() {
@@ -3611,6 +3776,7 @@ function bindEnhancedSettingsInteractions() {
     $(selector)?.addEventListener("change", updateSearchRulePreview);
   }
   $("#search-rules-save")?.addEventListener("click", () => saveHumanSearchRules().catch((error) => notifyError("search-rules", error, "Не удалось сохранить правила")));
+  $("#search-rules-from-profile")?.addEventListener("click", () => copyProfileToSearchRules());
   $("#search-rules-reset")?.addEventListener("click", () => {
     const defaults = { "#search-rule-query": "", "#search-rule-keywords": "", "#search-rule-excluded": "", "#search-rule-remote": "any", "#search-rule-salary": "0", "#search-rule-score": "60", "#search-rule-start": "08:00", "#search-rule-end": "21:00", "#search-rule-interval": "60", "#search-rule-limit": "50" };
     for (const [selector, value] of Object.entries(defaults)) if ($(selector)) $(selector).value = value;
@@ -3721,7 +3887,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#hh-human-account")?.addEventListener("change", (event) => {
     selectHumanAccount(event.currentTarget.value);
     loadHhAutopilotData().catch((error) => notifyError("hh-autopilot-load", error));
+    loadHhConnectionStatus().catch(() => {});
   });
+  $("#hh-oauth-start-button")?.addEventListener("click", () => startHhOauth().catch((error) => notifyError("hh-oauth", error)));
+  $("#hh-oauth-finish-button")?.addEventListener("click", () => finishHhOauth().catch((error) => notifyError("hh-oauth", error)));
+  $("#hh-token-save-button")?.addEventListener("click", () => saveHhTokenManually().catch((error) => notifyError("hh-token", error)));
   $("#hh-login-button")?.addEventListener("click", (event) => startHhLogin({
     account: $("#hh-human-account")?.value || "default",
     trigger: event.currentTarget,

@@ -1645,6 +1645,130 @@ def test_hh_lab_live_action_cancel_and_literal_confirmation(browser_app):
     assert mutations[0]["body"] == {"token": "secret-value", "publish": True}
 
 
+def test_hh_autopilot_start_revalidates_api_auth_and_executes(browser_app):
+    page, base_url, app = browser_app
+    app.storage.save_resume(
+        Resume(
+            name="HH CV",
+            body="BI analyst",
+            profile_id="default",
+            is_active=True,
+            hh_resume_id="dca3a78bff0f2bc6bf0039ed1f6544506a7a48",
+        )
+    )
+    mutations: list[dict[str, object]] = []
+
+    def handle(route):
+        request = route.request
+        url = request.url
+        if "/api/hh/auth/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {"status": "ok", "authorized": True, "account": "default"}
+                ),
+            )
+            return
+        if "/api/hh/web/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "ok",
+                        "authorized": True,
+                        "can_search_url": True,
+                        "can_chatik": True,
+                    }
+                ),
+            )
+            return
+        if request.method == "POST":
+            mutations.append({"url": url, "body": request.post_data_json})
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"ok","runs":[]}',
+            )
+            return
+        route.continue_()
+
+    page.route("**/api/**", handle)
+    page.goto(base_url + "/settings?section=hh", wait_until="domcontentloaded")
+    expect(page.locator("#hh-human-auth-note")).to_contain_text("API подключён")
+
+    page.locator("#hh-human-start").click()
+    expect(page.locator("[data-live-action]")).to_be_visible()
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-action]")).to_have_count(0)
+
+    assert any("/use-for-hh" in item["url"] for item in mutations)
+    assert [item["url"].rsplit("/", 1)[-1] for item in mutations[-2:]] == [
+        "enable",
+        "run-now",
+    ]
+    assert mutations[-2]["body"] == {"account": "default", "confirm": True}
+    assert mutations[-1]["body"] == {"account": "default"}
+
+
+def test_hh_autopilot_start_blocks_when_api_auth_is_missing(browser_app):
+    page, base_url, app = browser_app
+    app.storage.save_resume(
+        Resume(
+            name="HH CV",
+            body="BI analyst",
+            profile_id="default",
+            is_active=True,
+            hh_resume_id="dca3a78bff0f2bc6bf0039ed1f6544506a7a48",
+        )
+    )
+    mutations: list[str] = []
+
+    def handle(route):
+        request = route.request
+        url = request.url
+        if "/api/hh/auth/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"status": "missing_access_token", "authorized": False}),
+            )
+            return
+        if "/api/hh/web/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"status": "ok", "authorized": False, "can_search_url": True}),
+            )
+            return
+        if request.method == "POST":
+            mutations.append(url)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"ok","runs":[]}',
+            )
+            return
+        route.continue_()
+
+    page.route("**/api/**", handle)
+    page.goto(base_url + "/settings?section=hh", wait_until="domcontentloaded")
+    expect(page.locator("#hh-human-auth-note")).to_contain_text("Web-вход есть")
+
+    page.locator("#hh-human-start").click()
+    expect(page.locator("[data-live-action]")).to_be_visible()
+    page.locator("[data-live-ack]").check()
+    page.locator("[data-live-confirm]").click()
+    expect(page.locator("[data-live-status]")).to_contain_text("API не авторизован")
+    expect(page.locator("[data-live-action]")).to_have_count(1)
+    assert not any(
+        url.endswith("/api/hh/autopilot/enable") or url.endswith("/api/hh/autopilot/run-now")
+        for url in mutations
+    )
+
+
 def test_genuine_new_install_starts_onboarding_at_goal(browser_app):
     page, base_url, _ = browser_app
     page.goto(base_url + "/today?__first_run=1", wait_until="networkidle")

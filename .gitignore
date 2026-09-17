@@ -38,7 +38,7 @@ env/
 .superpowers/
 .worktrees/
 .research/
-outputs/audit-*/
+outputs/
 test-results/
 scratch.py
 

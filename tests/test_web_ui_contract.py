@@ -177,6 +177,89 @@ def test_hh_auth_login_route_reports_already_running(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_hh_auth_token_routes_cover_oauth_and_manual_import(tmp_path, monkeypatch):
+    from work_hunter.hh_transport import oauth as oauth_module
+
+    seen: dict[str, object] = {}
+
+    def fake_exchange(code, credentials, *, user_agent=""):
+        seen["code"] = code
+        return {
+            "access_token": "USER-1",
+            "refresh_token": "REF-1",
+            "access_expires_at": "",
+        }
+
+    monkeypatch.setattr(oauth_module, "exchange_code_for_token", fake_exchange)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        status, body = _post_json(
+            base, "/api/hh/auth/oauth-start", {"account": "default"}
+        )
+        assert status == 200
+        assert body["status"] == "ok"
+        assert body["authorize_url"].startswith("https://hh.ru/oauth/authorize")
+        assert body["custom_client"] is False
+
+        status, body = _post_json(base, "/api/hh/auth/import-token", {})
+        assert status == 400
+
+        status, body = _post_json(
+            base,
+            "/api/hh/auth/import-token",
+            {
+                "account": "default",
+                "access_token": "USER-1",
+                "refresh_token": "REF-1",
+                "client_id": "CID",
+                "client_secret": "SEC",
+            },
+        )
+        assert status == 200
+        assert body["status"] == "ok"
+        assert body["whoami"]["code"] == "bad_authorization"
+
+        status, body = _post_json(
+            base,
+            "/api/hh/auth/oauth-start",
+            {"account": "default"},
+        )
+        assert status == 200
+        assert body["status"] == "ok"
+        assert body["authorize_url"].startswith("https://hh.ru/oauth/authorize")
+        assert body["custom_client"] is True
+
+        status, body = _post_json(
+            base,
+            "/api/hh/auth/oauth-callback",
+            {"account": "default", "code": "ABC"},
+        )
+        assert status == 200
+        assert body["status"] == "ok"
+        assert seen["code"] == "ABC"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_hh_token_ui_block_is_present_in_static_assets():
+    html = _read_static("index.html")
+    assert "hh-oauth-start-button" in html
+    assert "hh-oauth-redirect-input" in html
+    assert "hh-oauth-finish-button" in html
+    assert "hh-token-access-input" in html
+    assert "hh-token-save-button" in html
+    assert "hh-token-status" in html
+    js = _read_static("app.js")
+    assert "/api/hh/auth/oauth-start" in js
+    assert "/api/hh/auth/oauth-callback" in js
+    assert "/api/hh/auth/import-token" in js
+
+
 def test_source_browser_login_route_starts_persistent_session(tmp_path, monkeypatch):
     calls = []
 

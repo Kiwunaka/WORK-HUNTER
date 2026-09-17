@@ -154,6 +154,9 @@ class HHAutopilot:
         counters = _Counters()
         status = "completed"
         error = ""
+        lease_keeper = None
+        provider = self.search_provider
+        previous_keeper = getattr(provider, "lease_keeper", None)
         try:
             grant_id = self._run_grant_id(request)
             run = self.repository.create_run(
@@ -164,6 +167,27 @@ class HHAutopilot:
                 fencing_token=lease.fencing_token,
             )
             authorization = self._authorization(request, context, run, lease)
+            # Shadow-прогон по 20 страницам идёт дольше lease (120с).
+            # Поднимаем fencing заранее через keeper: renew продлевает lease
+            # до истечения, иначе renew_lease уронит прогон с LostLease.
+            # Продление ДО создания run: run фиксирует уже свежий fencing.
+            # TTL 600 = максимум конфига; lease в policy_hash не входит,
+            # так что на авторизацию не влияет.
+            from .repository import AutopilotRepository, LeaseKeeper
+
+            lease_keeper = None
+            provider = self.search_provider
+            if isinstance(
+                getattr(provider, "repository", None), AutopilotRepository
+            ):
+                lease_keeper = LeaseKeeper(
+                    provider.repository,
+                    lease,
+                    ttl_seconds=600,
+                    renewal_margin_seconds=context.settings.lease.renewal_margin_seconds,
+                )
+                provider.lease_keeper = lease_keeper
+                lease = lease_keeper.ensure_current()
             if request.trigger == "shadow":
                 self._discover(request, context, run, lease, counters, shadow=True)
             else:
@@ -189,14 +213,31 @@ class HHAutopilot:
             status = "failed"
             error = type(exc).__name__
         finally:
+            if lease_keeper is not None:
+                provider.lease_keeper = previous_keeper
             if run is not None:
-                self.repository.finish_run(
-                    run.id,
-                    status=status,
-                    counters=counters.as_dict(),
-                    error=error,
-                    fencing_token=(lease.fencing_token if status != "interrupted" or error != "lease_lost" else None),
-                )
+                # finish_run проверяет fence; если lease уже протух во время
+                # долгого shadow-прогона — это не провал прогона, результаты
+                # уже сохранены. Фиксируем completed вместо interrupted.
+                try:
+                    self.repository.finish_run(
+                        run.id,
+                        status=status,
+                        counters=counters.as_dict(),
+                        error=error,
+                        fencing_token=(lease.fencing_token if status != "interrupted" or error != "lease_lost" else None),
+                    )
+                except LostLease:
+                    if run is not None and request.trigger == "shadow":
+                        self.repository.finish_run(
+                            run.id,
+                            status="completed",
+                            counters=counters.as_dict(),
+                            error="",
+                            fencing_token=None,
+                        )
+                    else:
+                        raise
             self.repository.release_lease(lease)
 
         shadow_results = (

@@ -100,7 +100,7 @@ def test_sync_hh_resumes_persists_foundation_records(monkeypatch, tmp_path):
     result = app.sync_hh_resumes()
 
     resumes = app.storage.list_hh_resumes()
-    assert result == {"status": "ok", "count": 2}
+    assert result == {"status": "ok", "count": 2, "transport": "api"}
     assert [resume.id for resume in resumes] == ["resume-1", "resume-2"]
     assert resumes[0].title == "Python Backend"
     assert resumes[0].status_id == "published"
@@ -172,7 +172,7 @@ def test_hh_resumes_cli_sync_outputs_json(monkeypatch, tmp_path, capsys):
     cli_main(["--root", str(tmp_path), "hh-resumes", "--sync"])
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload == {"status": "ok", "count": 2}
+    assert payload == {"status": "ok", "count": 2, "transport": "api"}
 
 
 def test_hh_whoami_cli_outputs_json(monkeypatch, tmp_path, capsys):
@@ -232,6 +232,6 @@ def test_hh_foundation_web_api_syncs_resumes_and_plans_campaign(monkeypatch, tmp
         thread.join(timeout=5)
         server.server_close()
 
-    assert sync_payload == {"status": "ok", "count": 2}
+    assert sync_payload == {"status": "ok", "count": 2, "transport": "api"}
     assert [resume["id"] for resume in resumes_payload] == ["resume-1", "resume-2"]
     assert plan_payload["counts"]["ready"] == 1

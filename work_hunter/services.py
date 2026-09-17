@@ -1484,8 +1484,15 @@ def _draft_hh_cover_letter_ai(
 
 
 def _published_hh_resumes(client: HHApplyClient) -> list[dict[str, Any]]:
+    try:
+        raw_resumes = client.list_resumes()
+    except Exception:
+        # Без API (403/протухший токен) движок не может проверить published-статус.
+        # Резюме уже подтягиваются через web sync; здесь возвращаем пусто,
+        # а вызывающий код должен дать понятную ошибку вместо traceback.
+        return []
     resumes: list[dict[str, Any]] = []
-    for raw in client.list_resumes():
+    for raw in raw_resumes:
         if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
             continue
         status = raw.get("status")
@@ -1606,6 +1613,18 @@ def _hh_engine_context(
         if value.profile_id.strip().casefold() == account_id.strip().casefold()
     )
     resumes = _published_hh_resumes(client)
+    if not resumes:
+        stored = service.storage.list_hh_resumes()
+        if stored:
+            raise RuntimeError(
+                "HH API недоступен (проверьте токен: hh auth status / oauth-start), "
+                f"но в web-профиле есть {len(stored)} резюме. "
+                "Автопилоту нужен живой API-токен для поиска и откликов; web-поиск вакансий работает через sync/sources."
+            )
+        raise RuntimeError(
+            "Нет опубликованных резюме в HH (API недоступен). "
+            "Запустите 'hh resumes sync' и проверьте 'hh auth status'."
+        )
     by_id = {str(value["id"]).strip().casefold(): value for value in resumes}
     presets = config.get("hh_campaign_presets") or {}
     mappings: list[EngineSearchMapping] = []
@@ -4393,11 +4412,19 @@ class WorkHunter:
     def sync_hh_resumes(self) -> dict[str, Any]:
         client = self._hh_client()
         if not client.has_token():
-            return {"status": "blocked", "count": 0, "message": "HH access token is required."}
+            return self._sync_hh_resumes_from_web(reason="missing_access_token")
         count = 0
         try:
             payloads = client.list_resumes()
         except Exception as exc:
+            from .hh_transport.errors import HHAuthError, HHForbiddenError
+
+            if isinstance(exc, (HHAuthError, HHForbiddenError)):
+                # API недоступен (токен битый/протухший/замаскирован),
+                # но web-сессия может быть живой — подтягиваем резюме оттуда.
+                return self._sync_hh_resumes_from_web(
+                    reason="api_error", api_error=str(exc)
+                )
             return {**_hh_error_payload(exc), "count": 0}
         for payload in payloads:
             resume = _hh_resume_from_payload(payload)
@@ -4405,7 +4432,61 @@ class WorkHunter:
                 continue
             self.storage.upsert_hh_resume(resume)
             count += 1
-        return {"status": "ok", "count": count}
+        return {"status": "ok", "count": count, "transport": "api"}
+
+    def _sync_hh_resumes_from_web(
+        self, *, reason: str, api_error: str = ""
+    ) -> dict[str, Any]:
+        """Подтянуть резюме из web-профиля, когда API недоступен.
+
+        Web-профиль отдаёт id/hash/title без полного API-пейлоада,
+        но этого достаточно чтобы UI/автопилот видели привязки.
+        """
+        from .hh_transport import applicant_profile_summary
+
+        try:
+            client = self._hh_applicant_web_client()
+            profile = applicant_profile_summary(client.load_profile_data())
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "count": 0,
+                "transport": "web",
+                "fallback_reason": reason,
+                "message": "HH web profile is not available. Run 'hh auth login'.",
+                "error": str(exc),
+                "api_error": api_error,
+                "next_actions": ["work-hunter hh auth login --account default"],
+            }
+        count = 0
+        for item in profile.get("resumes") or []:
+            resume_id = str(item.get("id") or "").strip()
+            if not resume_id:
+                continue
+            self.storage.upsert_hh_resume(
+                HHResume(
+                    id=resume_id,
+                    title=str(item.get("title") or ""),
+                    url=f"https://hh.ru/resume/{item.get('hash') or resume_id}",
+                    alternate_url=f"https://hh.ru/resume/{item.get('hash') or resume_id}",
+                    status_id="published",
+                    status_name="published",
+                    can_publish_or_update=True,
+                )
+            )
+            count += 1
+        return {
+            "status": "ok",
+            "count": count,
+            "transport": "web",
+            "fallback_reason": reason,
+            "api_error": api_error,
+            "applicant_id": profile.get("applicant_id", ""),
+            "next_actions": [
+                "work-hunter hh auth oauth-start",
+                "work-hunter hh auth import-token --access-token ...",
+            ],
+        }
 
     def hh_whoami(self) -> dict[str, Any]:
         client = self._hh_client()
@@ -4428,8 +4509,14 @@ class WorkHunter:
             client = self._hh_client_for_account(account_id)
             hh_config = client.config
         browser_status = self._hh_browser_authorizer().diagnostics(account_id)
-        has_access_token = bool(str(hh_config.get("access_token") or ""))
-        has_refresh_token = bool(str(hh_config.get("refresh_token") or ""))
+        has_access_token = bool(str(hh_config.get("access_token") or "").strip())
+        has_access_token = has_access_token and str(
+            hh_config.get("access_token") or ""
+        ).strip() != "***"
+        has_refresh_token = bool(str(hh_config.get("refresh_token") or "").strip())
+        has_refresh_token = has_refresh_token and str(
+            hh_config.get("refresh_token") or ""
+        ).strip() != "***"
         client_credentials_configured = bool(
             str(hh_config.get("client_id") or "")
             and str(hh_config.get("client_secret") or "")
@@ -4493,6 +4580,82 @@ class WorkHunter:
             browser,
             private_root=self.root / ".work-hunter" / "private",
         )
+
+    def oauth_start_hh_account(self, *, account: str | None = None) -> dict[str, Any]:
+        """Шаг 1 OAuth: отдать authorize_url для ручного входа в браузере.
+
+        Credentials: свои client_id/client_secret из профиля, иначе встроенные
+        Android-ключи (порт оригинала s3rgeym/hh-applicant-tool, personal use).
+        Пароль/код вводит пользователь на стороне hh.ru,
+        мы секретов логина не касаемся.
+        """
+        from .hh_transport.oauth import build_authorize_url, resolve_credentials
+
+        account_id = self._hh_account_id(account) if account else str(
+            self.config.get("hh_account_profile") or "default"
+        ).strip().casefold()
+        hh_config = self._hh_client_for_account(account_id).config
+        credentials = resolve_credentials(hh_config)
+        return {
+            "status": "ok",
+            "account": account_id,
+            "authorize_url": build_authorize_url(credentials),
+            "redirect_scheme": "hhandroid",
+            "custom_client": bool(
+                str(hh_config.get("client_id") or "").strip()
+                and str(hh_config.get("client_secret") or "").strip()
+            ),
+            "next_actions": [
+                "Open authorize_url in a browser, log in on hh.ru, copy the hhandroid:// redirect URL",
+                "work-hunter hh auth oauth-callback --account <account> --redirect-url 'hhandroid://...?code=...'",
+            ],
+        }
+
+    def oauth_callback_hh_account(
+        self,
+        *,
+        account: str,
+        redirect_url: str = "",
+        code: str = "",
+    ) -> dict[str, Any]:
+        """Шаг 2 OAuth: обменять code из hhandroid-редиректа на токены."""
+        from .hh_transport.oauth import (
+            exchange_code_for_token,
+            extract_authorization_code,
+            resolve_credentials,
+        )
+
+        account_id = self._hh_account_id(account)
+        hh_config = self._hh_client_for_account(account_id).config
+        credentials = resolve_credentials(hh_config)
+        auth_code = str(code or "").strip() or extract_authorization_code(redirect_url)
+        user_agent = str(hh_config.get("hh_user_agent") or hh_config.get("web_user_agent") or "")
+        token = exchange_code_for_token(auth_code, credentials, user_agent=user_agent)
+        # Сохраняем client_id/secret только если пользователь задал свои.
+        # Встроенные Android-ключи в конфиг не пишем — они и так дефолт.
+        custom_client = bool(
+            str(hh_config.get("client_id") or "").strip()
+            and str(hh_config.get("client_secret") or "").strip()
+        )
+        self.save_hh_account_profile(
+            account_id,
+            access_token=token.get("access_token") or None,
+            refresh_token=token.get("refresh_token") or None,
+            access_expires_at=token.get("access_expires_at") or None,
+            client_id=credentials.client_id if custom_client else None,
+            client_secret=credentials.client_secret if custom_client else None,
+        )
+        whoami: dict[str, Any]
+        try:
+            whoami = self.hh_whoami()
+        except Exception as exc:
+            whoami = {"status": "error", "error": str(exc)}
+        return {
+            "status": "ok",
+            "account": account_id,
+            "whoami": whoami,
+            "secrets_redacted": True,
+        }
 
     def login_hh_account(self, *, account: str) -> dict[str, Any]:
         account_id = self._hh_account_id(account)

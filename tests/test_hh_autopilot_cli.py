@@ -113,10 +113,33 @@ def test_auth_commands_route_without_browser_in_cli_tests(
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
 
 
-@pytest.mark.parametrize("command", ["oauth-start", "oauth-callback"])
-def test_oauth_commands_require_user_client_configuration(command: str, fake_app: FakeApp, capsys: pytest.CaptureFixture[str]) -> None:
-    main(["hh", "auth", command])
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "blocked"
-    assert {"client_id", "client_secret", "redirect_uri"} <= set(payload["required_configuration"])
-    assert fake_app.calls == []
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["oauth-start"], ("oauth_start_hh_account", {"account": None})),
+        (
+            ["oauth-start", "--account", "work"],
+            ("oauth_start_hh_account", {"account": "work"}),
+        ),
+        (
+            ["oauth-callback", "--account", "work"],
+            (
+                "oauth_callback_hh_account",
+                {"account": "work", "redirect_url": "", "code": ""},
+            ),
+        ),
+        (
+            ["oauth-callback", "--account", "work", "--code", "ABC"],
+            (
+                "oauth_callback_hh_account",
+                {"account": "work", "redirect_url": "", "code": "ABC"},
+            ),
+        ),
+    ],
+)
+def test_oauth_commands_route_to_service(
+    argv: list[str], expected: tuple[str, dict[str, Any]], fake_app: FakeApp, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main(["hh", "auth", *argv])
+    assert fake_app.calls == [expected]
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"

@@ -130,17 +130,40 @@ def test_hh_source_does_not_relabel_or_fallback_on_auth_error(monkeypatch):
         "work_hunter.sources.hh.HHApiSession.search_vacancies",
         fail,
     )
-    monkeypatch.setattr(
-        source,
-        "_collect_web",
-        lambda *args, **kwargs: pytest.fail("auth error must not use web fallback"),
+    fallback_job = Job(
+        source="hh",
+        source_id="web-1",
+        url="https://hh.ru/vacancy/web-1",
+        title="Fallback",
     )
+    monkeypatch.setattr(source, "_collect_web", lambda profile, limit: [fallback_job])
 
-    with pytest.raises(HHAuthError) as error:
-        source.collect({"queries": ["python"]})
+    # Протухший токен: поиск уходит в web fallback вместо падения.
+    assert source.collect({"queries": ["python"]}) == [fallback_job]
 
-    assert error.value is auth_error
-    assert error.value.code == "token_expired"
+
+def test_hh_source_falls_back_on_bad_authorization(monkeypatch):
+    from work_hunter.hh_transport.errors import HHForbiddenError
+
+    source = HHSource({"access_token": "token", "web_fallback": True})
+    forbidden = HHForbiddenError("forbidden", code="bad_authorization")
+
+    def fail(*args, **kwargs):
+        raise forbidden
+
+    monkeypatch.setattr(
+        "work_hunter.sources.hh.HHApiSession.search_vacancies",
+        fail,
+    )
+    fallback_job = Job(
+        source="hh",
+        source_id="web-1",
+        url="https://hh.ru/vacancy/web-1",
+        title="Fallback",
+    )
+    monkeypatch.setattr(source, "_collect_web", lambda profile, limit: [fallback_job])
+
+    assert source.collect({"queries": ["python"]}) == [fallback_job]
 
 
 def test_hh_source_does_not_fallback_on_challenge_error(monkeypatch):

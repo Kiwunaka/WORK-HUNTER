@@ -14,6 +14,8 @@ from typing import Any
 from ..hh_transport import HHApiSession
 from ..hh_transport.backends import ConfigBackend
 from ..hh_transport.errors import (
+    HHAuthError,
+    HHForbiddenError,
     HHNetworkError,
     HHParseError,
     HHTransportError,
@@ -51,13 +53,32 @@ class HHSource:
             except (HHNetworkError, HHParseError, json.JSONDecodeError):
                 if not self.config.get("web_fallback", True):
                     raise
+            except (HHAuthError, HHForbiddenError) as exc:
+                # bad_authorization/token_expired: токен битый или протухший,
+                # retry/refresh тут не поможет — молча уходим в web fallback.
+                # CAPTCHA/challenge-коды (captcha_required и т.п.) — наоборот,
+                # должны пробрасываться: это не проблема токена.
+                if exc.code not in {"bad_authorization", "token_expired", "invalid_token", "unknown"}:
+                    raise
+                if not self.config.get("web_fallback", True):
+                    raise
         return self._collect_web(profile, limit)
 
     def _access_token(self) -> str:
-        return str(os.environ.get("HH_ACCESS_TOKEN") or self.config.get("access_token") or "")
+        raw = str(os.environ.get("HH_ACCESS_TOKEN") or self.config.get("access_token") or "")
+        # Маска "***" означает "секрет скрыт/не задан", а не токен.
+        if raw.strip() == "***":
+            return ""
+        return raw
+
+    def _refresh_token(self) -> str:
+        raw = str(self.config.get("refresh_token") or "")
+        if raw.strip() == "***":
+            return ""
+        return raw
 
     def _api_ready(self) -> bool:
-        return bool(self._access_token() or str(self.config.get("refresh_token") or ""))
+        return bool(self._access_token() or self._refresh_token())
 
     def _api_config(self) -> dict[str, Any]:
         config = dict(self.config)
@@ -96,6 +117,17 @@ class HHSource:
 
     def _collect_web(self, profile: dict[str, Any], limit: int | None = None) -> list[Job]:
         queries = profile.get("queries") or profile.get("desired_roles") or [""]
+        # Подмешиваем required_keywords из автопилота, чтобы web-поиск
+        # уважал Правила поиска, а не только queries профиля.
+        keywords = list(self.config.get("required_keywords") or [])
+        autopilot_filters = ((self.config.get("autopilot") or {}).get("filters") or {})
+        keywords.extend(autopilot_filters.get("required_keywords") or [])
+        seen_queries = {str(query or "").strip().casefold() for query in queries}
+        for keyword in keywords:
+            keyword = str(keyword or "").strip()
+            if keyword and keyword.casefold() not in seen_queries:
+                queries = [*queries, keyword]
+                seen_queries.add(keyword.casefold())
         pages = max(1, int(self.config.get("pages", 1)))
         jobs: list[Job] = []
         seen: set[str] = set()
@@ -332,7 +364,14 @@ class HHApplyClient:
         self.session = HHApiSession(config, backend=backend, base_url=self.base_url)
 
     def has_token(self) -> bool:
-        return self.session.identity.has_access_token() or bool(self.session.identity.refresh_token)
+        identity = self.session.identity
+        access = str(identity.access_token or "").strip()
+        refresh = str(identity.refresh_token or "").strip()
+        if access in {"", "***"}:
+            access = ""
+        if refresh in {"", "***"}:
+            refresh = ""
+        return bool(access or refresh)
 
     def whoami(self) -> dict[str, Any]:
         return self.session.whoami()

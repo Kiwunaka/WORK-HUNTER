@@ -890,6 +890,43 @@
                 <button id="hh-add-account-button" type="button">+ Добавить аккаунт</button>
               </div>
               <p id="hh-human-auth-note" class="meta">Пароль вводится в отдельном окне HH и не сохраняется в Work Hunter.</p>
+              <details class="hh-token-details">
+                <summary>API-токен HH (для поиска и откликов через API)</summary>
+                <p class="meta">Web-вход выше даёт куки для чатов и страниц. API-токен нужен отдельно: поиск вакансий, резюме и автоотклики ходят через него.</p>
+                <p id="hh-token-status" class="meta" role="status">Статус токена: проверяем…</p>
+                <div class="hh-token-steps">
+                  <div>
+                    <strong>Шаг 1.</strong>
+                    <button id="hh-oauth-start-button" type="button">Получить ссылку входа</button>
+                    <p class="meta">Откроется ссылка hh.ru/oauth. Войди, введи SMS-код. В конце браузер покажет ошибку про адрес <code>hhandroid://…</code> — это нормально: скопируй этот адрес из адресной строки.</p>
+                    <p id="hh-oauth-url-line" class="meta" hidden><a id="hh-oauth-url" href="#" target="_blank" rel="noopener noreferrer">Открыть вход HH</a></p>
+                  </div>
+                  <label class="human-field">Шаг 2. Вставь адрес или код из него
+                    <input id="hh-oauth-redirect-input" type="text" placeholder="hhandroid://…?code=… или сам код" autocomplete="off" spellcheck="false">
+                  </label>
+                  <div class="human-actions">
+                    <button id="hh-oauth-finish-button" type="button" class="primary">Обменять код на токен</button>
+                  </div>
+                  <details class="hh-token-details">
+                    <summary>Ввести готовый токен вручную (если уже есть)</summary>
+                    <label class="human-field">access_token (начинается с USER…)
+                      <input id="hh-token-access-input" type="password" autocomplete="off" spellcheck="false">
+                    </label>
+                    <label class="human-field">refresh_token
+                      <input id="hh-token-refresh-input" type="password" autocomplete="off" spellcheck="false">
+                    </label>
+                    <label class="human-field">client_id
+                      <input id="hh-token-client-id-input" type="text" autocomplete="off" spellcheck="false">
+                    </label>
+                    <label class="human-field">client_secret
+                      <input id="hh-token-client-secret-input" type="password" autocomplete="off" spellcheck="false">
+                    </label>
+                    <div class="human-actions">
+                      <button id="hh-token-save-button" type="button">Сохранить токен</button>
+                    </div>
+                  </details>
+                </div>
+              </details>
             </section>
 
             <section class="human-card rules-card">
@@ -1031,8 +1068,7 @@
       <div class="panel settings-page settings-search-page" data-settings-panel="search">
         <header class="settings-page-header"><div><span class="eyebrow">Правила поиска</span><h2>Кого искать и когда откликаться</h2><p>Одни правила применяются ко всем включённым площадкам.</p></div><div class="actions"><button id="search-rules-reset" type="button"><i class="ph ph-arrow-counter-clockwise" aria-hidden="true"></i>Сбросить</button><button id="search-rules-save" type="button" class="primary"><i class="ph ph-floppy-disk" aria-hidden="true"></i>Сохранить правила</button></div></header>
         <section class="settings-status-card"><span class="metric-icon green"><i class="ph ph-check-circle" aria-hidden="true"></i></span><div><strong>Правила применяются ко всем площадкам</strong><p>Изменения будут учтены при следующем поиске.</p></div><dl><div><dt>Площадок</dt><dd id="search-source-count">—</dd></div></dl></section>
-        <div class="search-rules-layout"><div class="settings-card-grid">
-          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon blue"><i class="ph ph-user-focus" aria-hidden="true"></i></span><div><h3>1. Кого искать</h3><p>Должности, навыки и исключения.</p></div></div><label>Запрос обычными словами<input id="search-rule-query" placeholder="Python backend developer"></label><label>Ключевые слова<input id="search-rule-keywords" placeholder="python, fastapi, postgresql"></label><label>Исключить<input id="search-rule-excluded" placeholder="стажировка, 1C, без опыта"></label></section>
+        <div class="search-rules-layout"><div class="settings-card-grid">          <section class="settings-card"><div class="settings-card-title"><span class="metric-icon blue"><i class="ph ph-user-focus" aria-hidden="true"></i></span><div><h3>1. Кого искать</h3><p>Должности, навыки и исключения.</p></div></div><label>Запрос обычными словами<input id="search-rule-query" placeholder="BI аналитик, data analyst, analytics engineer"></label><label>Ключевые слова<input id="search-rule-keywords" placeholder="sql, python, clickhouse, superset"></label><label>Исключить<input id="search-rule-excluded" placeholder="стажировка, 1C, без опыта"></label><div class="actions"><button id="search-rules-from-profile" type="button"><i class="ph ph-user-focus" aria-hidden="true"></i>Взять из активного профиля</button></div></section>
           <section class="settings-card"><div class="settings-card-title"><span class="metric-icon purple"><i class="ph ph-map-pin" aria-hidden="true"></i></span><div><h3>2. Где и как работать</h3><p>Локация и формат работы.</p></div></div><label>География<input id="search-rule-location" placeholder="Любая точка мира"></label><label>Формат<select id="search-rule-remote"><option value="any">Любой</option><option value="only">Только удалённо</option><option value="exclude">Только офис или гибрид</option></select></label><label>Занятость<select data-local-setting="employment-type"><option>Любая</option><option>Полная занятость</option><option>Проектная работа</option><option>Фриланс</option></select></label></section>
           <section class="settings-card"><div class="settings-card-title"><span class="metric-icon green"><i class="ph ph-wallet" aria-hidden="true"></i></span><div><h3>3. Зарплата и качество</h3><p>Отсекаем слабые совпадения.</p></div></div><div class="settings-fields-grid"><label>Минимальная зарплата<input id="search-rule-salary" type="number" min="0" value="0"></label><label>Валюта<select data-local-setting="salary-currency"><option>₽</option><option>USD</option><option>EUR</option></select></label><label class="wide-field">Минимальный score<input id="search-rule-score" type="range" min="0" max="100" value="60"><output id="search-rule-score-value">60%</output></label></div></section>
           <section class="settings-card"><div class="settings-card-title"><span class="metric-icon orange"><i class="ph ph-calendar-blank" aria-hidden="true"></i></span><div><h3>4. Расписание и лимиты</h3><p>Контроль активности агента.</p></div></div><div class="settings-fields-grid"><label>Начало<input id="search-rule-start" type="time" value="08:00"></label><label>Конец<input id="search-rule-end" type="time" value="21:00"></label><label>Каждые, мин<input id="search-rule-interval" type="number" min="1" value="60"></label><label>Откликов в день<input id="search-rule-limit" type="number" min="1" value="50"></label></div></section>

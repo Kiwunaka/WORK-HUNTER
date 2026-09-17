@@ -392,8 +392,11 @@ def main(argv: list[str] | None = None) -> None:
     hh_auth_import.add_argument("--client-secret", default="")
     hh_auth_import.add_argument("--access-expires-at", default="")
     hh_auth_import.add_argument("--profile")
-    hh_auth_sub.add_parser("oauth-start")
-    hh_auth_sub.add_parser("oauth-callback")
+    hh_auth_sub.add_parser("oauth-start").add_argument("--account", default=None)
+    hh_auth_callback = hh_auth_sub.add_parser("oauth-callback")
+    hh_auth_callback.add_argument("--account", required=True)
+    hh_auth_callback.add_argument("--redirect-url", default="")
+    hh_auth_callback.add_argument("--code", default="")
 
     hh_auth_login = hh_auth_sub.add_parser("login")
     hh_auth_login.add_argument("--account", required=True)
@@ -815,19 +818,19 @@ def main(argv: list[str] | None = None) -> None:
                         )
                     )
                 )
-            elif args.hh_auth_command in {"oauth-start", "oauth-callback"}:
+            elif args.hh_auth_command == "oauth-start":
                 print_json(
-                    {
-                        "status": "blocked",
-                        "code": "oauth_flow_not_configured",
-                        "message": "Configure your own HH OAuth client before starting the local OAuth flow.",
-                        "required_configuration": [
-                            "client_id",
-                            "client_secret",
-                            "redirect_uri",
-                        ],
-                        "next_actions": ["work-hunter hh auth import-token --access-token ..."],
-                    }
+                    mask_secrets(app.oauth_start_hh_account(account=args.account))
+                )
+            elif args.hh_auth_command == "oauth-callback":
+                print_json(
+                    mask_secrets(
+                        app.oauth_callback_hh_account(
+                            account=args.account,
+                            redirect_url=args.redirect_url,
+                            code=args.code,
+                        )
+                    )
                 )
         elif args.hh_command == "autopilot":
             command = args.hh_autopilot_command

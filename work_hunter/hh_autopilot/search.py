@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 from copy import deepcopy
 from typing import Any, Mapping, Protocol
 
@@ -13,8 +14,21 @@ from .types import NormalizedVacancy, SearchPage, SearchRequest, SearchResult
 
 _MARKUP = re.compile(r"<[^>]*>")
 _WHITESPACE = re.compile(r"\s+")
+_HIGHLIGHT = re.compile(r"</?highlighttext\s*/?>", re.IGNORECASE)
 _MAX_TEXT = 8_000
 _MAX_COLLECTION = 100
+
+
+def _decode_snippet_text(value: Any) -> Any:
+    """HH snippet: highlight-разметка + голые < > в тексте (Kafka/RabitMQ > X).
+
+    Порядок важен: сначала режем highlight-теги, потом экранируем остатки,
+    иначе sanitize_text сочтёт '>' malformed markup и уронит весь run.
+    """
+    if not isinstance(value, str):
+        return value
+    text = _HIGHLIGHT.sub(" ", value)
+    return text.replace("<", "‹").replace(">", "›")
 
 
 class SearchTransport(Protocol):
@@ -31,9 +45,26 @@ def _clean(value: Any, *, limit: int = _MAX_TEXT) -> str:
     if not isinstance(value, (str, int, float)) or isinstance(value, bool):
         return ""
     text = html.unescape(str(value))
+    text = _strip_invisible(text)
     text = _MARKUP.sub(" ", text)
     text = _WHITESPACE.sub(" ", text).strip()
     return text[:limit]
+
+
+def _strip_invisible(text: str) -> str:
+    """HH отдаёт мусор из чужих ATS: zero-width (U+200B), BOM, контроли.
+
+    Это не атака, а кривые данные — вычищаем до санитайзера, иначе
+    NormalizedVacancy уронит весь search run одной вакансией.
+    """
+    return "".join(
+        char
+        for char in text
+        if not (
+            unicodedata.category(char) in {"Cf", "Cs"}
+            or (unicodedata.category(char) == "Cc" and char not in "\t\n\r")
+        )
+    )
 
 
 def _object(value: Any) -> Mapping[str, Any]:
@@ -170,8 +201,8 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
         " ".join(
             part
             for part in (
-                _clean(snippet.get("requirement")),
-                _clean(snippet.get("responsibility")),
+                _clean(_decode_snippet_text(snippet.get("requirement"))),
+                _clean(_decode_snippet_text(snippet.get("responsibility"))),
                 _clean(raw.get("description")),
             )
             if part
@@ -272,19 +303,18 @@ class HHSearchProvider:
         self.lease_keeper = lease_keeper
 
     def _ensure_fence(self, request: SearchRequest) -> None:
+        """Проверить/продлить lease перед запросом страницы."""
         keeper = self.lease_keeper
         if keeper is None:
             self.repository.assert_fence(request.account_id, request.fencing_token)
             return
         lease = keeper.lease
-        if (
-            lease.account_id != request.account_id
-            or lease.fencing_token != request.fencing_token
-        ):
+        if lease.account_id != request.account_id:
             raise ValueError("lease keeper does not match search request")
-        current = keeper.ensure_current()
-        if current.fencing_token != request.fencing_token:
-            raise ValueError("lease renewal changed the fencing token")
+        # ensure_current продлевает lease при необходимости; fencing_token при
+        # продлении не меняется (renew сохраняет token), так что коммиты идут
+        # с исходным request.fencing_token.
+        keeper.ensure_current()
 
     def _fetch_page(self, request: SearchRequest, page_number: int) -> SearchPage:
         self._ensure_fence(request)

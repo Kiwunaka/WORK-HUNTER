@@ -782,6 +782,67 @@ def make_handler(root: Path):
                         return
                     self._send_json(result, HTTPStatus.ACCEPTED)
                     return
+                if path == "/api/hh/auth/oauth-start":
+                    self._send_json(
+                        mask_secrets(
+                            app.oauth_start_hh_account(
+                                account=str(body.get("account") or "") or None,
+                            )
+                        )
+                    )
+                    return
+                if path == "/api/hh/auth/oauth-callback":
+                    account = str(body.get("account") or "default")
+                    if not HH_ACCOUNT_ID_PATTERN.fullmatch(account):
+                        self._send_json(
+                            {"status": "error", "message": "Invalid HH account id"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    try:
+                        result = app.oauth_callback_hh_account(
+                            account=account,
+                            redirect_url=str(body.get("redirect_url") or ""),
+                            code=str(body.get("code") or ""),
+                        )
+                    except ValueError as exc:
+                        self._send_json(
+                            {"status": "error", "message": str(exc)},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    self._send_json(mask_secrets(result))
+                    return
+                if path == "/api/hh/auth/import-token":
+                    account = str(body.get("account") or "default")
+                    if not HH_ACCOUNT_ID_PATTERN.fullmatch(account):
+                        self._send_json(
+                            {"status": "error", "message": "Invalid HH account id"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    access_token = str(body.get("access_token") or "").strip()
+                    if not access_token:
+                        self._send_json(
+                            {"status": "error", "message": "access_token is required"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    self._send_json(
+                        mask_secrets(
+                            app.import_hh_token(
+                                access_token=access_token,
+                                refresh_token=str(body.get("refresh_token") or ""),
+                                client_id=str(body.get("client_id") or ""),
+                                client_secret=str(body.get("client_secret") or ""),
+                                access_expires_at=str(
+                                    body.get("access_expires_at") or ""
+                                ),
+                                profile=account,
+                            )
+                        )
+                    )
+                    return
                 if path == "/api/sources/browser-login":
                     try:
                         result = _launch_source_browser_login(
