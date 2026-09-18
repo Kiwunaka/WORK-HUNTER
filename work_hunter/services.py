@@ -1860,6 +1860,10 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
         context_provider=lambda _wanted: context,
         vacancy_loader=lambda vacancy_id: normalize_vacancy(client.get_vacancy(vacancy_id)),
         owner_token_factory=lambda: f"work-hunter:{uuid.uuid4().hex}",
+        # Реальные паузы между откликами: без этого limits.send_delay_* не
+        # применялись и автопилот отправлял отклики подряд, ловя лимиты HH.
+        sleeper=time.sleep,
+        delay_source=lambda low, high: random.uniform(low, high),
     )
 
 
