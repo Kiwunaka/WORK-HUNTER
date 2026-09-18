@@ -159,6 +159,12 @@ def test_each_hard_filter_has_a_stable_reason(
         case["filters"]["excluded_keywords"] = ["bitrix"]
     if path == "vacancy.area_id":
         case["context"]["relocation_allowed"] = False
+        # Ограничение areas относится к офису/гибриду: удалёнку принимаем
+        # из любого региона, поэтому для проверки area берём офис.
+        case["vacancy"]["schedule_id"] = "fullDay"
+        case["vacancy"]["work_format_ids"] = ["on_site"]
+        case["filters"]["schedules"] = []
+        case["filters"]["remote"] = "any"
     if path == "vacancy.schedule_id":
         case["vacancy"]["work_format_ids"] = ["office"]
     if path == "vacancy.salary_to":
@@ -286,9 +292,17 @@ def test_role_family_requires_explicit_exact_ids() -> None:
     assert _evaluate(case).reason == "hard_filter:allowed_role_families"
 
 
+def _make_case_office(case: dict[str, Any]) -> None:
+    case["vacancy"]["schedule_id"] = "fullDay"
+    case["vacancy"]["work_format_ids"] = ["on_site"]
+    case["filters"]["schedules"] = []
+    case["filters"]["remote"] = "any"
+
+
 def test_area_mismatch_can_pass_only_with_explicit_relocation_permission() -> None:
     case = _base_case()
     case["vacancy"]["area_id"] = "2"
+    _make_case_office(case)
     case["context"]["relocation_allowed"] = True
 
     assert _evaluate(case).passed is True
@@ -297,12 +311,32 @@ def test_area_mismatch_can_pass_only_with_explicit_relocation_permission() -> No
 def test_area_mismatch_without_relocation_fact_is_missing_data() -> None:
     case = _base_case()
     case["vacancy"]["area_id"] = "2"
+    _make_case_office(case)
     case["context"].pop("relocation_allowed")
 
     decision = _evaluate(case)
 
     assert decision.reason == "missing_required_data"
     assert decision.evidence["field"] == "relocation"
+
+
+def test_remote_vacancy_passes_area_filter_from_any_region() -> None:
+    case = _base_case()
+    case["vacancy"]["area_id"] = "2"  # СПб
+    case["filters"]["areas"] = ["1"]  # Москва
+
+    assert _evaluate(case).passed is True
+
+
+def test_office_vacancy_outside_configured_areas_is_rejected() -> None:
+    case = _base_case()
+    case["vacancy"]["area_id"] = "2"
+    case["filters"]["areas"] = ["1"]
+    _make_case_office(case)
+
+    decision = _evaluate(case)
+
+    assert decision.reason == "hard_filter:area"
 
 
 def test_schedule_is_checked_after_remote() -> None:
@@ -538,6 +572,8 @@ def test_every_present_history_alias_must_be_valid_and_agree(
         ),
         lambda case: (
             case["vacancy"].__setitem__("area_id", "2"),
+            case["vacancy"].__setitem__("schedule_id", "fullDay"),
+            case["vacancy"].__setitem__("work_format_ids", ["on_site"]),
             case["candidate"].__setitem__("relocation_allowed", True),
         ),
         lambda case: case["vacancy"].update(

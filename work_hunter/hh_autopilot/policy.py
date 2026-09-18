@@ -261,6 +261,25 @@ def _reject(reason: str, **evidence: Any) -> FilterDecision:
     return FilterDecision(False, reason, evidence)
 
 
+def _vacancy_is_remote(vacancy: Mapping[str, Any]) -> bool:
+    """Удалённая вакансия по remote/schedule/work_format (мягкая проверка)."""
+    if _bool_fact(vacancy, "remote", field="vacancy.remote") is True:
+        return True
+    schedule = _text_fact_from_keys(
+        vacancy,
+        ("schedule_id",),
+        field="vacancy.schedule_id",
+    )
+    if schedule == "remote":
+        return True
+    work_formats = _id_set_from_keys(
+        vacancy,
+        ("work_format_ids", "work_formats", "work_format"),
+        field="vacancy.work_format_ids",
+    )
+    return bool(work_formats and "remote" in work_formats)
+
+
 class HardFilter:
     def __init__(self, filters: Mapping[str, Any]):
         self._filters = _mapping(filters, field="filters")
@@ -624,6 +643,10 @@ class HardFilter:
         if not area_id:
             raise _MissingFact("area_id")
         if area_id in areas:
+            return None
+        # Удалёнку принимаем из любого региона: ограничение areas относится
+        # к офису/гибриду, где важен город.
+        if _vacancy_is_remote(vacancy):
             return None
         relocation_id_values: list[Any] = []
         relocation_flag_values: list[Any] = []
