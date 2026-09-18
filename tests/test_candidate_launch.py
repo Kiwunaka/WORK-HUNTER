@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from work_hunter.candidate import candidate_facts
-from work_hunter.models import Job
+from work_hunter.models import Job, Resume
 from work_hunter.services import WorkHunter
 
 
@@ -43,16 +43,70 @@ def test_facts_version_export_binding_and_offline_readiness(tmp_path, monkeypatc
         resume = app.storage.get_resume(resume.id)
         resume.hh_resume_id, resume.hh_account_profile_id = "hh-resume", "default"
         app.storage.save_resume(resume)
-        assert app.use_resume_for_hh(resume.id, "default")["reauthorization_required"] is True
+        # Дефолтный wildcard published:* уже покрывает все опубликованные
+        # резюме, поэтому привязка конкретного резюме политику не меняет.
+        assert app.use_resume_for_hh(resume.id, "default")["reauthorization_required"] is False
         assert app.use_resume_for_hh(resume.id, "default")["reauthorization_required"] is False
         fresh = WorkHunter(tmp_path)
         try:
-            assert fresh.config["sources"]["hh"]["autopilot"]["accounts"][0]["resume_queries"][0]["resume_id"] == "hh-resume"
+            assert fresh.config["sources"]["hh"]["autopilot"]["accounts"][0]["resume_queries"][0]["resume_id"] == "published:*"
             assert fresh.storage.get_resume(resume.id).file_path == exported["path"]
         finally:
             fresh.storage.close()
     finally:
         app.storage.close()
+
+
+def test_use_resume_for_hh_keeps_other_resumes(tmp_path):
+    app = candidate_app(tmp_path)
+    first = app.storage.save_resume(
+        Resume(
+            name="Первый",
+            body="A",
+            profile_id="default",
+            is_active=True,
+            hh_resume_id="hh-1",
+            hh_account_profile_id="default",
+        )
+    )
+    second = app.storage.save_resume(
+        Resume(
+            name="Второй",
+            body="B",
+            profile_id="default",
+            hh_resume_id="hh-2",
+            hh_account_profile_id="default",
+        )
+    )
+    app.config["sources"]["hh"]["autopilot"]["accounts"][0]["resume_queries"] = [
+        {"resume_id": "hh-1", "preset_names": []}
+    ]
+    app.save_config(app.config)
+
+    app.use_resume_for_hh(first, "default")
+    app.use_resume_for_hh(second, "default")
+
+    queries = app.config["sources"]["hh"]["autopilot"]["accounts"][0]["resume_queries"]
+    assert [query["resume_id"] for query in queries] == ["hh-2", "hh-1"]
+
+
+def test_use_resume_for_hh_keeps_published_wildcard(tmp_path):
+    app = candidate_app(tmp_path)
+    resume = app.storage.save_resume(
+        Resume(
+            name="Первый",
+            body="A",
+            profile_id="default",
+            is_active=True,
+            hh_resume_id="hh-1",
+            hh_account_profile_id="default",
+        )
+    )
+
+    app.use_resume_for_hh(resume, "default")
+
+    queries = app.config["sources"]["hh"]["autopilot"]["accounts"][0]["resume_queries"]
+    assert [query["resume_id"] for query in queries] == ["published:*"]
 
 
 def test_requirement_evidence_cache_and_fact_changes(tmp_path, monkeypatch):

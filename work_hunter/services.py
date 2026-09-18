@@ -3324,8 +3324,31 @@ class WorkHunter:
             selected = next((item for item in accounts if item["profile_id"] == account_id), None)
             if selected is None:
                 raise ValueError("Аккаунт автопилота не найден")
-            presets = list(dict.fromkeys(name for query in selected["resume_queries"] for name in query["preset_names"]))
-            queries = [{"resume_id": resume.hh_resume_id, "preset_names": presets}]
+            existing = {
+                str(query["resume_id"]): list(query["preset_names"])
+                for query in selected["resume_queries"]
+            }
+            presets = list(dict.fromkeys(
+                name
+                for names in existing.values()
+                for name in names
+            ))
+            if "published:*" in existing:
+                # Wildcard уже покрывает все опубликованные резюме.
+                order = list(existing)
+            else:
+                # Не затираем остальные резюме: выбранное поднимаем в начало,
+                # его presets сохраняем, новому отдаём объединённые.
+                order = [resume.hh_resume_id] + [
+                    value for value in existing if value != resume.hh_resume_id
+                ]
+                existing[resume.hh_resume_id] = (
+                    existing.get(resume.hh_resume_id) or presets
+                )
+            queries = [
+                {"resume_id": value, "preset_names": existing[value]}
+                for value in order
+            ]
             result["reauthorization_required"] = content_hash(selected["resume_queries"]) != content_hash(queries) or selected["candidate_profile_id"] != resume.profile_id
             selected["resume_queries"] = queries
             selected["candidate_profile_id"] = resume.profile_id
