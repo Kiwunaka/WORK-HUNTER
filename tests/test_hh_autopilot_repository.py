@@ -605,6 +605,62 @@ def test_adopt_ready_items_claims_orphans_for_current_run(repo) -> None:
     assert repo.get_item(item.id).state is AutopilotState.READY
 
 
+def test_ranked_item_from_interrupted_run_is_reset_for_reevaluation(repo) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    lease = repo.acquire_lease("default", "ranked-owner", ttl_seconds=300, now=now)
+    assert lease is not None
+    first = repo.create_run(
+        "default",
+        trigger="schedule",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+    item = repo.create_item(first.id, "default", "v-1", "r-1", "preset")
+    eligible = repo.record_filter_decision(
+        item.id,
+        expected_version=item.version,
+        decision=_filter_decision(),
+        run_id=first.id,
+        fencing_token=lease.fencing_token,
+    )
+    ranked = repo.record_ranking_decision(
+        eligible.id,
+        expected_version=eligible.version,
+        decision=_ranking_decision(),
+        run_id=first.id,
+        fencing_token=lease.fencing_token,
+    )
+    repo.finish_run(
+        first.id,
+        status="interrupted",
+        counters={},
+        error="lease_lost",
+        fencing_token=None,
+    )
+    second = repo.create_run(
+        "default",
+        trigger="schedule",
+        policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+
+    recovered = repo.create_item(second.id, "default", "v-1", "r-1", "preset")
+
+    assert recovered.id == ranked.id
+    assert recovered.state is AutopilotState.DISCOVERED
+    assert recovered.last_run_id == second.id
+    assert recovered.version == ranked.version + 1
+    assert recovered.ai_data == {}
+    redecided = repo.record_filter_decision(
+        recovered.id,
+        expected_version=recovered.version,
+        decision=_filter_decision(),
+        run_id=second.id,
+        fencing_token=lease.fencing_token,
+    )
+    assert redecided.state is AutopilotState.ELIGIBLE
+
+
 def test_eligibility_retry_persists_backoff_and_exhaustion(repo) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     lease = repo.acquire_lease("default", "retry-owner", ttl_seconds=300, now=now)
@@ -3748,6 +3804,54 @@ def test_finalize_best_resume_marks_one_ready_and_others_not_best(repo) -> None:
     assert repo.count_guards() == 0
     assert repo.count_application_attempts() == 0
     assert repo.count_reservations() == 0
+
+
+def test_finalize_allows_sibling_skipped_by_ranking(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    sibling = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
+    sibling_eligible = repo.record_filter_decision(
+        sibling.id,
+        expected_version=sibling.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+    sibling_ranked = repo.record_ranking_decision(
+        sibling_eligible.id,
+        expected_version=sibling_eligible.version,
+        decision=_ranking_decision(80),
+        run_id=run.id,
+    )
+    repo.transition_item(
+        sibling_ranked.id,
+        sibling_ranked.version,
+        AutopilotState.SKIPPED,
+        "deterministic_below_minimum",
+        run_id=run.id,
+    )
+    winner = repo.create_item(run.id, "default", "v-1", "r-2", "preset:python")
+    winner_eligible = repo.record_filter_decision(
+        winner.id,
+        expected_version=winner.version,
+        decision=_filter_decision(),
+        run_id=run.id,
+    )
+    winner_ranked = repo.record_ranking_decision(
+        winner_eligible.id,
+        expected_version=winner_eligible.version,
+        decision=_ranking_decision(80),
+        run_id=run.id,
+    )
+
+    changed = repo.finalize_ranked_candidates(
+        {winner_ranked.id: winner_ranked.version},
+        selected_item_ids=[winner_ranked.id],
+        resume_policy="best_resume_only",
+        run_id=run.id,
+    )
+
+    by_id = {item.id: item for item in changed}
+    assert by_id[winner_ranked.id].state is AutopilotState.READY
+    assert repo.get_item(sibling.id).state is AutopilotState.SKIPPED
 
 
 def test_finalize_best_resume_rejects_a_non_winning_tie_break_selection(repo) -> None:

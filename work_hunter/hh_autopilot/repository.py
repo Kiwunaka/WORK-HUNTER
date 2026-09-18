@@ -1361,6 +1361,43 @@ class AutopilotRepository:
             if claimed.last_run_id != origin_run_id:
                 raise StaleWrite("item could not be claimed by the current run")
             return claimed
+        if item.state is AutopilotState.RANKED and item.last_run_id != origin_run_id:
+            # Прерванный run остановился между ranking и finalize: сбрасываем
+            # в discovered, иначе item навсегда застрянет в ranked.
+            self.conn.execute(
+                """
+                UPDATE hh_autopilot_items
+                SET state = ?, last_run_id = ?, version = version + 1,
+                    retry_stage = ?, filter_json = '{}', deterministic_score = NULL,
+                    ai_json = '{}', last_outcome_code = '', next_attempt_at = '',
+                    updated_at = ?
+                WHERE id = ? AND state = ? AND version = ?
+                """,
+                (
+                    AutopilotState.DISCOVERED.value,
+                    origin_run_id,
+                    RetryStage.ELIGIBILITY.value,
+                    now,
+                    item.id,
+                    AutopilotState.RANKED.value,
+                    item.version,
+                ),
+            )
+            reset = self._item_for_update(item.id)
+            if (
+                reset.state is not AutopilotState.DISCOVERED
+                or reset.last_run_id != origin_run_id
+            ):
+                raise StaleWrite("ranked item could not be recovered")
+            self._insert_event(
+                item_id=item.id,
+                run_id=origin_run_id,
+                previous=AutopilotState.RANKED,
+                target=AutopilotState.DISCOVERED,
+                reason="recovered_ranked",
+                metadata={},
+            )
+            return reset
         return item
 
     def get_item(self, item_id: int) -> ItemRecord | None:
@@ -1892,7 +1929,14 @@ class AutopilotRepository:
                         raise StaleWrite(
                             "skipped candidate filter decision is malformed"
                         ) from exc
-                    if filter_decision.passed:
+                    # При нескольких резюме на одну вакансию соседний кандидат
+                    # мог пройти фильтр и быть отклонён ранжированием — это
+                    # терминальное состояние, а не незавершённый пайплайн.
+                    if filter_decision.passed and candidate.last_outcome_code not in {
+                        "deterministic_below_minimum",
+                        "ai_unsuitable",
+                        "not_best_resume",
+                    }:
                         raise StaleWrite(
                             "candidate set contains a nonterminal skipped item"
                         )
