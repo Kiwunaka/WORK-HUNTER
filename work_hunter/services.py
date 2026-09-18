@@ -1505,6 +1505,9 @@ _HH_RESUME_VOLATILE_KEYS = frozenset(
         "new_views",
         "next_publish_at",
         "paid_services",
+        # photo-ссылки HH переподписывает (t=...&h=...), из-за чего policy hash
+        # менялся сам по себе и grant автопилота становился недействительным.
+        "photo",
         "similar_vacancies",
         "total_experience",
         "total_views",

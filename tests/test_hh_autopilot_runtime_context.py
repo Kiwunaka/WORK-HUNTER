@@ -71,6 +71,10 @@ def test_policy_material_ignores_volatile_resume_counters(tmp_path):
         "actions": [{"id": "raise"}],
         "can_publish_or_update": True,
         "age": {"days": 1},
+        "photo": {
+            "id": "163977528",
+            "small": "https://img.hhcdn.ru/photo/1.jpeg?t=100&h=AAA",
+        },
     }
 
     def projection(payload):
@@ -92,6 +96,10 @@ def test_policy_material_ignores_volatile_resume_counters(tmp_path):
                 "new_views": 500,
                 "next_publish_at": "2026-10-01T12:36:49+0300",
                 "can_publish_or_update": False,
+                "photo": {
+                    "id": "163977528",
+                    "small": "https://img.hhcdn.ru/photo/1.jpeg?t=999&h=ZZZ",
+                },
             }
         ),
     )
