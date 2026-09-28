@@ -10,6 +10,33 @@ from work_hunter.letters import chat_completion, draft_cover_letter_ai
 from work_hunter.models import Job
 
 
+@pytest.mark.parametrize("recovers", [True, False])
+def test_broken_ai_response_retries_twice_and_records_each_attempt(monkeypatch, recovers):
+    calls, pauses, recorded = [], [], []
+
+    def post(url, **kwargs):
+        calls.append(kwargs["json"])
+        if len(calls) < 3 or not recovers:
+            raise requests.exceptions.ChunkedEncodingError("response interrupted")
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+            "choices": [{"message": {"content": "recovered"}}],
+        })
+
+    monkeypatch.setattr("requests.post", post)
+    monkeypatch.setattr("work_hunter.ai_backends.time.sleep", pauses.append)
+    config = {"api_key": "fixture", "base_url": "https://llm.example/chat/completions",
+              "model": "muse", "_usage_recorder": recorded.append}
+    if recovers:
+        assert chat_completion([{"role": "user", "content": "draft"}], config) == "recovered"
+    else:
+        with pytest.raises(requests.exceptions.ChunkedEncodingError):
+            chat_completion([{"role": "user", "content": "draft"}], config)
+    assert len(calls) == 3
+    assert calls[0] == calls[1] == calls[2]
+    assert pauses == [2, 4]
+    assert [row["status"] for row in recorded] == ["error", "error", "ok" if recovers else "error"]
+
+
 def test_direct_backend_uses_openai_compatible_request(monkeypatch):
     calls = []
 

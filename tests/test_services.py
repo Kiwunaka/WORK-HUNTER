@@ -6,6 +6,15 @@ import pytest
 
 from work_hunter import __version__
 from work_hunter import services as services_module
+from work_hunter.config import (
+    _update_autopilot_authorization_projection,
+    config_path,
+    database_path,
+    default_config,
+    save_config,
+)
+from work_hunter.hh_autopilot.repository import AutopilotRepository
+from work_hunter.storage import Storage
 from work_hunter.models import Job, JobScore
 from work_hunter.hh_autopilot.types import RunReport
 from work_hunter.services import WorkHunter, _package_details
@@ -70,6 +79,46 @@ def test_hh_autopilot_facade_uses_one_cached_injectable_factory(tmp_path):
     assert app.hh_autopilot_history(account="default", vacancy_id="v-1")["events"]
     assert app.hh_autopilot_challenges(account="default")["challenges"]
     assert calls == [app]
+
+
+def test_hh_autopilot_status_does_not_hide_same_grant_policy_mismatch(tmp_path):
+    config = default_config()
+    account = config["sources"]["hh"]["autopilot"]["accounts"][0]
+    account["enabled"] = True
+    config_file = config_path(tmp_path)
+    save_config(config_file, config)
+    storage = Storage(database_path(tmp_path))
+    repository = AutopilotRepository(storage)
+    try:
+        generation = repository.create_grants(
+            [("default", "grant-policy", "test", "status-test")]
+        )["default"]
+        _update_autopilot_authorization_projection(
+            config_file,
+            config,
+            {"default": {"enabled": True, "authorization_generation": generation}},
+        )
+        grant = repository.active_grant("default")
+        assert grant is not None
+        repository.create_run(
+            "default",
+            trigger="schedule",
+            policy_hash="changed-material",
+            grant_id=grant.id,
+        )
+        components = SimpleNamespace(repository=repository)
+        app = WorkHunter(
+            tmp_path,
+            hh_autopilot_factory=lambda _service: components,
+        )
+
+        status = app.hh_autopilot_status("default")
+
+        assert status["authorization_generation_match"] is True
+        assert status["last_run_policy_mismatch"] is True
+        assert status["policy_match"] is False
+    finally:
+        storage.close()
 
 
 def test_confirm_apply_enters_common_engine_with_exact_literal_target(tmp_path):

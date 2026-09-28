@@ -66,8 +66,7 @@ def _chatik_page() -> dict[str, Any]:
     created = datetime.now(UTC).isoformat()
     return {
         "chats": {
-            "page": 0,
-            "pages": 1,
+            "found": 3,
             "items": [
                 {
                     "id": 101,
@@ -208,12 +207,12 @@ def test_chatik_client_uses_exact_protocol_and_idempotency() -> None:
     )
     key = str(uuid.uuid4())
 
-    client.list_chats(page=2)
+    client.list_chats(cursor="1790451121604_101")
     client.send_message("101", "Да", idempotency_key=key)
     client.leave_chat(102)
 
     assert http.calls[0]["url"] == "https://chatik.hh.ru/chatik/api/chats"
-    assert http.calls[0]["params"]["page"] == 2
+    assert http.calls[0]["params"]["from"] == "1790451121604_101"
     assert http.calls[0]["headers"]["X-Xsrftoken"] == "xsrf"
     assert http.calls[1]["json"] == {
         "chatId": 101,
@@ -309,7 +308,7 @@ class FakeChatikClient:
         self.sent: list[tuple[str, str, str]] = []
         self.left: list[str] = []
 
-    def list_chats(self, *, page: int = 0) -> dict[str, Any]:
+    def list_chats(self, *, cursor: str | None = None) -> dict[str, Any]:
         return self.page
 
     def get_chat_data(self, chat_id: str, applicant_id: str) -> dict[str, Any]:
@@ -377,6 +376,33 @@ def test_service_plans_sends_leaves_and_deduplicates(monkeypatch: pytest.MonkeyP
     assert fake.left == ["102"]
     assert second["count"] == 0
     assert second["leave_count"] == 0
+
+
+def test_service_follows_cursor_past_own_messages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    first = _chatik_page()
+    first["chats"] = {
+        "found": 2,
+        "nextFrom": "1790451121604_103",
+        "items": [first["chats"]["items"][2]],
+    }
+    second = _chatik_page()
+    second["chats"] = {"found": 2, "items": [second["chats"]["items"][0]]}
+    http = FakeHTTPSession([first, second])
+    client = HHChatikClient(
+        cookies=[{"domain": ".hh.ru", "name": "hhtoken", "value": "v"}],
+        xsrf_token="xsrf",
+        user_agent="Work Hunter",
+        session=http,
+    )
+    app = WorkHunter(root=tmp_path)
+    monkeypatch.setattr(app, "_hh_chatik_client", lambda **kwargs: client)
+
+    result = app.list_hh_chatik(max_pages=5)
+
+    assert [chat["chat_id"] for chat in result["chats"]] == ["101"]
+    assert result["pages_loaded"] == result["pages_available"] == 2
+    assert "from" not in http.calls[0]["params"]
+    assert http.calls[1]["params"]["from"] == "1790451121604_103"
 
 
 def test_service_ai_button_must_return_exact_option(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

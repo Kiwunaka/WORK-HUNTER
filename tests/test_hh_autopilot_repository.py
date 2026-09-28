@@ -364,6 +364,25 @@ def repo(tmp_path):
     storage.close()
 
 
+def test_matching_application_ignores_city_but_requires_same_role_content(repo):
+    from work_hunter.hh_autopilot.search import normalize_vacancy
+    from work_hunter.models import Job
+
+    raw = {
+        "id": "original", "name": "ML Engineer", "description": "Train recommendation models",
+        "employer": {"name": "ACME"}, "area": {"name": "Москва"},
+    }
+    original = normalize_vacancy(raw)
+    job_id = repo.storage.upsert_job(Job(**original.job))
+    repo.storage.save_application(job_id, account_profile_id="default", resume_id="r-1")
+    copy = normalize_vacancy({**raw, "id": "regional-copy", "area": {"name": "Новосибирск"}})
+
+    assert repo.matching_application("default", copy) == "original"
+    assert repo.matching_application("another-account", copy) is None
+    different = normalize_vacancy({**raw, "id": "different", "description": "Build speech recognition"})
+    assert repo.matching_application("default", different) is None
+
+
 RANK_COMPONENTS = (
     "role",
     "skills",
@@ -507,6 +526,55 @@ def test_transition_updates_item_and_event_in_one_commit(repo) -> None:
     assert "secret" not in repo.list_events(item.id)[-1]["metadata_json"]
 
 
+def test_curated_requeue_only_reopens_unsent_ranking_skips(repo) -> None:
+    run = repo.create_run("default", trigger="manual", policy_hash="hash")
+    lease = repo.acquire_lease("default", "curator", ttl_seconds=300, now=LEASE_START)
+    assert lease is not None
+
+    def skipped(vacancy_id: str, reason: str) -> ItemRecord:
+        item = repo.create_item(run.id, "default", vacancy_id, "resume", "preset:ai")
+        if reason in {"ai_unsuitable", "deterministic_below_minimum"}:
+            item = repo.record_filter_decision(
+                item.id, expected_version=item.version, decision=_filter_decision(),
+                run_id=run.id,
+            )
+            item = repo.record_ranking_decision(
+                item.id, expected_version=item.version,
+                decision=_nonqualifying_ranking_decision(), run_id=run.id,
+            )
+        return repo.transition_item(
+            item.id, item.version, AutopilotState.SKIPPED, reason,
+            run_id=run.id,
+        )
+
+    candidate = skipped("v-curated", "ai_unsuitable")
+    reopened = repo.requeue_curated_skipped(
+        candidate.id, actor="operator", fencing_token=lease.fencing_token,
+        now=LEASE_START,
+    )
+    assert reopened.state is AutopilotState.READY
+    assert repo.list_events(candidate.id)[-1]["reason_code"] == "curated_requeued"
+
+    hard_skip = skipped("v-hard", "hard_filter:minimum_salary")
+    with pytest.raises(StaleWrite, match="ranking skips"):
+        repo.requeue_curated_skipped(
+            hard_skip.id, actor="operator", fencing_token=lease.fencing_token,
+            now=LEASE_START,
+        )
+
+    duplicate = skipped("v-duplicate", "deterministic_below_minimum")
+    repo.conn.execute(
+        "INSERT INTO hh_negotiations (id, state, vacancy_id, resume_id, updated_at) "
+        "VALUES ('n-1', 'response', 'v-duplicate', 'resume', '')"
+    )
+    repo.conn.commit()
+    with pytest.raises(StaleWrite, match="application, negotiation"):
+        repo.requeue_curated_skipped(
+            duplicate.id, actor="operator", fencing_token=lease.fencing_token,
+            now=LEASE_START,
+        )
+
+
 def test_discovered_item_from_interrupted_run_is_reclaimed(repo) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     lease = repo.acquire_lease("default", "claim-owner", ttl_seconds=300, now=now)
@@ -547,6 +615,27 @@ def test_discovered_item_from_interrupted_run_is_reclaimed(repo) -> None:
     assert decided.state is AutopilotState.ELIGIBLE
 
 
+@pytest.mark.parametrize("owner_finished", [False, True])
+def test_eligible_item_recovery_requires_finished_owner(repo, owner_finished) -> None:
+    lease = repo.acquire_lease("default", "recovery-owner", ttl_seconds=300)
+    first = repo.create_run("default", trigger="schedule", policy_hash="hash", fencing_token=lease.fencing_token)
+    item = repo.create_item(first.id, "default", "v-orphan", "r-1", "preset")
+    eligible = repo.record_filter_decision(item.id, expected_version=item.version,
+        decision=_filter_decision(), run_id=first.id, fencing_token=lease.fencing_token)
+    if owner_finished:
+        repo.finish_run(first.id, status="interrupted", fencing_token=lease.fencing_token)
+    second = repo.create_run("default", trigger="schedule", policy_hash="hash", fencing_token=lease.fencing_token)
+
+    recovered = repo.create_item(second.id, "default", "v-orphan", "r-1", "preset")
+
+    assert recovered.state is (AutopilotState.DISCOVERED if owner_finished else AutopilotState.ELIGIBLE)
+    assert recovered.last_run_id == (second.id if owner_finished else first.id)
+    if owner_finished:
+        assert recovered.version == eligible.version + 1
+        assert recovered.filter_data == {}
+        assert repo.list_events(item.id)[-1]["reason_code"] == "recovered_eligible"
+
+
 def test_adopt_ready_items_claims_orphans_for_current_run(repo) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     lease = repo.acquire_lease("default", "adopt-owner", ttl_seconds=300, now=now)
@@ -557,28 +646,31 @@ def test_adopt_ready_items_claims_orphans_for_current_run(repo) -> None:
         policy_hash="hash",
         fencing_token=lease.fencing_token,
     )
-    item = repo.create_item(first.id, "default", "v-1", "r-1", "preset")
-    eligible = repo.record_filter_decision(
-        item.id,
-        expected_version=item.version,
-        decision=_filter_decision(),
-        run_id=first.id,
-        fencing_token=lease.fencing_token,
-    )
-    ranked = repo.record_ranking_decision(
-        eligible.id,
-        expected_version=eligible.version,
-        decision=_ranking_decision(),
-        run_id=first.id,
-        fencing_token=lease.fencing_token,
-    )
-    repo.finalize_ranked_candidates(
-        {ranked.id: ranked.version},
-        selected_item_ids=[ranked.id],
-        resume_policy="best_resume_only",
-        run_id=first.id,
-        fencing_token=lease.fencing_token,
-    )
+    items = []
+    for vacancy_id, resume_id, score in (("v-1", "r-1", 80.0), ("v-2", "r-1", 95.0), ("v-3", "r-2", 99.0)):
+        item = repo.create_item(first.id, "default", vacancy_id, resume_id, "preset")
+        eligible = repo.record_filter_decision(
+            item.id,
+            expected_version=item.version,
+            decision=_filter_decision(),
+            run_id=first.id,
+            fencing_token=lease.fencing_token,
+        )
+        ranked = repo.record_ranking_decision(
+            eligible.id,
+            expected_version=eligible.version,
+            decision=_ranking_decision(score),
+            run_id=first.id,
+            fencing_token=lease.fencing_token,
+        )
+        repo.finalize_ranked_candidates(
+            {ranked.id: ranked.version},
+            selected_item_ids=[ranked.id],
+            resume_policy="best_resume_only",
+            run_id=first.id,
+            fencing_token=lease.fencing_token,
+        )
+        items.append(item)
     repo.finish_run(
         first.id,
         status="interrupted",
@@ -597,12 +689,19 @@ def test_adopt_ready_items_claims_orphans_for_current_run(repo) -> None:
         "default",
         run_id=second.id,
         fencing_token=lease.fencing_token,
-        limit=10,
+        limit=1,
+        resume_ids=("r-1",),
+        vacancy_ids=("v-2",),
     )
 
-    assert [value.id for value in adopted] == [item.id]
-    assert repo.get_item(item.id).last_run_id == second.id
-    assert repo.get_item(item.id).state is AutopilotState.READY
+    assert [value.id for value in adopted] == [items[1].id]
+    assert adopted[0].last_run_id == second.id
+    assert adopted[0].state is AutopilotState.READY
+    assert repo.ready_items("default", limit=1, resume_ids=("r-1",))[0].last_run_id == second.id
+    assert repo.get_item(items[0].id).last_run_id == first.id
+    assert repo.get_item(items[0].id).state is AutopilotState.READY
+    assert repo.get_item(items[2].id).last_run_id == first.id
+    assert repo.get_item(items[2].id).state is AutopilotState.READY
 
 
 def test_ranked_item_from_interrupted_run_is_reset_for_reevaluation(repo) -> None:
@@ -718,6 +817,23 @@ def test_eligibility_retry_persists_backoff_and_exhaustion(repo) -> None:
     assert exhausted.state is AutopilotState.DEAD
     assert exhausted.next_attempt_at == ""
     assert exhausted.last_outcome_code == "retry_exhausted"
+
+    winner = repo.create_item(run.id, "default", "v-ai", "r-2", "preset")
+    winner = repo.record_filter_decision(
+        winner.id, expected_version=winner.version, decision=_filter_decision(),
+        run_id=run.id, fencing_token=lease.fencing_token,
+    )
+    winner = repo.record_ranking_decision(
+        winner.id, expected_version=winner.version, decision=_ranking_decision(90),
+        run_id=run.id, fencing_token=lease.fencing_token,
+    )
+    changed = repo.finalize_ranked_candidates(
+        {winner.id: winner.version}, selected_item_ids=[winner.id],
+        resume_policy="best_resume_only", run_id=run.id,
+        fencing_token=lease.fencing_token,
+    )
+    assert changed[0].state is AutopilotState.READY
+    assert repo.get_item(exhausted.id).state is AutopilotState.DEAD
 
 
 def test_stale_version_cannot_write_or_append_an_event(repo) -> None:
@@ -1029,8 +1145,9 @@ def test_list_due_items_filters_account_state_and_time_deterministically(repo) -
     run = repo.create_run("default", trigger="manual", policy_hash="hash")
     other_run = repo.create_run("other", trigger="manual", policy_hash="hash")
     items = [
-        repo.create_item(run.id, "default", f"v-{index}", "r-1", "preset")
-        for index in range(1, 4)
+        repo.create_item(run.id, "default", "v-1", "r-2", "preset"),
+        repo.create_item(run.id, "default", "v-2", "r-1", "preset"),
+        repo.create_item(run.id, "default", "v-3", "r-1", "preset"),
     ]
     other = repo.create_item(other_run.id, "other", "v-4", "r-1", "preset")
     filter_json = _canonical_filter_json()
@@ -1071,6 +1188,15 @@ def test_list_due_items_filters_account_state_and_time_deterministically(repo) -
         now=datetime(2026, 1, 2, tzinfo=timezone.utc),
         limit=1,
     ) == [due[0]]
+    assert [item.id for item in repo.list_due_items(
+        "default",
+        states=[AutopilotState.RETRY_WAIT, AutopilotState.ELIGIBLE],
+        now=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        limit=1,
+        resume_ids=("r-1",),
+        vacancy_ids=("v-2",),
+    )] == [items[1].id]
+    assert repo.get_item(items[0].id).state is AutopilotState.RETRY_WAIT
 
 
 def test_repository_rejects_raw_state_strings_and_bad_identifier_types(repo) -> None:
@@ -1329,6 +1455,82 @@ def _dispatch_context(
         vacancy_id=vacancy_id,
     )
     return lease, run, item, attempt_id
+
+
+@pytest.mark.parametrize("certainty", ["definitely_not_sent", "unknown"])
+@pytest.mark.parametrize("code,roles", [
+    ("missing_required_data", []),
+    ("role_not_allowed", ["40"]),
+])
+def test_requeue_preflight_skip_requires_proof_of_no_send(repo, certainty, code, roles):
+    lease, run, item, attempt_id = _dispatch_context(repo)
+    eligible = repo.record_filter_decision(item.id, expected_version=item.version,
+        decision=_filter_decision(), run_id=run.id, fencing_token=lease.fencing_token)
+    repo.record_ranking_decision(item.id, expected_version=eligible.version,
+        decision=_ranking_decision(), run_id=run.id, fencing_token=lease.fencing_token)
+    raw = json.dumps({"certainty": certainty, "code": code,
+                      "payload": {"stage": "preflight", "field": "professional_roles",
+                                  "professional_role_ids": roles}})
+    repo.conn.execute(
+        "UPDATE hh_application_attempts SET raw_result_json = ? WHERE id = ?",
+        (raw, attempt_id),
+    )
+    repo.conn.execute(
+        """UPDATE hh_autopilot_items SET state = 'skipped', active_attempt_id = ?,
+        application_attempt_count = 1, last_outcome_code = ? WHERE id = ?""",
+        (attempt_id, code, item.id),
+    )
+    repo.conn.commit()
+    repo.finish_run(run.id, status="interrupted")
+    if certainty != "definitely_not_sent":
+        with pytest.raises(StaleWrite, match="verified preflight"):
+            repo.requeue_verified_preflight_skip(item.id, actor="repair", fencing_token=lease.fencing_token, now=LEASE_START)
+        return
+    repaired = repo.requeue_verified_preflight_skip(item.id, actor="repair", fencing_token=lease.fencing_token, now=LEASE_START)
+    assert repaired.state is AutopilotState.READY
+    assert repaired.active_attempt_id == attempt_id
+    assert repaired.application_attempt_count == 1
+    assert repo.list_events(item.id)[-1]["reason_code"] == "preflight_requeued"
+    with pytest.raises(StaleWrite):
+        repo.requeue_verified_preflight_skip(item.id, actor="repair", fencing_token=lease.fencing_token, now=LEASE_START)
+
+
+@pytest.mark.parametrize("old_reason", ["hard_filter:area", "missing_required_data"])
+def test_curated_filter_skip_rechecks_current_filter_before_requeue(repo, old_reason):
+    lease = repo.acquire_lease("default", "curator", ttl_seconds=120, now=LEASE_START)
+    assert lease is not None
+    run = repo.create_run("default", trigger="manual", policy_hash="policy-hash",
+                          fencing_token=lease.fencing_token)
+    item = repo.create_item(run.id, "default", "v-ml", "r-ml", "preset:ml")
+    old_decision = (
+        _filter_decision(passed=False)
+        if old_reason.startswith("hard_filter:")
+        else FilterDecision(passed=False, reason=old_reason,
+                            evidence={"field": "history.active_vacancy_ids"})
+    )
+    rejected = repo.record_filter_decision(
+        item.id, expected_version=item.version, decision=old_decision,
+        run_id=run.id, fencing_token=lease.fencing_token,
+    )
+    assert rejected.state is AutopilotState.SKIPPED
+    repo.finish_run(run.id, status="completed")
+    with pytest.raises(StaleWrite, match="did not pass"):
+        repo.requeue_curated_filter_skip(
+            item.id, decision=_filter_decision(passed=False), actor="curator",
+            fencing_token=lease.fencing_token, now=LEASE_START,
+        )
+    reopened = repo.requeue_curated_filter_skip(
+        item.id, decision=_filter_decision(), actor="curator",
+        fencing_token=lease.fencing_token, now=LEASE_START,
+    )
+    assert reopened.state is AutopilotState.READY
+    assert reopened.filter_data["passed"] is True
+    assert repo.list_events(item.id)[-1]["metadata_json"]["previous_reason"] == old_reason
+    with pytest.raises(StaleWrite):
+        repo.requeue_curated_filter_skip(
+            item.id, decision=_filter_decision(), actor="curator",
+            fencing_token=lease.fencing_token, now=LEASE_START,
+        )
 
 
 class _FakeClock:
@@ -3606,6 +3808,61 @@ def _prepare_ranked_items(
     return run, tuple(ranked)
 
 
+def test_retry_selection_ignores_removed_resumes_but_waits_for_active_ones(repo) -> None:
+    previous, ranked = _prepare_ranked_items(repo, resume_ids=("r-1", "removed-ranked"))
+    pending = repo.create_item(previous.id, "default", "v-1", "r-2", "preset")
+    removed = repo.create_item(previous.id, "default", "v-1", "removed-sysadmin", "preset")
+    repo.finish_run(previous.id, status="completed")
+    lease = repo.acquire_lease("default", "scope-owner", ttl_seconds=300)
+    run = repo.create_run(
+        "default", trigger="schedule", policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+    assert repo.adopt_ranked_candidates_for_retry(
+        "default", "v-1", run_id=run.id, fencing_token=lease.fencing_token,
+        active_resume_ids=("r-1", "r-2"),
+    ) == ()
+    candidates = repo.adopt_ranked_candidates_for_retry(
+        "default", "v-1", run_id=run.id, fencing_token=lease.fencing_token,
+        active_resume_ids=("r-1",),
+    )
+    assert [candidate.item_id for candidate in candidates] == [ranked[0].id]
+    changed = repo.finalize_ranked_candidates(
+        {candidate.item_id: candidate.expected_version for candidate in candidates},
+        selected_item_ids=[ranked[0].id], resume_policy="best_resume_only",
+        run_id=run.id, fencing_token=lease.fencing_token,
+    )
+    assert changed[0].state is AutopilotState.READY
+    assert repo.get_item(pending.id).state is AutopilotState.DISCOVERED
+    assert repo.get_item(removed.id).state is AutopilotState.DISCOVERED
+    assert repo.get_item(ranked[1].id).last_run_id == previous.id
+
+
+@pytest.mark.parametrize("winner_state,reason", [
+    ("ready", "ready"), ("applied", "applied"), ("skipped", "duplicate_vacancy"),
+])
+def test_retry_selection_does_not_reopen_dispatched_vacancy(repo, winner_state, reason) -> None:
+    previous, ranked = _prepare_ranked_items(repo)
+    # A previous run can leave a ranked sibling while its winner is dispatched.
+    repo.conn.execute(
+        "UPDATE hh_autopilot_items SET state = ?, last_outcome_code = ? WHERE id = ?",
+        (winner_state, reason, ranked[0].id),
+    )
+    repo.conn.commit()
+    repo.finish_run(previous.id, status="completed")
+    lease = repo.acquire_lease("default", "retry-owner", ttl_seconds=300)
+    run = repo.create_run(
+        "default", trigger="schedule", policy_hash="hash",
+        fencing_token=lease.fencing_token,
+    )
+
+    assert repo.adopt_ranked_candidates_for_retry(
+        "default", "v-1", run_id=run.id, fencing_token=lease.fencing_token,
+        active_resume_ids=("r-1", "r-2"),
+    ) == ()
+    assert repo.get_item(ranked[1].id).last_run_id == previous.id
+
+
 def test_record_filter_decision_persists_evidence_and_one_transition(repo) -> None:
     run = repo.create_run("default", trigger="manual", policy_hash="hash")
     item = repo.create_item(run.id, "default", "v-1", "r-1", "preset:python")
@@ -4516,6 +4773,30 @@ def test_task8_lease_expiry_is_checked_after_waiting_for_write_lock(
 
     assert not holder.is_alive()
     assert (repo.get_item(current.id), repo.list_events(current.id)) == before
+
+
+def test_receipt_transaction_waits_for_parallel_writer(repo) -> None:
+    locked = Event()
+
+    def hold_write_lock() -> None:
+        connection = sqlite3.connect(repo.storage.path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            locked.set()
+            time.sleep(5.2)
+            connection.rollback()
+        finally:
+            connection.close()
+
+    holder = Thread(target=hold_write_lock)
+    holder.start()
+    assert locked.wait(timeout=2)
+    try:
+        with repo.immediate():
+            assert repo.conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        holder.join(timeout=7)
+    assert not holder.is_alive()
 
 
 def test_generic_transition_rejects_task8_stage_owned_edges(repo) -> None:

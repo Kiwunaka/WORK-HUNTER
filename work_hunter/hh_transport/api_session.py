@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from .backends import ConfigBackend, DictConfigBackend
+from .challenge_urls import sanitize_hh_challenge_url
 from .errors import (
     HHAuthError,
     HHForbiddenError,
@@ -51,7 +52,7 @@ class HHApiSession:
         success = 200 <= response.status_code < 300
         payload = _response_json(response, strict=success, method=method)
         if not success:
-            raise _error_from_response(response.status_code, payload)
+            raise _error_from_response(response.status_code, payload, response=response)
         return payload
 
     def request(self, method: str, path: str, **kwargs: Any):
@@ -109,7 +110,7 @@ class HHApiSession:
         success = 200 <= response.status_code < 300
         payload = _response_json(response, strict=success, method="POST")
         if not success:
-            raise _error_from_response(response.status_code, payload)
+            raise _error_from_response(response.status_code, payload, response=response)
         self.identity.update_from_token_response(payload)
         self.backend.save(self.identity.to_config_patch())
         return payload
@@ -332,18 +333,120 @@ def _hh_error_code(payload: dict[str, Any]) -> str:
     return str(payload.get("error") or "unknown")
 
 
-def _error_from_response(status_code: int, payload: dict[str, Any]) -> HHTransportError:
+def _error_from_response(
+    status_code: int,
+    payload: dict[str, Any],
+    *,
+    response: Any | None = None,
+) -> HHTransportError:
     code = "redirect" if 300 <= status_code < 400 else _hh_error_code(payload)
     message = f"HH API error {status_code}: {code}"
+    error_payload = payload
+    if code == "captcha_required":
+        challenge_metadata = _captcha_challenge_metadata(response, payload)
+        if challenge_metadata:
+            error_payload = {**payload, "challenge_metadata": challenge_metadata}
     if status_code == 401:
-        return HHAuthError(message, status_code=status_code, code=code, payload=payload)
+        return HHAuthError(message, status_code=status_code, code=code, payload=error_payload)
     if status_code == 403:
-        return HHForbiddenError(message, status_code=status_code, code=code, payload=payload)
+        return HHForbiddenError(message, status_code=status_code, code=code, payload=error_payload)
     if status_code == 429:
-        return HHRateLimitError(message, status_code=status_code, code=code, payload=payload)
+        return HHRateLimitError(message, status_code=status_code, code=code, payload=error_payload)
     if status_code == 400:
-        return HHValidationError(message, status_code=status_code, code=code, payload=payload)
-    return HHTransportError(message, status_code=status_code, code=code, payload=payload)
+        return HHValidationError(message, status_code=status_code, code=code, payload=error_payload)
+    return HHTransportError(message, status_code=status_code, code=code, payload=error_payload)
+
+
+def _captcha_challenge_metadata(
+    response: Any | None,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    """Keep only displayable challenge pointers from a captcha error.
+
+    The response body remains the transport error payload.  This separate,
+    allowlisted object is the only part consumed by the autopilot event path;
+    only HH's opaque captcha state is retained, while unrelated query data
+    and fragments are removed.
+    """
+    metadata: dict[str, str] = {}
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    containers = [payload]
+    if isinstance(errors, list):
+        containers.extend(item for item in errors if isinstance(item, dict))
+
+    for container in containers:
+        if not metadata.get("captcha_url"):
+            for key in ("captcha_url", "captchaUrl"):
+                value = _safe_hh_challenge_url(container.get(key))
+                if value:
+                    metadata["captcha_url"] = value
+                    break
+            captcha = container.get("captcha")
+            if isinstance(captcha, dict):
+                value = _safe_hh_challenge_url(captcha.get("url"))
+                if value:
+                    metadata["captcha_url"] = value
+        if not metadata.get("location"):
+            value = _safe_hh_challenge_url(container.get("location"))
+            if value:
+                metadata["location"] = value
+        if not metadata.get("request_id"):
+            for key in ("request_id", "requestId", "request-id"):
+                value = _safe_challenge_text(container.get(key), maximum=200)
+                if value:
+                    metadata["request_id"] = value
+                    break
+
+    location = _safe_hh_challenge_url(_response_header(response, "Location"))
+    if location:
+        metadata["location"] = location
+    if not metadata.get("captcha_url"):
+        captcha_url = _safe_hh_challenge_url(
+            _response_header(response, "X-Captcha-Url")
+            or _response_header(response, "Captcha-Url")
+        )
+        if captcha_url:
+            metadata["captcha_url"] = captcha_url
+    if not metadata.get("request_id"):
+        for name in ("X-Request-ID", "Request-ID", "X-Correlation-ID"):
+            value = _safe_challenge_text(_response_header(response, name), maximum=200)
+            if value:
+                metadata["request_id"] = value
+                break
+    return metadata
+
+
+def _response_header(response: Any | None, name: str) -> str:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return ""
+    try:
+        items = headers.items()
+    except AttributeError:
+        return ""
+    for key, value in items:
+        if (
+            isinstance(key, str)
+            and key.casefold() == name.casefold()
+            and isinstance(value, str)
+        ):
+            return value
+    return ""
+
+
+def _safe_challenge_text(value: Any, *, maximum: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if not value or len(value) > maximum:
+        return ""
+    if any(ord(character) < 0x20 or ord(character) > 0x7E for character in value):
+        return ""
+    return value
+
+
+def _safe_hh_challenge_url(value: Any) -> str:
+    return sanitize_hh_challenge_url(value)
 
 
 class HHApiTransport(HHApiSession):

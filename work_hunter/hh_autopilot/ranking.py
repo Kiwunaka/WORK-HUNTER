@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -66,18 +67,65 @@ AI_OUTPUT_SCHEMA = StructuredOutputSchema(
 
 _ABSENT = object()
 _SYSTEM_PROMPT = (
-    "Judge job suitability using only supplied facts. "
+    "Judge whether applying is worthwhile, not whether the candidate already "
+    "matches every requirement perfectly. Use only supplied facts. "
+    "Accept transferable experience between BI, data analytics, data engineering "
+    "and AI application engineering when core tasks overlap. "
+    "Do not reject solely for one missing tool, an unfamiliar industry, a seniority "
+    "label or a modest gap in required years. Distinguish preferred skills from "
+    "essential duties. Missing evidence of a skill is not proof the candidate "
+    "cannot learn it; assess the core fit rather than demand a complete checklist. "
+    "Reject clear role mismatches or roles whose main duties have no supported "
+    "transferable foundation. Do not treat general analytics experience as proven "
+    "product/mobile analytics or basic Spark as advanced PySpark. "
     "Do not infer or invent candidate experience. "
     "Every item in evidence and reasons must be an exact substring copied "
     "from the supplied facts with the same wording. "
     "Do not paraphrase, translate or explain; quote facts only. "
     "If facts are insufficient, set confidence below 0.5."
 )
-_PROMPT_LIMITS = {"light": 12_000, "heavy": 20_000}
+_PROMPT_LIMITS = {"light": 20_000, "heavy": 20_000}
+_LOGGER = logging.getLogger(__name__)
 
 
 class NoQualifyingCandidatesError(LookupError):
     pass
+
+
+def basic_requirements_decision(filter_decision: FilterDecision) -> RankingDecision:
+    """Turn a passed hard-filter result into a non-ranked ready decision.
+
+    The persisted ranking schema still requires ``RankScore`` for compatibility
+    with existing repository records.  Basic-requirements mode must not call the
+    deterministic scorer or the AI policy, so the score is deliberately a zero
+    placeholder and carries no suitability signal.
+    """
+    if not isinstance(filter_decision, FilterDecision):
+        raise TypeError("filter_decision must be a FilterDecision")
+    weight = 1.0 / len(COMPONENTS)
+    weights = {name: weight for name in COMPONENTS}
+    # Make the sum exact enough for RankScore's strict invariant after division.
+    weights[COMPONENTS[-1]] = 1.0 - math.fsum(weights[name] for name in COMPONENTS[:-1])
+    score = RankScore(
+        score=0.0,
+        components={name: 0.0 for name in COMPONENTS},
+        weights=weights,
+    )
+    if not filter_decision.passed:
+        return RankingDecision(
+            ready=False,
+            retry=False,
+            reason=filter_decision.reason,
+            rank_score=score,
+            ai_decision=None,
+        )
+    return RankingDecision(
+        ready=True,
+        retry=False,
+        reason="deterministic_score",
+        rank_score=score,
+        ai_decision=None,
+    )
 
 
 def _mapping(value: Any, *, field: str) -> dict[str, Any]:
@@ -841,6 +889,7 @@ class StructuredAIRanker:
         *,
         detail: str,
     ) -> AIDecision:
+        stage = "payload"
         try:
             if detail not in {"light", "heavy"}:
                 raise ValueError("detail must be light or heavy")
@@ -869,6 +918,7 @@ class StructuredAIRanker:
             kwargs: dict[str, Any] = {"max_retries": 1}
             if self._completion is not None:
                 kwargs["completion"] = self._completion
+            stage = "model_call"
             reply = self._structured_call(
                 [
                     {
@@ -885,8 +935,15 @@ class StructuredAIRanker:
                 **kwargs,
             )
             parsed = reply.parsed if hasattr(reply, "parsed") else reply
+            stage = "response_validation"
             return self._decision(parsed, payload=payload)
-        except Exception:
+        except Exception as error:
+            # Provider errors can contain credentials or private payloads.
+            _LOGGER.warning(
+                "AI ranking unavailable: stage=%s error_type=%s",
+                stage,
+                type(error).__name__,
+            )
             return AIDecision(
                 available=False,
                 suitable=None,
@@ -923,7 +980,7 @@ class StructuredAIRanker:
                 "description": cls._safe_scalar(
                     vacancy,
                     ("description",),
-                    2_000 if detail == "light" else 8_000,
+                    4_000 if detail == "light" else 8_000,
                 ),
                 "experience_id": cls._safe_scalar(
                     vacancy,
@@ -1185,22 +1242,28 @@ class StructuredAIRanker:
 
         rendered = dump()
         while size(rendered) > maximum:
+            # Keep room for requirements after the employer introduction.
+            # Long candidate histories must not reduce the vacancy to a teaser.
             leaves = [
-                leaf
-                for leaf in string_leaves(fitted)
-                if leaf[0] != ("detail",) and leaf[1]
+                (path, text, min(len(text), maximum // 4)
+                 if path == ("vacancy", "description") else 0)
+                for path, text in string_leaves(fitted)
+                if path != ("detail",) and text
             ]
+            leaves = [leaf for leaf in leaves if len(leaf[1]) > leaf[2]]
             if not leaves:
                 raise ValueError("structured AI payload cannot fit its budget")
             leaves.sort(
                 key=lambda leaf: (
-                    -len(leaf[1]),
+                    -(len(leaf[1]) - leaf[2]),
                     tuple(str(part) for part in leaf[0]),
                 )
             )
-            path, text = leaves[0]
+            path, text, minimum = leaves[0]
             excess = size(rendered) - maximum
-            remove = max(excess, max(1, len(text) // 4))
+            # Byte overflow can exceed an entire field's character count.
+            # Trim gradually so one long job description is not erased first.
+            remove = min(excess, max(1, len(text) // 4), len(text) - minimum)
             replace(path, text[: max(0, len(text) - remove)].rstrip())
             rendered = dump()
         return fitted
@@ -1306,6 +1369,8 @@ class RankingPolicy:
         self._validate_config()
 
     def _validate_config(self) -> None:
+        if self._config.get("mode", "ranked") not in {"ranked", "basic_requirements"}:
+            raise ValueError("invalid ranking mode")
         for field in (
             "minimum_score",
             "borderline_low",
@@ -1348,6 +1413,8 @@ class RankingPolicy:
             raise TypeError("filter_decision must be a FilterDecision")
         if not isinstance(rank_score, RankScore):
             raise TypeError("rank_score must be a RankScore")
+        if self._config.get("mode", "ranked") == "basic_requirements":
+            return basic_requirements_decision(filter_decision)
         if not filter_decision.passed:
             return RankingDecision(
                 ready=False,
@@ -1407,6 +1474,12 @@ class RankingPolicy:
             and ai.confidence is not None
             and ai.confidence >= self._config["minimum_ai_confidence"]
         )
+        if ai.available and not confident:
+            _LOGGER.warning(
+                "AI ranking below confidence threshold: confidence=%s minimum=%s",
+                ai.confidence,
+                self._config["minimum_ai_confidence"],
+            )
         if confident:
             return RankingDecision(
                 ready=ai.suitable is True,
@@ -1424,13 +1497,15 @@ class RankingPolicy:
             reason="ai_unavailable",
         )
         failure_policy = self._config["ai_failure_policy"]
+        failure_reason = "ai_low_confidence" if ai.available else "ai_unavailable"
+        failure_ai = ai if ai.available else unavailable_ai
         if failure_policy == "retry":
             return RankingDecision(
                 ready=False,
                 retry=True,
-                reason="ai_unavailable",
+                reason=failure_reason,
                 rank_score=rank_score,
-                ai_decision=unavailable_ai,
+                ai_decision=failure_ai,
             )
         if failure_policy == "deterministic":
             return self._deterministic_fallback(
@@ -1440,9 +1515,9 @@ class RankingPolicy:
         return RankingDecision(
             ready=False,
             retry=False,
-            reason="ai_unavailable",
+            reason=failure_reason,
             rank_score=rank_score,
-            ai_decision=unavailable_ai,
+            ai_decision=failure_ai,
         )
 
     def _deterministic(
@@ -1532,6 +1607,7 @@ def select_resume(
 __all__ = [
     "AI_SCHEMA",
     "COMPONENTS",
+    "basic_requirements_decision",
     "DeterministicRanker",
     "NoQualifyingCandidatesError",
     "RankingPolicy",

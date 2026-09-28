@@ -16,7 +16,7 @@ ALLOWED_TRANSITIONS = {
         AutopilotState.SKIPPED,
         AutopilotState.RETRY_WAIT,
     },
-    AutopilotState.READY: {AutopilotState.APPLYING},
+    AutopilotState.READY: {AutopilotState.APPLYING, AutopilotState.SKIPPED},
     AutopilotState.APPLYING: {
         AutopilotState.APPLIED,
         AutopilotState.SKIPPED,

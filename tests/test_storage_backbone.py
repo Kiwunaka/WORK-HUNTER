@@ -73,7 +73,7 @@ def test_storage_enables_foreign_keys_and_busy_timeout(tmp_path):
     storage = Storage(tmp_path / "db.sqlite3")
 
     assert storage.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert storage.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    assert storage.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
     with pytest.raises(sqlite3.IntegrityError):
         storage.save_application(999, "applied")
 

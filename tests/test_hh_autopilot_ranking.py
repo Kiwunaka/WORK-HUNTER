@@ -651,10 +651,13 @@ def test_unavailable_or_low_confidence_ai_uses_exact_failure_policy(
 
     assert decision.ready is ready
     assert decision.retry is retry
-    assert decision.reason == reason
+    low_confidence = ai_result.available and failure_policy != "deterministic"
+    assert decision.reason == ("ai_low_confidence" if low_confidence else reason)
     assert decision.rank_score == original
     assert decision.ai_decision is not None
-    assert decision.ai_decision.available is False
+    assert decision.ai_decision.available is low_confidence
+    if low_confidence:
+        assert decision.ai_decision == ai_result
 
 
 def test_confident_ai_suitable_and_unsuitable_are_typed() -> None:
@@ -974,7 +977,7 @@ def test_every_present_ranking_alias_must_be_valid_and_agree(mutate) -> None:
 
 @pytest.mark.parametrize(
     ("detail", "limit"),
-    [("light", 12_000), ("heavy", 20_000)],
+    [("light", 20_000), ("heavy", 20_000)],
 )
 def test_structured_ai_has_a_stable_whole_prompt_budget(
     detail: str,
@@ -1061,6 +1064,44 @@ def test_structured_ai_global_budget_also_caps_utf8_bytes() -> None:
     assert total_bytes <= 20_000
 
 
+def test_prompt_budget_preserves_each_experience_instead_of_erasing_longest() -> None:
+    payload = {
+        "detail": "light",
+        "candidate_facts": {
+            "experience": [
+                {"company": f"Компания {index}", "details": "Разработка Python и SQL. " * repetitions}
+                for index, repetitions in enumerate([40, 32, 22, 18, 18, 18, 18, 18, 18, 18])
+            ]
+        },
+    }
+
+    fitted = StructuredAIRanker._fit_prompt_payload(payload, maximum=6_000)
+
+    assert all(item["details"] for item in fitted["candidate_facts"]["experience"])
+    assert len(json.dumps(fitted, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")) <= 6_000
+    assert payload["candidate_facts"]["experience"][0]["details"] == "Разработка Python и SQL. " * 40
+
+
+def test_prompt_budget_keeps_requirements_after_company_introduction() -> None:
+    description = "Описание компании. " * 110 + "Требования: Python, SQL, ETL."
+    payload = {
+        "detail": "light",
+        "vacancy": {"description": description},
+        "candidate_facts": {
+            "experience": [
+                {"details": "Разработка Python и SQL. " * 40}
+                for _ in range(10)
+            ],
+        },
+    }
+
+    fitted = StructuredAIRanker._fit_prompt_payload(payload, maximum=12_000)
+
+    assert fitted["vacancy"]["description"] == description
+    assert all(item["details"] for item in fitted["candidate_facts"]["experience"])
+    assert len(json.dumps(fitted, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")) <= 12_000
+
+
 def test_structured_ai_rejects_secrets_from_allowlisted_prompt_fields() -> None:
     calls: list[Any] = []
 
@@ -1144,6 +1185,21 @@ def test_structured_ai_rejects_markup_secrets_and_ungrounded_output(
     assert decision.reason == "ai_unavailable"
     assert decision.evidence == ()
     assert decision.reasons == ()
+
+
+def test_ranking_diagnostic_does_not_log_provider_payload(caplog) -> None:
+    def broken_call(*args, **kwargs):
+        raise ValueError("Bearer provider-secret; private candidate payload")
+
+    vacancy, resume, candidate = _facts()
+    decision = StructuredAIRanker(
+        {"model": "test"}, structured_call=broken_call,
+    ).evaluate(vacancy, resume, candidate, detail="light")
+
+    assert not decision.available
+    assert "stage=model_call error_type=ValueError" in caplog.text
+    assert "provider-secret" not in caplog.text
+    assert "private candidate" not in caplog.text
 
 
 def test_structured_ai_persists_sanitized_grounded_output() -> None:

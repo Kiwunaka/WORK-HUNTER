@@ -9,6 +9,7 @@ import importlib.metadata
 import importlib.util
 import io
 import json
+import logging
 import os
 import random
 import re
@@ -79,6 +80,7 @@ from .hh_agent.resume_templates import (
     draft_hh_resume_payload_from_template,
 )
 from .hh_transport import HHTransportError
+from .hh_transport.errors import HHNetworkError
 from .hh_transport.backends import CallbackConfigBackend
 from .resume_payloads import load_hh_resume_payload, validate_hh_resume_payload
 from .safety import READ_ONLY_HTTP_METHODS, is_literal_confirmation, require_mutation_confirmation
@@ -439,13 +441,13 @@ SOURCE_CAPABILITIES: dict[str, dict[str, str]] = {
         "search": "frontend_json",
         "detail": "listing_payload",
         "apply": "browser",
-        "auth": "none",
+        "auth": "browser_session",
     },
     "geekjob": {
         "search": "public_json",
         "detail": "listing_payload",
         "apply": "browser",
-        "auth": "none",
+        "auth": "browser_session",
     },
     "getmatch": {
         "search": "public_json",
@@ -469,13 +471,13 @@ SOURCE_CAPABILITIES: dict[str, dict[str, str]] = {
         "search": "public_html",
         "detail": "public_html",
         "apply": "browser",
-        "auth": "none",
+        "auth": "browser_session",
     },
     "careerspace": {
         "search": "public_html_or_browser",
         "detail": "public_html_or_browser",
         "apply": "browser",
-        "auth": "none",
+        "auth": "browser_session",
     },
     "another_it": {
         "search": "public_html",
@@ -1297,9 +1299,20 @@ def _bounded_cover_letter(text: str, maximum: int) -> str:
     return clipped
 
 
+_SELF_DISQUALIFYING_COVER_LETTER = re.compile(
+    r"\bне\s+(?:работал(?:а)?|занимался|владею|умею)\b"
+    r"|\bнет\s+(?:опыта|практики)\b"
+    r"|\bменьше\s+(?:production|продакшн|продакшен)[-\s]?практики\b"
+    r"|\bчестно\s+(?:про|обознач)"
+    r"|\bI\s+(?:have\s+not|haven't|don't\s+have|lack)\b",
+    re.IGNORECASE,
+)
+
+
 class _ConfiguredHHCoverLetters:
-    def __init__(self, service: "WorkHunter") -> None:
+    def __init__(self, service: "WorkHunter", *, captcha_solver=None) -> None:
         self._service = service
+        self._captcha_solver = captcha_solver
 
     def render(self, context: Any) -> str:
         from .hh_autopilot.challenge_ai import scoped_ai_config
@@ -1319,14 +1332,22 @@ class _ConfiguredHHCoverLetters:
             (context.vacancy_id,),
         ).fetchone()
         job = storage.get_job(int(row["id"])) if row is not None else None
-        if job is None:
-            # Автопилот нашёл вакансию сам, в jobs её ещё нет: сохраняем,
-            # иначе сопроводительное не рендерится и отклик падает
-            # в internal_error до вызова HH.
-            payload = self._service._hh_client_for_account(
-                context.account_id
-            ).get_vacancy(context.vacancy_id)
-            job_id = storage.upsert_job(_hh_job_from_vacancy_payload(payload))
+        if job is None or mode == "ai":
+            # Search jobs can contain only snippets; AI letters need full requirements.
+            from .hh_autopilot.engine import read_with_captcha
+
+            client = self._service._hh_client_for_account(context.account_id)
+            payload = read_with_captcha(
+                client.get_vacancy, self._captcha_solver, context.vacancy_id,
+            )
+            if mode == "ai" and not str(payload.get("description") or "").strip():
+                raise RuntimeError("HH full vacancy description is unavailable")
+            full_job = _hh_job_from_vacancy_payload(payload)
+            if mode == "ai":
+                from .hh_autopilot.search import normalize_vacancy
+
+                full_job.description = normalize_vacancy(payload).description
+            job_id = storage.upsert_job(full_job)
             job = storage.get_job(job_id)
             if job is None:
                 raise RuntimeError(
@@ -1349,14 +1370,22 @@ class _ConfiguredHHCoverLetters:
 
         policy_version = _hh_cover_letter_policy_version(self._service.config)
         snapshot = storage.conn.execute(
-            "SELECT resume_hash FROM hh_application_resume_snapshots WHERE item_id = ?", (context.item_id,),
+            "SELECT resume_hash, resume_json FROM hh_application_resume_snapshots WHERE item_id = ?", (context.item_id,),
         ).fetchone()
+        # Fetch timestamps, local status and scores change between preparation
+        # and dispatch. Only facts used in the letter invalidate its cache.
+        letter_job = {
+            key: getattr(job, key)
+            for key in ("title", "company", "description", "salary_text", "location")
+        }
         policy_version = content_hash({"policy": policy_version,
                                        "resume_hash": snapshot[0] if snapshot else "",
-                                       "job": job.to_dict()})
+                                       "job": letter_job})
         cache_name = f"hh-autopilot:{context.item_id}:{policy_version[:24]}"
         cached = storage.get_latest_letter_by_template(job_id, cache_name)
-        if cached is not None:
+        if cached is not None and (
+            mode != "ai" or not _SELF_DISQUALIFYING_COVER_LETTER.search(cached.body)
+        ):
             return cached.body
 
         account = next(
@@ -1370,12 +1399,12 @@ class _ConfiguredHHCoverLetters:
             or active_profile(self._service.config)
         )
         about = copy.deepcopy(self._service.config.get("about") or {})
-        try:
+        if snapshot is not None:
+            resume = json.loads(snapshot["resume_json"])
+        else:
             resume = self._service._hh_client_for_account(
                 context.account_id
             ).get_resume(context.resume_id)
-        except Exception:
-            resume = {"id": context.resume_id}
         material = _hh_cover_letter_context(
             job=job,
             candidate=candidate,
@@ -1403,6 +1432,17 @@ class _ConfiguredHHCoverLetters:
                 )
             try:
                 body = _draft_hh_cover_letter_ai(material, ai_config)
+                if _SELF_DISQUALIFYING_COVER_LETTER.search(body):
+                    revised_config = copy.deepcopy(ai_config)
+                    revised_config["message_prompt"] += (
+                        "\nПерепиши письмо с нуля: предыдущий вариант сообщал "
+                        "работодателю о недостающих навыках кандидата. "
+                        "Раскрой только доказуемое совпадение с задачами вакансии; "
+                        "не перечисляй пробелы и не добавляй самоотсев."
+                    )
+                    body = _draft_hh_cover_letter_ai(material, revised_config)
+                if _SELF_DISQUALIFYING_COVER_LETTER.search(body):
+                    raise ValueError("AI cover letter self-disqualifies candidate")
             except Exception:
                 if failure_policy == "retry":
                     raise
@@ -1457,7 +1497,7 @@ def _hh_cover_letter_context(
         "candidate_about": json.dumps(about, ensure_ascii=False, default=str),
         "vacancy_name": job.title,
         "employer_name": job.company or "вашей компании",
-        "vacancy_description": (job.description or "")[:6_000],
+        "vacancy_description": job.description or "",
         "salary": job.salary_text,
         "location": job.location,
         "resume_title": str(resume.get("title") or candidate.get("title") or ""),
@@ -1540,6 +1580,10 @@ def _stable_hh_resume_payload(raw: dict[str, Any]) -> dict[str, Any]:
 def _published_hh_resumes(client: HHApplyClient) -> list[dict[str, Any]]:
     try:
         raw_resumes = client.list_resumes()
+    except HHTransportError as exc:
+        if isinstance(exc, HHNetworkError) or exc.status_code in {429, 500, 502, 503, 504}:
+            raise
+        return []
     except Exception:
         # Без API (403/протухший токен) движок не может проверить published-статус.
         # Резюме уже подтягиваются через web sync; здесь возвращаем пусто,
@@ -1556,6 +1600,34 @@ def _published_hh_resumes(client: HHApplyClient) -> list[dict[str, Any]]:
             continue
         resumes.append(_stable_hh_resume_payload(raw))
     return resumes
+
+
+def _selected_hh_policy_resumes(
+    account: Any,
+    resumes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep policy material aligned with the account's search mappings."""
+    by_id = {
+        str(resume.get("id") or "").strip().casefold(): resume
+        for resume in resumes
+        if isinstance(resume, dict) and str(resume.get("id") or "").strip()
+    }
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for query in account.resume_queries:
+        resume_id = str(query.get("resume_id") or "").strip().casefold()
+        if resume_id == "published:*":
+            candidates = resumes
+        elif resume_id in by_id:
+            candidates = [by_id[resume_id]]
+        else:
+            candidates = []
+        for resume in candidates:
+            canonical_id = str(resume.get("id") or "").strip().casefold()
+            if canonical_id and canonical_id not in seen:
+                selected.append(resume)
+                seen.add(canonical_id)
+    return selected
 
 
 def _hh_policy_material(
@@ -1577,6 +1649,7 @@ def _hh_policy_material(
     candidate = copy.deepcopy(profiles.get(account.candidate_profile_id) or active_profile(config))
     candidate["facts"] = candidate_facts(candidate, config.get("about") or {})
     available = resumes or _published_hh_resumes(service._hh_client_for_account(account.profile_id))
+    available = _selected_hh_policy_resumes(account, available)
     ai_config = config.get("ai") or {}
     if not isinstance(ai_config, dict):
         ai_config = {}
@@ -1709,8 +1782,10 @@ def _hh_engine_context(
         for row in repository.conn.execute(
             """
             SELECT vacancy_id FROM hh_autopilot_items
-            WHERE account_profile_id = ? AND state IN
-              ('discovered','eligible','ranked','ready','applying','reconciling','retry_wait','manual_challenge')
+            WHERE account_profile_id = ? AND (
+              state IN ('applying','reconciling','manual_challenge')
+              OR (state = 'retry_wait' AND active_attempt_id IS NOT NULL)
+            )
             """,
             (account.profile_id,),
         ).fetchall()
@@ -1749,11 +1824,22 @@ def _hh_engine_context(
     )
 
 
-def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
+def _hh_stateful_captcha_url(error: Any) -> str:
+    from .hh_transport.challenge_urls import stateful_hh_captcha_url
+
+    payload = error.payload if isinstance(getattr(error, "payload", None), Mapping) else {}
+    metadata = payload.get("challenge_metadata")
+    raw_url = metadata.get("captcha_url") if isinstance(metadata, Mapping) else None
+    return stateful_hh_captcha_url(raw_url)
+
+
+def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str, *, context=None, with_sender: bool = True):
+    from queue import Empty, SimpleQueue
+
     from .hh_autopilot.authorization import HHAutopilotAuthorizer
     from .hh_autopilot.browser import HHBrowserApplicationAdapter
     from .hh_autopilot.challenge_ai import HHChallengeAI
-    from .hh_autopilot.config import parse_autopilot_settings
+    from .hh_autopilot.config import parse_autopilot_settings, policy_hash
     from .hh_autopilot.engine import HHAutopilot
     from .hh_autopilot.executor import HHApplicationExecutor
     from .hh_autopilot.native_transport import (
@@ -1766,17 +1852,19 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
     from .hh_autopilot.search import HHSearchProvider, normalize_vacancy
 
     client = service._hh_client_for_account(account_id)
-    context = _hh_engine_context(service, repository, account_id, client)
+    context = context or _hh_engine_context(service, repository, account_id, client)
+    # The run already loaded the published resumes. Reuse that same snapshot
+    # for preparation and dispatch; local policy changes are still checked.
+    run_resumes = list({mapping.resume_id: mapping.resume for mapping in context.mappings}.values())
     def settings_provider():
         return parse_autopilot_settings(copy.deepcopy(service.config))
 
     def policy_provider(wanted: str) -> str:
-        return _hh_engine_context(
-            service,
-            repository,
-            wanted,
-            service._hh_client_for_account(wanted),
-        ).policy_hash
+        config = copy.deepcopy(service.config)
+        return policy_hash(
+            parse_autopilot_settings(config), wanted,
+            _hh_policy_material(service, config, wanted, resumes=run_resumes),
+        )
     browser_authorizer = service._hh_browser_authorizer()
     browser_session = browser_authorizer.session(account_id)
 
@@ -1807,6 +1895,14 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
             int(context.settings.browser["navigation_timeout_seconds"]) * 1000
         ),
     )
+    def solve_official_captcha(error):
+        url = _hh_stateful_captcha_url(error)
+        if not url:
+            return False
+        return browser_adapter.solve_captcha(
+            url, challenge_ai,
+            attempts=int(context.settings.application["challenge_attempts"]),
+        ).code == "applied"
     client_config = getattr(client, "config", {})
     if not isinstance(client_config, dict):
         client_config = {}
@@ -1830,13 +1926,15 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
         repository,
         service.config_path,
         policy_material_resolver=lambda config, wanted: _hh_policy_material(
-            service, config, wanted
+            service, config, wanted, resumes=run_resumes
         ),
     )
     executor = HHApplicationExecutor(
         repository,
         application_transport,
-        _ConfiguredHHCoverLetters(service),
+        _ConfiguredHHCoverLetters(
+            service, captcha_solver=(solve_official_captcha if context.settings.application["captcha_mode"] == "vision_then_manual" else None),
+        ),
         settings_provider=settings_provider,
         policy_hash_provider=policy_provider,
     )
@@ -1845,6 +1943,66 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
         _ReadOnlyHHNegotiations(client),
         settings_provider=settings_provider,
     )
+    # Model threads must never use Storage's owner-thread SQLite connection.
+    ranking_usage: SimpleQueue[Any] = SimpleQueue()
+    ranking_config = service.ai_config("ranking")
+    record_usage = ranking_config["_usage_recorder"]
+    ranking_config["_usage_recorder"] = lambda data: ranking_usage.put(data)
+
+    def flush_ranking_usage() -> None:
+        while True:
+            try:
+                data = ranking_usage.get_nowait()
+            except Empty:
+                return
+            record_usage(data)
+
+    @contextmanager
+    def sender_factory(sender_context, lease):
+        # Construct and close on the sender thread. Never share a SQLite
+        # connection or HTTP client across coordinator/sender threads.
+        from .hh_autopilot.repository import AutopilotRepository, LeaseKeeper
+
+        sender_service = WorkHunter(service.root)
+        sender_service.config = copy.deepcopy(sender_context.raw_config)
+        sender_service._storage = Storage(database_path(service.root))
+        try:
+            sender = _build_hh_engine(
+                sender_service, AutopilotRepository(sender_service.storage), account_id,
+                context=sender_context, with_sender=False,
+            )
+            sender.search_provider.lease_keeper = LeaseKeeper(
+                sender.repository, lease, ttl_seconds=sender_context.settings.lease.ttl_seconds,
+                renewal_margin_seconds=sender_context.settings.lease.renewal_margin_seconds,
+            )
+            yield sender
+        finally:
+            sender_service.storage.close()
+
+    def prepare_letter(item, prepared_context, run, lease):
+        # This task owns its connection. Only a saved draft crosses to sender;
+        # it cannot reserve quota or call the application transport.
+        from .hh_autopilot.executor import CoverLetterContext
+        from .hh_autopilot.repository import AutopilotRepository
+
+        letter_service = WorkHunter(service.root)
+        letter_service.config = copy.deepcopy(prepared_context.raw_config)
+        letter_service._storage = Storage(database_path(service.root))
+        letter_repo = AutopilotRepository(letter_service.storage)
+        try:
+            letter_repo.append_event(item.id, "cover_letter_started", {}, run_id=run.id, fencing_token=lease.fencing_token)
+            letter_engine = _build_hh_engine(
+                letter_service, letter_repo, account_id,
+                context=prepared_context, with_sender=False,
+            )
+            letter_engine.executor.cover_letters.render(CoverLetterContext(
+                item.id, item.account_id, item.vacancy_id, item.resume_id,
+                str(prepared_context.settings.application["cover_letter_mode"]),
+            ))
+            letter_repo.append_event(item.id, "cover_letter_ready", {}, run_id=run.id, fencing_token=lease.fencing_token)
+        finally:
+            letter_service.storage.close()
+
     return HHAutopilot(
         repository=repository,
         authorizer=authorizer,
@@ -1853,7 +2011,7 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
         deterministic_ranker=DeterministicRanker(),
         ranking_policy=RankingPolicy(
             context.settings.ranking,
-            StructuredAIRanker(service.ai_config("ranking")),
+            StructuredAIRanker(ranking_config),
         ),
         executor=executor,
         reconciler=reconciler,
@@ -1864,6 +2022,11 @@ def _build_hh_engine(service: "WorkHunter", repository: Any, account_id: str):
         # применялись и автопилот отправлял отклики подряд, ловя лимиты HH.
         sleeper=time.sleep,
         delay_source=lambda low, high: random.uniform(low, high),
+        ranking_workers=10,
+        flush_ranking_usage=flush_ranking_usage,
+        sender_factory=sender_factory if with_sender else None,
+        letter_preparer=prepare_letter if with_sender else None,
+        captcha_solver=(solve_official_captcha if context.settings.application["captcha_mode"] == "vision_then_manual" else None),
     )
 
 
@@ -2252,20 +2415,98 @@ class WorkHunter:
         *,
         accounts: list[str] | None,
     ) -> dict[str, Any]:
-        from .hh_autopilot.types import RunRequest
-
         selected = self._hh_autopilot_account_ids(accounts)
         return {
             "status": "ok",
-            "runs": [
-                _result_dict(
-                    self._hh_autopilot().engine.run(
-                        RunRequest(account_id, trigger="schedule")
-                    )
-                )
-                for account_id in selected
-            ],
+            "runs": [self._run_hh_with_restarts(account_id) for account_id in selected],
         }
+
+    def _hh_campaign_remaining(self, account_id: str, ceiling: int) -> int:
+        """Count the existing campaign ledger, including uncertain sends once."""
+        configured_path = self.config["sources"]["hh"].get("campaign_ledger_path")
+        if configured_path is None or configured_path == "":
+            return ceiling
+        if not isinstance(configured_path, str):
+            raise ValueError("sources.hh.campaign_ledger_path must be a path string")
+        path = Path(configured_path)
+        if not path.is_absolute():
+            path = self.root / path
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        campaign = json.loads(path.read_text(encoding="utf-8-sig"))
+        if campaign["account"] != account_id:
+            return ceiling
+        rows = self.storage.conn.execute(
+            "SELECT id,source,state FROM hh_autopilot_quota_reservations WHERE account_profile_id=? AND id>?",
+            (account_id, campaign["baseline_reservation_id"]),
+        ).fetchall()
+        dispatched = {row["id"] for row in rows if row["source"] == "dispatch" and row["state"] in ("consumed", "reserved", "held")}
+        excluded = set(campaign.get("non_countable_hh_reservation_ids", [])) & {
+            row["id"] for row in rows if row["source"] == "dispatch" and row["state"] == "consumed"
+        }
+        counted = dispatched - excluded
+        external = set(campaign.get("additional_budget_reserved_external_ids", [])) - dispatched
+        # Even not-yet-imported manual receipts conservatively reserve capacity.
+        other = {(entry["source"], str(entry["source_id"])) for entry in campaign.get("additional_non_hh_new_sends", [])}
+        return max(0, min(ceiling, int(campaign["target_new_applications"]) - len(counted) - len(external) - len(other)))
+
+    def _run_hh_with_restarts(self, account_id: str) -> dict[str, Any]:
+        from .hh_autopilot.config import parse_autopilot_settings
+        from .hh_autopilot.types import RunReport, RunRequest
+
+        components = self._hh_autopilot()
+        repo = components.repository
+        remaining = parse_autopilot_settings(copy.deepcopy(self.config)).limits.per_run_success
+        failures = 0
+        while True:
+            if repo.pause_active(account_id) or repo.kill_switch_active(account_id):
+                return {"account_id": account_id, "status": "interrupted"}
+            lease = repo.get_lease(account_id)
+            if lease is not None and datetime.fromisoformat(lease.expires_at) > datetime.now(timezone.utc):
+                return {"account_id": account_id, "status": "busy"}
+            # Supported recovery completes before a new engine can acquire its lease.
+            recovery = components.recovery.run(account_id=account_id)
+            if recovery.busy or recovery.failed:
+                return {"account_id": account_id, "status": "recovery_required"}
+            remaining = self._hh_campaign_remaining(account_id, remaining)
+            if remaining <= 0:
+                return {"account_id": account_id, "status": "budget_exhausted"}
+            try:
+                report = components.engine.run(RunRequest(
+                    account_id, trigger="schedule", continuous=True, success_limit=remaining,
+                ))
+                run = repo.get_run(report.run_id) if report.run_id is not None else None
+                error = run.error if run is not None else ""
+            except Exception as exc:
+                from .hh_transport.errors import HHTransportError
+
+                retryable = type(exc).__name__ in {"HHNetworkError", "ConnectionError", "ReadTimeout", "ConnectTimeout", "ChunkedEncodingError", "TimeoutError"}
+                retryable = retryable or (isinstance(exc, HHTransportError) and exc.status_code in {429, 500, 502, 503, 504})
+                if not retryable:
+                    raise
+                report = RunReport(account_id, "schedule", "failed")
+                error = "hh_rate_limited" if getattr(exc, "status_code", None) == 429 else "startup_transient"
+            remaining = max(0, remaining - report.applied)
+            transient = error in {"hh_rate_limited", "startup_transient"} or error.startswith((
+                "HHNetworkError:", "ConnectionError:", "ReadTimeout:",
+                "ConnectTimeout:", "ChunkedEncodingError:", "TimeoutError:",
+                "OperationalError: database is locked", "HHTransportError: HH API error 500:",
+                "HHTransportError: HH API error 502:", "HHTransportError: HH API error 503:",
+                "HHTransportError: HH API error 504:",
+            ))
+            if report.status != "failed" or not transient:
+                return _result_dict(report)
+            failures = 1 if report.applied else failures + 1
+            delay = max(300 if error == "hh_rate_limited" else 0, min(900, 30 * 2 ** min(failures - 1, 5)))
+            logging.getLogger(__name__).warning(
+                "Временный сбой HH: запуск %s; автоматический повтор через %s с",
+                report.run_id, delay,
+            )
+            for _ in range(delay):
+                if (repo.pause_active(account_id) or repo.kill_switch_active(account_id)
+                        or (report.run_id is not None and repo.run_stop_requested(report.run_id))):
+                    return {**_result_dict(report), "status": "interrupted"}
+                time.sleep(1)
 
     def recover_hh_autopilot(self, account: str | None = None) -> dict[str, Any]:
         return _result_dict(self._hh_autopilot().recovery.run(account_id=account))
@@ -2309,6 +2550,10 @@ class WorkHunter:
         run = self._hh_autopilot().repository.get_run(run_id)
         if run is None or run.account_id != account_id:
             raise ValueError("HH autopilot run does not belong to the selected account")
+        if run.status == "failed":
+            # There is no running row to mark during restart backoff. Persist
+            # the user's Stop so the waiting supervisor cannot start again.
+            self._set_hh_autopilot_pause(accounts=[account_id], paused=True)
         self._hh_autopilot().repository.request_stop([account_id])
         return {"status": "ok", "account": account_id, "run_id": run_id}
 
@@ -2393,6 +2638,68 @@ class WorkHunter:
         result["item_id"] = item_id
         return result
 
+    def requeue_curated_hh_autopilot_skip(
+        self, *, account: str, item_id: int,
+    ) -> dict[str, Any]:
+        from .hh_autopilot.config import parse_autopilot_settings
+
+        account_id = self._hh_autopilot_account_ids([account])[0]
+        components = self._hh_autopilot()
+        item = components.repository.get_item(item_id)
+        if item is None or item.account_id != account_id:
+            raise ValueError("HH autopilot item does not belong to the selected account")
+        settings = parse_autopilot_settings(copy.deepcopy(self.config))
+        allowed = settings.filters.get("allowed_vacancy_ids") or ()
+        if item.vacancy_id not in allowed:
+            raise ValueError("vacancy is not in the active curated allowlist")
+        selected = next(value for value in settings.accounts if value.profile_id == account_id)
+        if item.resume_id not in {value["resume_id"] for value in selected.resume_queries}:
+            raise ValueError("item resume is not active for this account")
+        lease = components.repository.acquire_lease(
+            account_id, f"curated-requeue:{uuid.uuid4().hex}", ttl_seconds=60,
+        )
+        if lease is None:
+            raise RuntimeError("HH autopilot lease is occupied")
+        try:
+            if item.active_attempt_id is None and (
+                item.last_outcome_code.startswith("hard_filter:")
+                or item.last_outcome_code == "missing_required_data"
+            ):
+                from .hh_autopilot.policy import HardFilter
+                from .hh_autopilot.search import normalize_vacancy
+
+                client = self._hh_client_for_account(account_id)
+                context = _hh_engine_context(self, components.repository, account_id, client)
+                mapping = next(
+                    (value for value in context.mappings if value.resume_id == item.resume_id),
+                    None,
+                )
+                if mapping is None:
+                    raise ValueError("item resume is not active for this account")
+                vacancy = normalize_vacancy(client.get_vacancy(item.vacancy_id))
+                decision = HardFilter(context.settings.filters).evaluate(
+                    vacancy, mapping.resume, context.candidate_profile,
+                    context.filter_context,
+                )
+                changed = components.repository.requeue_curated_filter_skip(
+                    item_id, decision=decision, actor="cli:curated-requeue",
+                    fencing_token=lease.fencing_token,
+                )
+            elif item.last_outcome_code == "role_not_allowed":
+                changed = components.repository.requeue_verified_preflight_skip(
+                    item_id, actor="cli:curated-requeue", fencing_token=lease.fencing_token,
+                )
+            else:
+                changed = components.repository.requeue_curated_skipped(
+                    item_id, actor="cli:curated-requeue", fencing_token=lease.fencing_token,
+                )
+            return {
+                "status": "ready", "item_id": changed.id,
+                "vacancy_id": changed.vacancy_id, "resume_id": changed.resume_id,
+            }
+        finally:
+            components.repository.release_lease(lease)
+
     def resolve_hh_autopilot_challenge(
         self,
         *,
@@ -2471,7 +2778,8 @@ class WorkHunter:
         ).fetchall()
         run_rows = conn.execute(
             """
-            SELECT id, trigger, status, counters_json, error, started_at, finished_at
+            SELECT id, trigger, status, grant_id, policy_hash, counters_json,
+                   error, started_at, finished_at
             FROM hh_autopilot_runs WHERE account_profile_id = ?
             ORDER BY id DESC LIMIT 20
             """,
@@ -2494,6 +2802,17 @@ class WorkHunter:
         grant = repository.active_grant(account_id)
         lease = repository.get_lease(account_id)
         account_state = repository.get_account_state(account_id)
+        authorization_generation_match = bool(
+            grant is not None
+            and account_settings.authorization_generation == grant.generation
+        )
+        latest_run = run_rows[0] if run_rows else None
+        last_run_policy_mismatch = bool(
+            grant is not None
+            and latest_run is not None
+            and latest_run["grant_id"] == grant.id
+            and str(latest_run["policy_hash"] or "") != grant.policy_hash
+        )
         return {
             "account": account_id,
             "schedule": {
@@ -2521,10 +2840,9 @@ class WorkHunter:
                 "dead": state_counts.get("dead", 0),
             },
             "grant": None if grant is None else _result_dict(grant),
-            "policy_match": bool(
-                grant is not None
-                and account_settings.authorization_generation == grant.generation
-            ),
+            "policy_match": authorization_generation_match and not last_run_policy_mismatch,
+            "authorization_generation_match": authorization_generation_match,
+            "last_run_policy_mismatch": last_run_policy_mismatch,
             "lease": None if lease is None else _result_dict(lease),
             "controls": {
                 "enabled": account_settings.enabled,
@@ -5522,12 +5840,13 @@ class WorkHunter:
         seen_chat_ids: set[str] = set()
         total_pages = 1
         loaded_pages = 0
-        for page in range(page_limit):
-            if page >= total_pages:
-                break
-            payload = client.list_chats(page=page)
+        next_cursor = None
+        for _ in range(page_limit):
+            payload = client.list_chats(cursor=next_cursor)
             loaded_pages += 1
-            total_pages = min(page_limit, chatik_page_count(payload))
+            if loaded_pages == 1:
+                total_pages = min(page_limit, chatik_page_count(payload))
+            next_cursor = (payload.get("chats") or {}).get("nextFrom")
             for candidate in extract_chatik_candidates(
                 payload,
                 awaiting_only=awaiting_only,
@@ -5541,12 +5860,14 @@ class WorkHunter:
                     break
             if limit is not None and len(candidates) >= int(limit):
                 break
+            if not next_cursor:
+                break
         return {
             "status": "ok",
             "account": account_id,
             "count": len(candidates),
             "pages_loaded": loaded_pages,
-            "pages_available": total_pages,
+            "pages_available": max(total_pages, loaded_pages),
             "awaiting_only": awaiting_only,
             "chats": candidates,
         }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -231,6 +232,9 @@ class HHBrowserApplicationAdapter:
                     timeout=self.navigation_timeout_ms,
                 )
                 if not self._solve_captcha_on_page(page, solver, attempts=attempts):
+                    logging.getLogger(__name__).warning(
+                        "HH CAPTCHA unresolved after %s attempts", attempts,
+                    )
                     return self._captcha_outcome(page, url)
                 self.capture_session(context=context, page=page)
                 return DispatchOutcome(
@@ -238,7 +242,10 @@ class HHBrowserApplicationAdapter:
                     DeliveryCertainty.DEFINITE_RESPONSE,
                     location=sanitize_hh_url(str(getattr(page, "url", url))),
                 )
-        except Exception:
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "HH CAPTCHA failed error_type=%s", type(exc).__name__,
+            )
             return DispatchOutcome(
                 "manual_captcha",
                 DeliveryCertainty.DEFINITE_RESPONSE,
@@ -252,27 +259,31 @@ class HHBrowserApplicationAdapter:
         *,
         attempts: int,
     ) -> bool:
+        # HH offers the same challenge in Latin letters; the configured OCR
+        # repeatedly misreads the distorted Cyrillic word pairs.
+        input_locator = page.locator(self.CAPTCHA_INPUT_SELECTOR)
+        if input_locator.is_visible():
+            language = page.locator('[data-qa="captcha-language"]')
+            if language.count() and language.inner_text().strip() == "English":
+                language.click()
         for _attempt in range(attempts):
-            if not _is_captcha(str(page.content())):
+            if not input_locator.is_visible():
                 return True
             image = page.locator(self.CAPTCHA_IMAGE_SELECTOR).screenshot()
             answer = str(solver.solve_captcha(image) or "").strip()
             if not answer:
                 continue
-            input_locator = page.locator(self.CAPTCHA_INPUT_SELECTOR)
             input_locator.fill(answer)
             input_locator.press("Enter")
-            wait = getattr(page, "wait_for_load_state", None)
-            if callable(wait):
-                try:
-                    wait("networkidle", timeout=self.navigation_timeout_ms)
-                except Exception:
-                    # HH pages may keep background requests open after the CAPTCHA
-                    # has already disappeared; the DOM check below is authoritative.
-                    pass
-            if not _is_captcha(str(page.content())):
+            try:
+                # The form submits asynchronously. DOMContentLoaded has already
+                # fired and would let OCR read the old image a second time.
+                input_locator.wait_for(state="hidden", timeout=min(5_000, self.navigation_timeout_ms))
+            except Exception:
+                pass
+            if not input_locator.is_visible():
                 return True
-        return not _is_captcha(str(page.content()))
+        return not input_locator.is_visible()
 
     @staticmethod
     def _captcha_outcome(page: Any, fallback_url: str) -> DispatchOutcome:

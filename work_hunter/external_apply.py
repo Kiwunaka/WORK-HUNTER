@@ -18,11 +18,11 @@ from .models import Job
 BROWSER_LOGIN_URLS = {
     "linkedin": "https://www.linkedin.com/login",
     "indeed": "https://secure.indeed.com/auth",
-    "getmatch": "https://getmatch.ru/auth/signin",
-    "rvc": "https://app.rvc.global/auth/sign-in",
-    "habr": "https://career.habr.com/login",
+    "getmatch": "https://getmatch.ru/",
+    "rvc": "https://app.rvc.global/candidate/login",
+    "habr": "https://career.habr.com/",
     "geekjob": "https://geekjob.ru/login",
-    "hirehi": "https://hirehi.ru/login",
+    "hirehi": "https://hirehi.ru/",
     "careerspace": "https://careerspace.app/login",
     "another_it": "https://another-it.ru/login",
     "jabka": "https://jabka.work/",
@@ -104,7 +104,7 @@ class ExternalApplyDispatcher:
         return {
             "status": "ready",
             "mode": "browser",
-            "message": "Persistent-browser application is ready.",
+            "message": "Браузерный адаптер настроен. Вход и доставка проверяются при выполнении; сессия Chrome автоматически не переносится.",
             "risk_flags": [
                 "external_mutation",
                 "browser_session",
@@ -156,13 +156,24 @@ class BrowserApplyAdapter:
                     message=f"Unknown Playwright browser: {browser_name}",
                     blockers=["browser_not_supported"],
                 )
-            context = browser_type.launch_persistent_context(
-                str(profile_dir),
-                headless=bool(settings.get("headless", False)),
-                slow_mo=max(0, int(settings.get("slow_mo_ms", 100) or 0)),
-            )
+            from .browser_bridge import connect_browser_bridge
+
             try:
-                page = context.pages[0] if context.pages else context.new_page()
+                attached = connect_browser_bridge(playwright, request.root, request.job.source)
+                context = attached.contexts[0] if attached else browser_type.launch_persistent_context(
+                    str(profile_dir),
+                    headless=bool(settings.get("headless", False)),
+                    slow_mo=max(0, int(settings.get("slow_mo_ms", 100) or 0)),
+                )
+            except RuntimeError as exc:
+                return ExternalApplyResult(status="blocked", mode="browser", message=str(exc),
+                                           blockers=["browser_bridge_unavailable"])
+            page = None
+            try:
+                # Never navigate or close a user's existing tab.
+                page = context.new_page() if attached else (
+                    context.pages[0] if context.pages else context.new_page()
+                )
                 timeout_ms = max(
                     5_000,
                     int(settings.get("timeout_seconds", 45) or 45) * 1000,
@@ -170,6 +181,8 @@ class BrowserApplyAdapter:
                 page.set_default_timeout(timeout_ms)
                 page.goto(request.job.url, wait_until="domcontentloaded")
                 steps.append("opened_job")
+                if request.job.source == "lever" and urlsplit(page.url).path.endswith("/apply"):
+                    return _complete_browser_form(page, request, settings, steps)
                 if _login_required(page):
                     if not _wait_for_interactive_login(page, settings):
                         screenshot = _capture_apply_screenshot(
@@ -215,6 +228,8 @@ class BrowserApplyAdapter:
                         steps=steps,
                         screenshot=screenshot,
                     )
+                if request.job.source == "habr":
+                    return _submit_habr_start(page, start, request, steps)
                 start.click()
                 page.wait_for_timeout(500)
                 page = context.pages[-1]
@@ -242,7 +257,14 @@ class BrowserApplyAdapter:
                     screenshot=screenshot,
                 )
             finally:
-                context.close()
+                if attached:
+                    try:
+                        if page is not None and not page.is_closed():
+                            page.close()
+                    finally:
+                        attached.close()  # Disconnect only; leave the user's browser alive.
+                else:
+                    context.close()
 
 
 def open_browser_session(
@@ -253,6 +275,7 @@ def open_browser_session(
     source_config: dict[str, Any],
     url: str = "",
     wait_seconds: int = 300,
+    keep_open: bool = False,
 ) -> dict[str, Any]:
     """Open a persistent source browser and keep it alive for interactive login."""
 
@@ -293,37 +316,74 @@ def open_browser_session(
                 "source": source,
                 "message": f"Unknown Playwright browser: {browser_name}",
             }
-        context = browser_type.launch_persistent_context(
-            str(profile_dir),
-            headless=False,
-            slow_mo=max(0, int(settings.get("slow_mo_ms", 100) or 0)),
-        )
+        from .browser_bridge import connect_browser_bridge
+
         try:
-            page = context.pages[0] if context.pages else context.new_page()
+            attached = connect_browser_bridge(playwright, root_path, source)
+            context = attached.contexts[0] if attached else browser_type.launch_persistent_context(
+                str(profile_dir),
+                headless=False,
+                slow_mo=max(0, int(settings.get("slow_mo_ms", 100) or 0)),
+            )
+        except RuntimeError as exc:
+            return {"status": "blocked", "source": source, "message": str(exc)}
+        page = None
+        try:
+            page = context.new_page() if attached else (
+                context.pages[0] if context.pages else context.new_page()
+            )
             page.goto(login_url, wait_until="domcontentloaded")
             total_wait = max(1, min(1800, int(wait_seconds)))
             for elapsed in range(total_wait):
                 if page.is_closed():
                     break
-                if elapsed >= 2 and not _login_required(page):
+                if not keep_open and elapsed >= 2 and _authenticated_browser_session(page, source):
                     return {
                         "status": "authenticated",
                         "source": source,
                         "url": page.url,
-                        "cookie_count": len(context.cookies()),
-                        "profile_dir": str(profile_dir),
+                        "application_receipt": (
+                            page.locator("#create-vacancy-response .vacancy-response").inner_text()[:2000]
+                            if source == "habr" and _habr_receipt(page) else ""
+                        ),
+                        "cookie_count": None if attached else len(context.cookies()),
+                        "profile_dir": "" if attached else str(profile_dir),
+                        "browser_mode": "main_browser_bridge" if attached else "separate_profile",
+                        "profile_login": (
+                            str(page.locator("#top_avatar").first.get_attribute("href") or "").rstrip("/").rsplit("/", 1)[-1]
+                            if source == "habr" and page.locator("#top_avatar").count() else ""
+                        ),
                     }
-                page.wait_for_timeout(1000)
+                try:
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    if page.is_closed():
+                        break
+                    raise
             return {
-                "status": "saved",
+                "status": "unverified",
                 "source": source,
                 "url": "" if page.is_closed() else page.url,
-                "cookie_count": len(context.cookies()),
-                "profile_dir": str(profile_dir),
-                "message": "Browser profile was saved; rerun login if the session is incomplete.",
+                "cookie_count": None if attached else (0 if page.is_closed() else len(context.cookies())),
+                "profile_dir": "" if attached else str(profile_dir),
+                "browser_mode": "main_browser_bridge" if attached else "separate_profile",
+                "message": (
+                    "Мост подключён к основному браузеру, но вход на площадку не подтверждён."
+                    if attached else
+                    "Профиль браузера сохранён, но вход не подтверждён. "
+                    "Завершите вход именно в браузере комбайна: сессия обычного Chrome "
+                    "сюда автоматически не переносится."
+                ),
             }
         finally:
-            context.close()
+            if attached:
+                try:
+                    if page is not None and not page.is_closed():
+                        page.close()
+                finally:
+                    attached.close()
+            else:
+                context.close()
 
 
 def adapter_settings(request: ExternalApplyRequest) -> dict[str, Any]:
@@ -386,7 +446,7 @@ def resolve_typed_answer(
         "phone": {"phone", "phone number", "mobile", "mobile number", "телефон", "номер телефона"},
         "city": {"city", "location", "город", "местоположение"},
         "linkedin_url": {"linkedin", "linkedin url"},
-        "portfolio_url": {"portfolio", "github", "website", "сайт", "портфолио"},
+        "portfolio_url": {"portfolio", "github", "github url", "website", "сайт", "портфолио"},
         "cover_letter": {"cover letter", "сопроводительное письмо", "message", "сообщение"},
     }
     for key, names in aliases.items():
@@ -720,6 +780,11 @@ def _fill_visible_fields(page: Any, request: ExternalApplyRequest) -> list[str]:
 
 
 def _find_start_action(page: Any, source: str, settings: dict[str, Any]) -> Any | None:
+    if source == "habr":
+        # The header's identically named type=button only scrolls to this form.
+        return _first_visible(page, [
+            '#create-vacancy-response button[type="submit"]',
+        ])
     selectors = list(settings.get("start_selectors") or [])
     if source == "linkedin":
         selectors.extend(
@@ -809,7 +874,94 @@ def _application_scope(page: Any, source: str) -> Any:
     return None
 
 
+def _habr_receipt(page: Any) -> bool:
+    url = urlsplit(str(page.url or ""))
+    if url.scheme != "https" or url.hostname != "career.habr.com" or not re.fullmatch(r"/vacancies/\d+", url.path):
+        return False
+    # The heading "Ваш отклик" exists BEFORE sending too. Only the dated
+    # candidate response card is a receipt, not that heading or an apply button.
+    return _first_visible(page, [
+        "#create-vacancy-response .vacancy-response .resume-card time[datetime]",
+    ]) is not None
+
+
+def _submit_habr_start(page: Any, start: Any, request: ExternalApplyRequest, steps: list[str]) -> ExternalApplyResult:
+    """Submit the response-section button once and require the dated receipt."""
+    previous_url = str(page.url or "")
+    steps.append("final_submit_started")
+    try:
+        start.click()
+        page.wait_for_timeout(1_250)
+        confirmed = _application_success(page, "habr", previous_url)
+    except Exception:  # A click timeout can follow a successful remote write.
+        confirmed = False
+    if not confirmed:
+        return ExternalApplyResult(
+            status="submission_unknown", mode="browser",
+            message="Хабр мог принять отклик, но карточка с датой не найдена. Проверьте сайт перед повтором.",
+            blockers=["reconciliation_required"], steps=steps,
+        )
+    letter_sent = False
+    letter_error = ""
+    if request.letter.strip():
+        try:
+            letter_sent = _save_habr_cover_letter(page, request.letter, steps)
+        except Exception:  # Resume delivery is already confirmed; never resend it.
+            letter_error = "cover_letter_unconfirmed"
+        if not letter_sent:
+            letter_error = "cover_letter_unconfirmed"
+    return ExternalApplyResult(
+        status="applied", mode="browser", applied=True,
+        message=(
+            "Хабр подтвердил отклик и сопроводительное письмо."
+            if letter_sent else
+            "Хабр подтвердил отклик. Сопроводительное не подтверждено; повторно отправлять резюме не нужно."
+            if letter_error else "Хабр подтвердил отклик без сопроводительного письма."
+        ),
+        blockers=[letter_error] if letter_error else [],
+        steps=[*steps, "submitted"],
+        raw_result={"final_url": page.url, "cover_letter_submitted": letter_sent},
+        evidence={"kind": "source_receipt", "source": "habr", "url": page.url},
+    )
+
+
+def _save_habr_cover_letter(page: Any, letter: str, steps: list[str]) -> bool:
+    """Habr creates the response first; its editor saves the letter separately."""
+    message_selector = "#create-vacancy-response .vacancy-response__message"
+
+    def saved() -> bool:
+        message = _first_visible(page, [message_selector])
+        return message is not None and " ".join(message.inner_text().split()) == " ".join(letter.split())
+
+    if saved():
+        return True
+    editor_selector = '#create-vacancy-response textarea[name="body"]'
+    editor = _first_visible(page, [editor_selector])
+    if editor is None:
+        edit = _first_visible(page, ['#create-vacancy-response button:has-text("Редактировать")'])
+        if edit is None:
+            return False
+        edit.click()
+        page.locator(editor_selector).wait_for(state="visible", timeout=5_000)
+        editor = _first_visible(page, [editor_selector])
+    if editor is None:
+        return False
+    editor.fill(letter)
+    submit = _first_visible(page, ['#create-vacancy-response button:has-text("Сохранить")'])
+    if submit is None:
+        return False
+    steps.append("cover_letter_save_started")
+    submit.click()
+    page.locator(message_selector).wait_for(state="visible", timeout=10_000)
+    if saved():
+        steps.append("cover_letter_confirmed")
+        return True
+    return False
+
+
 def _already_applied(page: Any, source: str) -> bool:
+    if source == "habr":
+        return _habr_receipt(page)
     if source != "linkedin":
         return False
     return _first_visible(
@@ -823,12 +975,37 @@ def _already_applied(page: Any, source: str) -> bool:
 def _application_success(page: Any, source: str, previous_url: str) -> bool:
     # Only source-specific receipt UI is evidence. A generic Done button, page
     # text, redirect or a wizard's next step cannot confirm an application.
+    if source == "habr":
+        before, after = urlsplit(previous_url), urlsplit(str(page.url or ""))
+        return (before.scheme, before.netloc, before.path) == (after.scheme, after.netloc, after.path) and _habr_receipt(page)
+    if source == "lever":
+        before, after = urlsplit(previous_url), urlsplit(str(page.url or ""))
+        return (before.scheme, before.netloc) == (after.scheme, after.netloc) and after.path == before.path.removesuffix("/apply") + "/thanks"
     if source != "linkedin" or str(page.url or "") != previous_url:
         return False
     return _first_visible(page, [
         '[data-test-modal-id="easy-apply-done"]',
         "a.jobs-s-apply__application-link",
     ]) is not None
+
+
+def _authenticated_browser_session(page: Any, source: str) -> bool:
+    """Require account UI evidence; a public landing page is not a login receipt."""
+    expected_host = urlsplit(BROWSER_LOGIN_URLS.get(source, "")).hostname
+    if not expected_host or urlsplit(str(page.url or "")).hostname != expected_host:
+        return False
+    if _login_required(page):
+        return False
+    selectors = [
+        'a[href*="/logout"]',
+        'a[href*="/sign_out"]',
+        'button:text-is("Выйти")',
+        'button:text-is("Log out")',
+        'button:text-is("Sign out")',
+    ]
+    if source == "habr":
+        selectors.append('button[title="Личное меню"]')
+    return _first_visible(page, selectors) is not None
 
 
 def _login_required(page: Any) -> bool:

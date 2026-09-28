@@ -30,13 +30,123 @@ def _ai_config() -> dict:
     }
 
 
+@pytest.mark.parametrize("roles,expected", [
+    ([{"id": "40"}], "role_not_allowed"),
+    ([], "read_parse_error"),
+    ([{"id": "96"}], "applied"),
+])
+def test_native_transport_rechecks_roles_before_post(roles, expected):
+    calls = []
+    client = SimpleNamespace(
+        get_vacancy=lambda _id: {"professional_roles": roles},
+        apply_outcome=lambda *args, **kwargs: calls.append(args) or DispatchOutcome(
+            "applied", DeliveryCertainty.DEFINITE_RESPONSE,
+        ),
+    )
+    native = HHNativeApplicationTransport(
+        client, None, SimpleNamespace(), None,
+        settings_provider=lambda: SimpleNamespace(
+            application={"captcha_mode": "manual_handoff"},
+            filters={"allowed_role_families": ["96"]},
+        ),
+        candidate_provider=dict, resume_provider=lambda _: {},
+    )
+    outcome = native.apply_outcome("v-1", "r-1", "", timeout_seconds=30)
+    assert outcome.code == expected
+    assert len(calls) == (1 if expected == "applied" else 0)
+    if not calls:
+        assert outcome.certainty is DeliveryCertainty.DEFINITELY_NOT_SENT
+
+
+def test_native_transport_accepts_curated_vacancy_with_different_hh_role():
+    posted = []
+    client = SimpleNamespace(
+        get_vacancy=lambda _id: {"professional_roles": [{"id": "40"}]},
+        apply_outcome=lambda *args, **kwargs: posted.append(args) or DispatchOutcome(
+            "applied", DeliveryCertainty.DEFINITE_RESPONSE,
+        ),
+    )
+    native = HHNativeApplicationTransport(
+        client, None, SimpleNamespace(), None,
+        settings_provider=lambda: SimpleNamespace(
+            application={"captcha_mode": "manual_handoff"},
+            filters={
+                "allowed_role_families": ["96"],
+                "allowed_vacancy_ids": ["v-1"],
+            },
+        ),
+        candidate_provider=dict, resume_provider=lambda _: {},
+    )
+    assert native.apply_outcome("v-1", "r-1", "letter", timeout_seconds=30).code == "applied"
+    assert len(posted) == 1
+    assert native.apply_outcome("v-2", "r-1", "letter", timeout_seconds=30).code == "role_not_allowed"
+    assert len(posted) == 1
+
+
+def test_preflight_read_failure_is_retryable_and_never_posts():
+    from work_hunter.hh_transport.errors import HHNetworkError
+
+    def unavailable(_id):
+        raise HHNetworkError("temporary read failure")
+
+    native = HHNativeApplicationTransport(
+        SimpleNamespace(get_vacancy=unavailable), None, None, None,
+        settings_provider=lambda: SimpleNamespace(application={}),
+        candidate_provider=dict, resume_provider=lambda _: {},
+    )
+    result = native.apply_outcome("v-1", "r-1", "", timeout_seconds=30)
+    assert result.code == "pre_dispatch_network_error"
+    assert result.certainty is DeliveryCertainty.DEFINITELY_NOT_SENT
+    assert result.payload["stage"] == "preflight"
+
+
+@pytest.mark.parametrize("browser_result", ["applied", "manual_captcha"])
+def test_preflight_stateful_captcha_is_solved_before_single_post(browser_result):
+    from work_hunter.hh_transport.errors import HHForbiddenError
+
+    reads, posts, browser_urls = [], [], []
+
+    def vacancy(_id):
+        reads.append(_id)
+        if len(reads) == 1:
+            raise HHForbiddenError(
+                "captcha required", status_code=403, code="captcha_required",
+                payload={"challenge_metadata": {"captcha_url":
+                    "https://hh.ru/account/captcha?state=opaque&token=secret"}},
+            )
+        return {"has_test": False}
+
+    browser = SimpleNamespace(solve_captcha=lambda url, *_args, **_kwargs:
+                              browser_urls.append(url) or DispatchOutcome(
+                                  browser_result, DeliveryCertainty.DEFINITE_RESPONSE))
+    client = SimpleNamespace(
+        get_vacancy=vacancy,
+        apply_outcome=lambda *args, **_kwargs: posts.append(args) or DispatchOutcome(
+            "applied", DeliveryCertainty.DEFINITE_RESPONSE),
+    )
+    native = HHNativeApplicationTransport(
+        client, browser, SimpleNamespace(base_url="https://hh.ru"), None,
+        settings_provider=lambda: SimpleNamespace(application={
+            "captcha_mode": "vision_then_manual", "challenge_attempts": 2,
+        }, filters={}),
+        candidate_provider=dict, resume_provider=lambda _: {},
+    )
+
+    assert native.apply_outcome("v-1", "r-1", "letter", timeout_seconds=30).code == "applied"
+    assert len(reads) == 2
+    assert len(posts) == 1
+    assert browser_urls == [
+        "https://hh.ru/account/captcha?state=opaque&backurl=https%3A%2F%2Fhh.ru%2F"
+    ]
+
+
 def test_challenge_ai_uses_supplied_ids_and_vision_image() -> None:
     calls: list[tuple[list[dict], dict]] = []
 
     def completion(messages, config):
         calls.append((messages, config))
         if isinstance(messages[-1]["content"], list):
-            return " A-7 B "
+            return " whin  stickybeak\n"
         return "Ответ: 22"
 
     ai = HHChallengeAI(_ai_config, completion=completion)
@@ -48,7 +158,7 @@ def test_challenge_ai_uses_supplied_ids_and_vision_image() -> None:
         )
         == "22"
     )
-    assert ai.solve_captcha(b"png-bytes") == "A7B"
+    assert ai.solve_captcha(b"png-bytes") == "whin stickybeak"
     image_url = calls[1][0][-1]["content"][0]["image_url"]["url"]
     assert image_url.startswith("data:image/png;base64,")
     assert calls[1][1]["model"] == "vision-model"
@@ -97,6 +207,7 @@ def test_application_captcha_is_solved_in_saved_browser_session_and_retried(
 ) -> None:
     state = {
         "html": '<img data-qa="account-captcha-picture">',
+        "captcha_language_button": "English",
         "cookies": [{"name": "hhtoken", "value": "before", "domain": ".hh.ru"}],
     }
     session = HHBrowserSession(cookie_path=tmp_path / "hh.json")
@@ -137,6 +248,8 @@ def test_application_captcha_is_solved_in_saved_browser_session_and_retried(
     assert outcome.code == "applied"
     assert client.calls == 2
     assert state["captcha_answer"] == "A7B"
+    assert state["wait_state"] == "hidden"
+    assert state["image_language"] == "Русский"
     reloaded = HHBrowserSession(cookie_path=tmp_path / "hh.json")
     reloaded.load()
     assert reloaded.load_cookie("hhtoken") == "after"
@@ -206,14 +319,34 @@ class _CaptchaLocator:
         self.selector = selector
 
     def screenshot(self):
+        self.state["image_language"] = self.state.get("captcha_language_button")
         return b"captcha-png"
+
+    def is_visible(self):
+        return not self.state.get("captcha_solved", False)
+
+    def count(self):
+        return int(bool(self.state.get("captcha_language_button")))
+
+    def inner_text(self):
+        return self.state["captcha_language_button"]
+
+    def click(self):
+        assert self.selector == '[data-qa="captcha-language"]'
+        self.state["captcha_language_button"] = "Русский"
 
     def fill(self, value):
         self.state["captcha_answer"] = value
 
     def press(self, key):
         assert key == "Enter"
-        self.state["html"] = "<main>solved</main>"
+
+    def wait_for(self, *, state, **_kwargs):
+        self.state["wait_state"] = state
+        assert state == "hidden"
+        self.state["captcha_solved"] = True
+        # HH can retain CAPTCHA translations/markers in scripts after redirect.
+        self.state["html"] = '<main>solved</main><script>"account-captcha-input"</script>'
         self.state["cookies"] = [
             {"name": "hhtoken", "value": "after", "domain": ".hh.ru"}
         ]
@@ -233,8 +366,8 @@ class _CaptchaPage:
     def locator(self, selector):
         return _CaptchaLocator(self.state, selector)
 
-    def wait_for_load_state(self, *_args, **_kwargs):
-        return None
+    def wait_for_load_state(self, state, **_kwargs):
+        self.state["wait_state"] = state
 
 
 class _CaptchaContext:
@@ -274,9 +407,9 @@ class _CaptchaClient:
                 DispatchOutcome(
                     "manual_captcha",
                     DeliveryCertainty.DEFINITE_RESPONSE,
-                    location="https://hh.ru/account/captcha",
+                    location="https://hh.ru/account/captcha?state=opaque",
                 ),
-                "https://hh.ru/account/captcha?token=secret",
+                "https://hh.ru/account/captcha?state=opaque&token=secret",
             )
         return (
             DispatchOutcome("applied", DeliveryCertainty.DEFINITE_RESPONSE),

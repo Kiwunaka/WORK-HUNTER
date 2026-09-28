@@ -88,16 +88,14 @@ class HHChatikClient:
         if cookie_count == 0:
             raise ValueError("HH Chatik cookies are required")
 
-    def list_chats(self, *, page: int = 0) -> dict[str, Any]:
-        if page < 0:
-            raise ValueError("Chatik page must be nonnegative")
+    def list_chats(self, *, cursor: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
             "filterUnread": "false",
             "filterHasTextMessage": "false",
             "do_not_track_session_events": "true",
         }
-        if page:
-            params["page"] = page
+        if cursor:
+            params["from"] = cursor
         return self._request_json("GET", "/chatik/api/chats", params=params)
 
     def get_chat_data(self, chat_id: str | int, applicant_id: str | int) -> dict[str, Any]:
@@ -281,10 +279,11 @@ def extract_chatik_candidates(
 
 def chatik_page_count(payload: Mapping[str, Any]) -> int:
     chats = _mapping(payload.get("chats"))
-    try:
-        return max(1, int(chats.get("pages") or 1))
-    except (TypeError, ValueError):
+    page_size = len(_list(chats.get("items")))
+    if not page_size:
         return 1
+    found = int(chats.get("found") or page_size)
+    return max(1, (found + page_size - 1) // page_size)
 
 
 def chatik_message_history(payload: Mapping[str, Any], *, limit: int = 20) -> str:

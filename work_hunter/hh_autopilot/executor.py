@@ -10,6 +10,7 @@ from work_hunter.safety import require_hh_dispatch_authorization
 
 from .config import AutopilotSettings
 from .repository import AutopilotRepository, ItemRecord, LeaseRecord
+from .sanitization import sanitize_text
 from .types import (
     AutopilotState,
     DeliveryCertainty,
@@ -30,6 +31,7 @@ PERMANENT_CODES = frozenset(
         "forbidden",
         "invalid_request",
         "missing_required_data",
+        "role_not_allowed",
         "screening_disabled",
         "form_disabled",
         "ai_unavailable",
@@ -50,6 +52,7 @@ RECONCILIATION_CODES = frozenset(
         "ambiguous_remote_result",
         "post_dispatch_parse_error",
         "post_dispatch_network_error",
+        "post_dispatch_internal_error",
     }
 )
 
@@ -307,10 +310,19 @@ class HHApplicationExecutor:
             )
             if type(outcome) is not DispatchOutcome:
                 raise TypeError("transport returned an invalid dispatch outcome")
-        except Exception:
+        except Exception as exc:
+            try:
+                detail = sanitize_text(
+                    str(exc), field="dispatch.exception", maximum=500,
+                    allow_empty=True, markup="strip", sensitive="redact",
+                    overflow="truncate",
+                )
+            except (TypeError, ValueError):
+                detail = "redacted"
             outcome = DispatchOutcome(
-                code="post_dispatch_network_error",
+                code="post_dispatch_internal_error",
                 certainty=DeliveryCertainty.POSSIBLY_SENT,
+                payload={"exception_type": type(exc).__name__, "error_message": detail},
             )
 
         finalized_at = instant if now is not None else datetime.now(timezone.utc)

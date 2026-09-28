@@ -739,7 +739,9 @@ class Storage:
                 deterministic=True,
             )
             self.conn.execute("PRAGMA foreign_keys = ON")
-            self.conn.execute("PRAGMA busy_timeout = 5000")
+            # Parallel HH letter workers also open this database and serialize
+            # schema checks/writes with the sender's final receipt transaction.
+            self.conn.execute("PRAGMA busy_timeout = 30000")
             self._migrate()
         except Exception:
             self.conn.close()

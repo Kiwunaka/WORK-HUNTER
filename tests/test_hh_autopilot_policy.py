@@ -253,6 +253,28 @@ def test_history_id_sets_are_exact_bounded_facts() -> None:
     assert decision.evidence["vacancy_id"] == "v-1"
 
 
+def test_explicit_vacancy_allowlist_rejects_otherwise_matching_job() -> None:
+    case = _base_case()
+    case["filters"]["allowed_vacancy_ids"] = ["v-2"]
+    assert _evaluate(case).reason == "hard_filter:allowed_vacancy_ids"
+    case["vacancy"]["id"] = "v-2"
+    assert _evaluate(case).passed is True
+
+
+def test_curated_allowlist_overrides_search_lexicon_but_keeps_geography_gate() -> None:
+    case = _base_case()
+    case["filters"]["allowed_vacancy_ids"] = ["v-1"]
+    case["filters"]["excluded_keywords"] = ["1c"]
+    case["vacancy"]["title"] = "AI automation engineer"
+    case["vacancy"]["description"] = "Python agents integrating with 1C as one source"
+    case["vacancy"]["professional_role_ids"] = ["40"]
+    assert _evaluate(case).passed is True
+
+    case["vacancy"]["schedule_id"] = "fullDay"
+    case["vacancy"]["work_format_ids"] = ["on_site"]
+    assert _evaluate(case).reason == "hard_filter:remote"
+
+
 def test_required_keywords_accept_any_configured_term() -> None:
     case = _base_case()
     case["filters"]["required_keywords"] = ["python", "kubernetes"]
@@ -380,6 +402,66 @@ def test_unknown_salary_allow_passes_and_reject_mode_skips() -> None:
     assert _evaluate(case).reason == "hard_filter:minimum_salary"
 
 
+@pytest.mark.parametrize(
+    ("description", "rejected"),
+    [
+        ("<p>Заработная плата <strong>40 000 - 60 000 руб.</strong></p>"
+         "<p>Через год — 100 000 руб.</p>", True),
+        ("Зарплата: 80–120 тыс. рублей на руки", True),
+        ("Зарплата от 200 000 рублей на руки", False),
+        ("Оклад: 200–250 тыс. руб.", False),
+        ("Доступ к подписке за 100–200 руб. Зарплата обсуждается.", False),
+    ],
+)
+def test_salary_in_description_is_not_unknown(description: str, rejected: bool) -> None:
+    case = _base_case()
+    case["filters"]["minimum_salary"] = 200_000
+    case["vacancy"].update(
+        salary_from=None, salary_to=None, salary_currency="", description=description,
+    )
+
+
+    decision = _evaluate(case)
+    assert (decision.reason == "hard_filter:minimum_salary") is rejected
+    normalized = normalize_vacancy({
+        "id": "description-salary", "name": "Engineer", "salary": None,
+        "description": description,
+    })
+    # Normalization may redact phone-like digit sequences in the prose, but
+    # must retain the salary as typed facts for the real dispatch filter.
+    actual = HardFilter(case["filters"])._salary(normalized.to_dict(), {}, {}, {})
+    assert (actual is not None and actual.reason == "hard_filter:minimum_salary") is rejected
+
+
+def test_excluded_title_keyword_does_not_reject_a_matching_description() -> None:
+    case = _base_case()
+    case["filters"]["excluded_title_keywords"] = ["C++ developer"]
+    case["vacancy"]["description"] = "Python services integrate with a C++ developer team"
+    assert _evaluate(case).passed is True
+
+    case["vacancy"]["title"] = "C++ developer"
+    assert _evaluate(case).reason == "hard_filter:excluded_keywords"
+
+
+def test_required_title_keyword_rejects_generic_fullstack_even_with_python_description() -> None:
+    case = _base_case()
+    case["filters"]["required_title_keywords"] = ["AI", "data", "python"]
+    case["vacancy"]["title"] = "Fullstack Developer"
+    assert _evaluate(case).reason == "hard_filter:required_keywords"
+
+    case["vacancy"]["title"] = "AI Fullstack Developer"
+    assert _evaluate(case).passed is True
+
+
+def test_mandatory_relocation_in_description_overrides_local_area() -> None:
+    case = _base_case()
+    case["filters"]["excluded_keywords"].append("релокация")
+    case["vacancy"]["description"] = (
+        "Python и MLOps. Обязательным условием является релокация в Елабугу."
+    )
+    assert _evaluate(case).reason == "hard_filter:excluded_keywords"
+
+
 def test_wrong_salary_currency_never_converts() -> None:
     case = _base_case()
     case["vacancy"]["salary_currency"] = "USD"
@@ -388,6 +470,48 @@ def test_wrong_salary_currency_never_converts() -> None:
 
     assert decision.reason == "hard_filter:minimum_salary"
     assert decision.evidence["currency"] == "usd"
+
+
+def test_currency_specific_salary_floor_accepts_usd_without_fx_conversion() -> None:
+    case = _base_case()
+    case["filters"]["minimum_salary_by_currency"] = {"USD": 2_000}
+    case["vacancy"].update(
+        salary_from=2_000,
+        salary_to=2_500,
+        salary_currency="USD",
+    )
+
+    assert _evaluate(case).passed is True
+
+
+def test_currency_specific_salary_floor_rejects_usd_below_floor() -> None:
+    case = _base_case()
+    case["filters"]["minimum_salary_by_currency"] = {"USD": 2_000}
+    case["vacancy"].update(
+        salary_from=1_500,
+        salary_to=1_999,
+        salary_currency="USD",
+    )
+
+    decision = _evaluate(case)
+
+    assert decision.reason == "hard_filter:minimum_salary"
+    assert decision.evidence == {"maximum": 1_999, "minimum": 2_000}
+
+
+def test_unconfigured_currency_keeps_legacy_salary_currency_gate() -> None:
+    case = _base_case()
+    case["filters"]["minimum_salary_by_currency"] = {"USD": 2_000}
+    case["vacancy"].update(
+        salary_from=2_000,
+        salary_to=2_500,
+        salary_currency="EUR",
+    )
+
+    decision = _evaluate(case)
+
+    assert decision.reason == "hard_filter:minimum_salary"
+    assert decision.evidence["expected_currency"] == "rur"
 
 
 @pytest.mark.parametrize(

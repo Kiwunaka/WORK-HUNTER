@@ -5,10 +5,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import urlsplit, urlunsplit
 
 from .repository import ChallengeRecord, ItemRecord, LeaseRecord, LostLease, StaleWrite
 from .types import AutopilotState, DispatchOutcome
+from work_hunter.hh_transport.challenge_urls import sanitize_hh_challenge_url
 
 
 FIELD_SOURCES: dict[str, tuple[str, str]] = {
@@ -371,18 +371,7 @@ def normalize_field_id(field_value: Mapping[str, Any]) -> str:
 
 
 def sanitize_hh_url(url: str) -> str:
-    value = str(url or "").strip()
-    if not value:
-        return ""
-    try:
-        parts = urlsplit(value)
-        port = f":{parts.port}" if parts.port is not None else ""
-    except ValueError:
-        return ""
-    if parts.scheme.casefold() not in {"http", "https"} or not parts.hostname:
-        return ""
-    host = parts.hostname.casefold().rstrip(".")
-    return urlunsplit((parts.scheme.casefold(), host + port, parts.path or "/", "", ""))
+    return sanitize_hh_challenge_url(url)
 
 
 def _aware_utc(value: datetime) -> datetime:

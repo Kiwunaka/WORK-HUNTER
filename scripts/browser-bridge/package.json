@@ -1,0 +1,7 @@
+{
+  "name": "work-hunter-browser-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned official Playwright relay for the user's existing browser",
+  "dependencies": { "playwright-core": "1.62.0" }
+}

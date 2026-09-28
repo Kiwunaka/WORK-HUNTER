@@ -12,15 +12,15 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from work_hunter.candidate import candidate_prompt
-from work_hunter.candidate_fit import FIT_PROMPT, parse_fit
-from work_hunter.candidate_reply import (
+from work_hunter.candidate import candidate_prompt  # noqa: E402
+from work_hunter.candidate_fit import FIT_PROMPT, parse_fit  # noqa: E402
+from work_hunter.candidate_reply import (  # noqa: E402
     REPLY_INSTRUCTION,
     MissingCandidateFacts,
     parse_candidate_reply,
 )
-from work_hunter.llm.structured import StructuredParseError
-from work_hunter.services import WorkHunter
+from work_hunter.llm.structured import StructuredParseError  # noqa: E402
+from work_hunter.services import WorkHunter  # noqa: E402
 
 MODELS = [
     "meta/muse-spark-1.3-contributor",

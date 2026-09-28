@@ -1092,6 +1092,34 @@ function appendAutopilotRow(target, title, detail, actions = []) {
   target.append(row);
 }
 
+function hhAutopilotReason(code, metadata = {}) {
+  const labels = {
+    post_dispatch_network_error: "Нет подтверждения от HH после попытки отправки. Сначала сверить историю, не повторять отклик",
+    post_dispatch_internal_error: "Сбой комбайна при отправке или обработке ответа. Доставка неизвестна; требуется сверка с HH",
+    post_dispatch_parse_error: "Ответ HH не удалось распознать. Отклик мог уйти; требуется сверка",
+    pre_dispatch_network_error: "Соединение не установлено: отклик не отправлен",
+    policy_hash_mismatch: "Настройки изменились: обновите разрешение автопилота перед запуском",
+    policy_material_unavailable: "Не удалось проверить текущие резюме и настройки разрешения. Отправка не начата; проверьте доступ к HH",
+    run_not_active: "Запуск остановлен; отправка прекращена",
+    lease_lost: "Запуск потерял блокировку. Сначала сверить незавершённые отправки",
+    duplicate_external: "Отклик уже есть в HH. Повторная отправка исключена",
+    applied: "Отклик подтверждён",
+    auth_expired: "Сессия HH истекла: требуется вход",
+    manual_captcha: "HH запросил CAPTCHA: требуется ваше действие",
+    hh_daily_limit: "Достигнут дневной лимит HH",
+    rate_limited: "HH ограничил частоту запросов: ожидаем повторной попытки",
+    "hard_filter:allowed_role_families": "Профессия вакансии не входит в выбранные направления",
+    role_not_allowed: "Профессия не соответствует текущему фильтру. Отклик не отправлен",
+    missing_required_data: "Недостаточно данных для безопасного отклика. Отправка пропущена",
+    ai_low_confidence: "Муся ответила, но уверенность в соответствии вакансии ниже порога. Отклик не отправлен",
+    ai_unavailable: "Не удалось получить проверенную AI-оценку: ошибка запроса или ответа. Отклик не отправлен",
+  };
+  const raw = String(code || "");
+  const key = raw.includes(": ") ? raw.split(": ").pop() : raw;
+  const detail = [metadata.exception_type, metadata.error_message].filter(Boolean).join(": ");
+  return `${labels[key] || raw}${labels[key] ? ` [${key}]` : ""}${detail ? ` · ${detail}` : ""}`;
+}
+
 function renderHhAutopilotQueue(payload) {
   const target = $("#hh-autopilot-queue");
   target.replaceChildren();
@@ -1101,10 +1129,10 @@ function renderHhAutopilotQueue(payload) {
     appendAutopilotRow(
       target,
       account || "Очередь",
-      `pending ${queue.pending || 0} · retry ${queue.retry || 0} · reconciling ${queue.reconciling || 0} · manual ${queue.manual || 0} · dead ${queue.dead || 0}`,
+      `В очереди ${queue.pending || 0} · Ожидают повтора ${queue.retry || 0} · Нужна сверка с HH ${queue.reconciling || 0} · Нужны ваши действия ${queue.manual || 0} · Завершены с ошибкой ${queue.dead || 0}`,
     );
     for (const run of status.runs || []) {
-      appendAutopilotRow(target, `Run #${run.id}: ${run.status}`, `${run.trigger} · ${run.started_at || ""} · ${run.error || "без ошибки"}`);
+      appendAutopilotRow(target, `Запуск №${run.id}: ${run.status}`, `${run.trigger} · ${run.started_at || ""} · ${hhAutopilotReason(run.error) || "без ошибки"}`);
     }
   }
   if (!target.children.length) appendAutopilotRow(target, "Очередь пуста", "Нет активных элементов");
@@ -1174,8 +1202,8 @@ function renderHhAutopilotHistory(payload, { append = false } = {}) {
     }
     appendAutopilotRow(
       target,
-      `${event.event_type || event.type || event.action || "event"} · ${event.vacancy_id || ""}`,
-      `${event.account || ""} · ${event.created_at || event.at || ""} · ${event.reason || ""}`,
+      `${event.next_state || event.event_type || event.type || event.action || "Событие"} · ${event.vacancy_id || ""}`,
+      `${event.account || payload.account || ""} · ${event.created_at || event.at || ""} · ${hhAutopilotReason(event.reason_code || event.reason, event.metadata_json || {})}`,
       actions,
     );
   }
@@ -1377,7 +1405,7 @@ async function saveAiSettings() {
 const SOURCE_META = Object.freeze({
   hh: { label: "HeadHunter", domain: "hh.ru", url: "https://hh.ru/account/login", icon: "/vendor/brands/hh.png" },
   linkedin: { label: "LinkedIn", domain: "linkedin.com", url: "https://www.linkedin.com/login", icon: "/vendor/brands/linkedin.png" },
-  habr: { label: "Хабр Карьера", domain: "career.habr.com", url: "https://career.habr.com/login", icon: "/vendor/brands/habr.png" },
+  habr: { label: "Хабр Карьера", domain: "career.habr.com", url: "https://career.habr.com/", icon: "/vendor/brands/habr.png" },
   geekjob: { label: "GeekJob", domain: "geekjob.ru", url: "https://geekjob.ru/login", icon: "/vendor/brands/geekjob.png" },
   getmatch: { label: "Getmatch", domain: "getmatch.ru", url: "https://getmatch.ru/auth/signin", icon: "/vendor/brands/getmatch.png" },
   relocate_me: { label: "Relocate.me", domain: "relocate.me", url: "https://relocate.me", icon: "/vendor/brands/relocate_me.png" },
@@ -1573,12 +1601,14 @@ function renderSourceCapabilities(sources, capabilities) {
     const meta = SOURCE_META[sourceName] || { label: sourceName, domain: sourceName, url: "" };
     const row = document.createElement("article");
     row.className = "source-capability-row";
+    const enabled = capability.enabled === true;
     const searchAvailable = !["", "none"].includes(String(capability.search || ""));
     const applyKind = String(capability.apply || "none");
     const canApply = !["", "none"].includes(applyKind);
     const usesBrowser = ["browser", "session_or_browser"].includes(applyKind);
     const requiresAuth = Boolean(capability.requires_auth);
     const badges = [
+      !enabled ? '<span class="capability-badge">Отключено</span>' : "",
       searchAvailable ? '<span class="capability-badge">Поиск</span>' : "",
       canApply ? `<span class="capability-badge apply">${applyKind === "external_contact" ? "Связаться" : (capability.auto_apply_verified === true ? "Автоотклик проверен" : "С участием пользователя")}</span>` : "",
       usesBrowser ? '<span class="capability-badge browser">Через браузер</span>' : "",
@@ -1598,15 +1628,15 @@ function renderSourceCapabilities(sources, capabilities) {
       <div class="source-capability-name">${sourceLogoMarkup(sourceName)}<span><strong>${escapeHtml(meta.label)}</strong><small>${escapeHtml(meta.domain)}</small></span></div>
       <div class="source-capability-badges">${badges}</div>
       <div class="source-capability-description">${escapeHtml(detail)}<br><span class="meta">${escapeHtml(sourceSyncLabel(syncByName[sourceName]))}</span></div>
-      <button type="button" class="source-action ${requiresAuth ? "login" : ""}" data-source-name="${escapeAttr(sourceName)}" data-source-action="${escapeAttr(actionType)}" data-source-url="${escapeAttr(meta.url)}"><i class="ph ${escapeAttr(actionIcon)}" aria-hidden="true"></i>${escapeHtml(actionLabel)}</button>`;
+      <button type="button" ${enabled ? "" : "disabled"} class="source-action ${requiresAuth ? "login" : ""}" data-source-name="${escapeAttr(sourceName)}" data-source-action="${escapeAttr(actionType)}" data-source-url="${escapeAttr(meta.url)}"><i class="ph ${escapeAttr(actionIcon)}" aria-hidden="true"></i>${enabled ? escapeHtml(actionLabel) : "Отключено"}</button>`;
     box.append(row);
   }
   const enabled = entries.filter(([, capability]) => capability.enabled).length;
   const summary = $("#sources-summary");
   if (summary) summary.textContent = `${enabled} площадок включено`;
-  const searchCount = entries.filter(([, capability]) => !["", "none"].includes(String(capability.search || ""))).length;
-  const applyCount = entries.filter(([, capability]) => capability.auto_apply_verified === true).length;
-  const authCount = entries.filter(([, capability]) => capability.requires_auth).length;
+  const searchCount = entries.filter(([, capability]) => capability.enabled && !["", "none"].includes(String(capability.search || ""))).length;
+  const applyCount = entries.filter(([, capability]) => capability.enabled && capability.auto_apply_verified === true).length;
+  const authCount = entries.filter(([, capability]) => capability.enabled && capability.requires_auth).length;
   const connectedCount = sources.filter((source) => source.last_sync_at && !source.last_error).length;
   if ($("#sources-search-count")) $("#sources-search-count").textContent = String(searchCount);
   if ($("#sources-apply-count")) $("#sources-apply-count").textContent = String(applyCount);
@@ -2191,11 +2221,38 @@ function funnelWidth(count, total) {
 
 async function loadStats() {
   try {
-    const stats = await api("/api/stats");
+    const period = $("#stats-period")?.value || "30";
+    const stats = await api(`/api/stats?days=${encodeURIComponent(period)}`);
+    // A slower response from a previous period must not replace the current chart.
+    if (period !== ($("#stats-period")?.value || "30")) return;
     $("#stat-total").textContent = stats.total_jobs || 0;
     $("#stat-new").textContent = (stats.by_status?.new || 0);
-    $("#stat-applied").textContent = stats.total_applications || 0;
+    $("#stat-applied").textContent = stats.cross_source?.sent || 0;
     $("#stat-saved").textContent = (stats.by_status?.saved || 0);
+    const cohort = stats.cross_source;
+    const peak = Math.max(1, ...cohort.daily.map(day => day.count));
+    $("#stats-period-summary").textContent = `${cohort.from} — ${cohort.to} · ${cohort.sent} отправлено · ${cohort.pending} не подтверждено`;
+    $("#stats-daily").innerHTML = cohort.daily.map(day => {
+      const label = `${day.date}: ${day.count} откликов`;
+      return `<div class="analytics-day" tabindex="0" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><span class="analytics-day-value">${day.count || ""}</span><div class="analytics-day-track"><div style="height:${100 * day.count / peak}%"></div></div><small>${day.date.slice(5)}</small></div>`;
+    }).join("");
+    const outcomeSeries = [
+      ["waiting", "Без записанного результата"], ["reply", "Ответ / скрининг"],
+      ["interview", "Интервью"], ["offer", "Оффер"], ["rejected", "Отказ"],
+    ];
+    const outcomeRows = cohort.sources.filter(row => row.sent > 0);
+    const outcomePeak = Math.max(1, ...outcomeRows.map(row => row.sent));
+    $("#stats-outcomes").innerHTML = outcomeRows.length
+      ? `<div class="analytics-outcome-legend">${outcomeSeries.map(([key, label]) => `<span><i class="outcome-${key}" aria-hidden="true"></i>${label}</span>`).join("")}</div>${outcomeRows.map(row => {
+        const values = { ...row, waiting: row.sent - row.reply - row.interview - row.offer - row.rejected };
+        const detail = outcomeSeries.map(([key, label]) => `${label}: ${values[key]}`).join("; ");
+        return `<div class="analytics-outcome-row" tabindex="0" title="${escapeHtml(detail)}" aria-label="${escapeHtml(row.source)}: ${row.sent} откликов. ${escapeHtml(detail)}"><strong>${escapeHtml(row.source)}</strong><div class="analytics-outcome-track">${outcomeSeries.filter(([key]) => values[key] > 0).map(([key, label]) => `<span class="outcome-${key}" style="width:${100 * values[key] / outcomePeak}%" title="${escapeHtml(label)}: ${values[key]}"></span>`).join("")}</div><b>${row.sent}</b></div>`;
+      }).join("")}`
+      : '<p class="meta">За этот период нет подтверждённых отправок для графика.</p>';
+    $("#stats-ledger-sources").innerHTML = cohort.sources.length
+      ? `<table class="analytics-ledger-table"><caption>Подтверждённые отправки и текущие результаты по площадкам</caption><thead><tr><th scope="col">Площадка</th><th scope="col">Отправлено</th><th scope="col">Ответ / скрининг</th><th scope="col">Интервью</th><th scope="col">Оффер</th><th scope="col">Отказ</th><th scope="col">Не подтверждено*</th></tr></thead><tbody>${cohort.sources.map(row => `<tr><th scope="row">${escapeHtml(row.source)}</th>${["sent", "reply", "interview", "offer", "rejected", "pending"].map(key => `<td>${row[key]}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+      : '<p class="meta">За этот период подтверждённых отправок в журнале нет.</p>';
+    $("#stats-ledger-note").textContent = `${cohort.note}${cohort.undated ? ` Без даты: ${cohort.undated}, в график не включены.` : ""}`;
 
     const sourceDiv = $("#stats-by-source");
     sourceDiv.innerHTML = "";
@@ -2203,7 +2260,7 @@ async function loadStats() {
       for (const [source, count] of Object.entries(stats.by_source)) {
         const numericCount = Number(count);
         const width = Number.isFinite(numericCount)
-          ? Math.min(100, Math.max(0, numericCount / 10))
+          ? funnelWidth(numericCount, Math.max(1, ...Object.values(stats.by_source)))
           : 0;
         sourceDiv.innerHTML += `<div class="stat-bar"><span>${escapeHtml(source)}</span><div class="bar"><div class="fill" style="width:${width}%"></div></div><span>${escapeHtml(String(count))}</span></div>`;
       }
@@ -2215,7 +2272,7 @@ async function loadStats() {
       for (const [bucket, count] of Object.entries(stats.score_distribution)) {
         const numericCount = Number(count);
         const width = Number.isFinite(numericCount)
-          ? Math.min(100, Math.max(0, numericCount / 5))
+          ? funnelWidth(numericCount, Math.max(1, ...Object.values(stats.score_distribution)))
           : 0;
         distDiv.innerHTML += `<div class="stat-bar"><span>${escapeHtml(bucket)}</span><div class="bar"><div class="fill" style="width:${width}%"></div></div><span>${escapeHtml(String(count))}</span></div>`;
       }
@@ -2247,6 +2304,11 @@ async function loadStats() {
     }
   } catch (e) {
     console.error("Stats error:", e);
+    $("#stats-period-summary").textContent = "Не удалось загрузить аналитику. Нажмите «Обновить».";
+    $("#stats-daily").innerHTML = "";
+    $("#stats-outcomes").innerHTML = "";
+    $("#stats-ledger-sources").innerHTML = "";
+    $("#stat-applied").textContent = "—";
   }
 }
 
@@ -4000,6 +4062,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#filter-with-salary")?.addEventListener("change", applySmartFilters);
   $("#filter-level")?.addEventListener("change", applySmartFilters);
   $("#refresh-stats-button")?.addEventListener("click", loadStats);
+  $("#stats-period")?.addEventListener("change", loadStats);
   $("#calendar-prev-month")?.addEventListener("click", () => {
     state.calendarCursor = new Date(state.calendarCursor.getFullYear(), state.calendarCursor.getMonth() - 1, 1);
     renderCalendarBoard();

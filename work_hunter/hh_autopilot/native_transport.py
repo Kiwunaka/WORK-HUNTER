@@ -12,6 +12,8 @@ from work_hunter.hh_transport.browser_session import (
     HHBrowserSession,
     extract_xsrf_token,
 )
+from work_hunter.hh_transport.challenge_urls import stateful_hh_captcha_url
+from work_hunter.hh_transport.errors import HHAuthError, HHRateLimitError, HHTransportError
 
 from .browser import BrowserField, HHBrowserApplicationAdapter
 from .challenge_ai import ChallengeAIError, HHChallengeAI
@@ -277,10 +279,49 @@ class HHNativeApplicationTransport:
         timeout_seconds: int,
     ) -> DispatchOutcome:
         application = self._application_settings()
-        try:
-            vacancy = self.client.get_vacancy(vacancy_id)
-        except Exception:
-            vacancy = {}
+        for challenge_number in range(2):
+            try:
+                vacancy = self.client.get_vacancy(vacancy_id)
+                break
+            except (HHTransportError, requests.RequestException) as exc:
+                captcha_url = _api_captcha_url(exc)
+                if getattr(exc, "code", "") == "captcha_required":
+                    if (challenge_number == 0
+                            and application["captcha_mode"] == "vision_then_manual"
+                            and captcha_url):
+                        self._solve_captcha(captcha_url, application)
+                        # Recheck the read even if the browser did not redirect.
+                        continue
+                    return _outcome("manual_captcha", location=captcha_url)
+                # This GET precedes the application POST: a read failure must not
+                # permanently reject an otherwise suitable vacancy.
+                code = (
+                    "auth_expired" if isinstance(exc, HHAuthError)
+                    else "rate_limited" if isinstance(exc, HHRateLimitError)
+                    else "pre_dispatch_network_error"
+                )
+                return DispatchOutcome(
+                    code,
+                    DeliveryCertainty.DEFINITELY_NOT_SENT,
+                    status_code=getattr(exc, "status_code", None),
+                    payload={"stage": "preflight", "operation": "get_vacancy",
+                             "error_type": type(exc).__name__},
+                )
+        # Ready items can survive a policy change. Recheck configured roles
+        # on fresh HH data at the last boundary before any application POST.
+        filters = getattr(self.settings_provider(), "filters", {})
+        allowed_roles = set(filters.get("allowed_role_families", []))
+        curated_ids = {str(value) for value in filters.get("allowed_vacancy_ids", [])}
+        if allowed_roles and vacancy_id not in curated_ids:
+            roles = {str(role.get("id")) for role in vacancy.get("professional_roles", [])
+                     if isinstance(role, Mapping)} if isinstance(vacancy, Mapping) else set()
+            if not roles or not roles.intersection(allowed_roles):
+                return DispatchOutcome(
+                    "role_not_allowed" if roles else "read_parse_error",
+                    DeliveryCertainty.DEFINITELY_NOT_SENT,
+                    payload={"stage": "preflight", "field": "professional_roles",
+                             "professional_role_ids": sorted(roles)},
+                )
         if isinstance(vacancy, Mapping) and vacancy.get("has_test") is True:
             return self._apply_test(vacancy_id, resume_id, message, application)
         return self._apply_direct(
@@ -540,6 +581,9 @@ class HHNativeApplicationTransport:
             f"{getattr(self.tests, 'base_url', 'https://hh.ru').rstrip('/')}/",
             runtime_url,
         )
+        runtime_url = stateful_hh_captcha_url(runtime_url)
+        if not runtime_url:
+            return False
         outcome = self.browser.solve_captcha(
             runtime_url,
             self.ai,
@@ -553,6 +597,12 @@ class HHNativeApplicationTransport:
         if not isinstance(application, Mapping):
             raise TypeError("settings provider did not return application settings")
         return copy.deepcopy(dict(application))
+
+
+def _api_captcha_url(error: Any) -> str:
+    payload = getattr(error, "payload", None)
+    metadata = payload.get("challenge_metadata") if isinstance(payload, Mapping) else None
+    return stateful_hh_captcha_url(metadata.get("captcha_url")) if isinstance(metadata, Mapping) else ""
 
 
 def _unique_fields(fields: Sequence[BrowserField]) -> tuple[BrowserField, ...]:

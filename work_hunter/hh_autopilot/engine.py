@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+import logging
+import traceback
+from collections import deque
+from contextlib import nullcontext
+from queue import Empty, Queue, SimpleQueue
+from threading import Event, Lock, Thread
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from .config import AutopilotSettings
-from .ranking import NoQualifyingCandidatesError, select_resume
+from .ranking import (
+    NoQualifyingCandidatesError,
+    basic_requirements_decision,
+    select_resume,
+)
 from .repository import CooldownActive, LostLease, RepositoryAuthorizationDenied
 from .types import (
     AutopilotState,
@@ -16,12 +27,80 @@ from .types import (
     LiveAuthorization,
     NormalizedVacancy,
     RankedCandidate,
+    RankingDecision,
     RetryStage,
     RunReport,
     RunRequest,
     SearchRequest,
     canary_reference,
 )
+from work_hunter.hh_transport.errors import HHTransportError
+from work_hunter.hh_transport.challenge_urls import sanitize_hh_challenge_url
+
+
+_CAPTCHA_READ_LOCK = Lock()
+
+
+def read_with_captcha(operation, solver, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except HHTransportError as error:
+        if _hh_access_reason(error) != "hh_captcha_required" or solver is None:
+            raise
+        with _CAPTCHA_READ_LOCK:
+            try:
+                return operation(*args, **kwargs)
+            except HHTransportError as current:
+                if _hh_access_reason(current) != "hh_captcha_required":
+                    raise
+                solver(current)
+                # HH can unlock the API while its browser page still shows
+                # a challenge. The repeated GET is authoritative.
+                return operation(*args, **kwargs)
+
+
+def _hh_access_reason(error: Exception) -> str | None:
+    """Account/access failures must stop the run, not reject individual jobs."""
+    if not isinstance(error, HHTransportError):
+        return None
+    if error.status_code == 403 and error.code == "captcha_required":
+        return "hh_captcha_required"
+    status_code = error.status_code
+    return {401: "hh_auth_required", 403: "hh_access_forbidden", 429: "hh_rate_limited"}.get(status_code) if status_code is not None else None
+
+
+def _hh_access_event_metadata(error: HHTransportError, reason: str) -> dict[str, Any]:
+    """Return the status and allowlisted challenge pointers for an access event."""
+    metadata: dict[str, Any] = {"status_code": error.status_code}
+    if reason != "hh_captcha_required":
+        return metadata
+    payload = error.payload if isinstance(error.payload, Mapping) else {}
+    challenge = payload.get("challenge_metadata")
+    if not isinstance(challenge, Mapping):
+        return metadata
+    for key in ("captcha_url", "location"):
+        value = _safe_hh_challenge_url(challenge.get(key))
+        if value:
+            metadata[key] = value
+    request_id = _safe_hh_request_id(challenge.get("request_id"))
+    if request_id:
+        metadata["request_id"] = request_id
+    return metadata
+
+
+def _safe_hh_request_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if not value or len(value) > 200:
+        return ""
+    if any(ord(character) < 0x20 or ord(character) > 0x7E for character in value):
+        return ""
+    return value
+
+
+def _safe_hh_challenge_url(value: Any) -> str:
+    return sanitize_hh_challenge_url(value)
 
 
 @dataclass(frozen=True)
@@ -73,6 +152,9 @@ class _Counters:
     retry_wait: int = 0
     skipped: int = 0
     internal_errors: int = 0
+    dispatch_seen: set[int] = field(default_factory=set)
+    fresh_ranked: set[int] = field(default_factory=set)
+    delay_due: bool = False
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -82,6 +164,123 @@ class _Counters:
             "skipped": self.skipped,
             "internal_errors": self.internal_errors,
         }
+
+
+def _active_vacancy_ids(context):
+    ids = context.settings.filters.get("allowed_vacancy_ids") or ()
+    return tuple(ids) if ids else None
+
+
+class _DispatchPipeline:
+    """One sender with its own thread-owned service/connection, never another run."""
+
+    def __init__(self, factory, request, context, run, lease, authorization, *, producer, pool):
+        self.factory = factory
+        self.request, self.context, self.run = request, context, run
+        self.lease, self.authorization = lease, authorization
+        self.queue = Queue()
+        self.queued: set[int] = set()
+        self.stop = Event()
+        self.counters = _Counters()
+        self.status = "completed"
+        self.error = ""
+        self.producer, self.pool = producer, pool
+        self.preparing = {}
+        self.thread = Thread(target=self._consume, name="hh-single-sender")
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def enqueue(self, items, fresh_ids) -> None:
+        self.collect_letters()
+        for item in items:
+            if item.id in fresh_ids and item.id not in self.queued and not self.stop.is_set():
+                if len(self.preparing) + self.queue.unfinished_tasks >= 20:
+                    break
+                self.queued.add(item.id)
+                if self.producer.letter_preparer is None:
+                    self.queue.put(item.id)
+                    continue
+                mapping = next(value for value in self.context.mappings if value.resume_id == item.resume_id)
+                self.producer.repository.save_dispatch_resume_snapshot(
+                    item.id, resume={**mapping.resume, "id": mapping.resume_id},
+                    candidate=self.context.candidate_profile, expected_version=item.version,
+                    fencing_token=self.lease.fencing_token,
+                )
+                def prepare_and_enqueue(current=item):
+                    self.producer.letter_preparer(current, self.context, self.run, self.lease)
+                    if not self.stop.is_set():
+                        self.queue.put(current.id)
+                future = self.pool.submit(prepare_and_enqueue)
+                self.preparing[future] = item.id
+
+    def collect_letters(self) -> None:
+        for future in list(self.preparing):
+            if not future.done():
+                continue
+            item_id = self.preparing.pop(future)
+            try:
+                future.result()
+            except Exception as exc:
+                item = self.producer.repository.get_item(item_id)
+                self.producer._stop_on_hh_access_error(exc, item, self.run, self.lease)
+                self.producer.repository.append_event(
+                    item_id, "cover_letter_retry", {"error_type": type(exc).__name__},
+                    run_id=self.run.id, fencing_token=self.lease.fencing_token,
+                )
+                self.producer.flush_ranking_usage()
+
+    def drain(self) -> None:
+        while (self.preparing or self.queue.unfinished_tasks) and not self.stop.is_set():
+            self.collect_letters()
+            self.producer._touch_lease(self.lease)
+            if self.producer._stop_requested(self.run, self.authorization):
+                self.stop.set()
+                break
+            self.stop.wait(0.2)
+
+    def finish(self, *, cancel: bool) -> None:
+        if cancel:
+            self.stop.set()
+        if not cancel:
+            self.drain()
+        for future in self.preparing:
+            future.cancel()
+        self.queue.put(None)
+
+    def _consume(self) -> None:
+        try:
+            with self.factory(self.context, self.lease) as engine:
+                engine._pipeline_stop = self.stop
+                while True:
+                    if engine._stop_requested(self.run, self.authorization):
+                        self.status = "interrupted"
+                        self.stop.set()
+                        break
+                    try:
+                        item_id = self.queue.get(timeout=0.2)
+                    except Empty:
+                        continue
+                    if item_id is None:
+                        break
+                    self.counters.fresh_ranked.add(item_id)
+                    try:
+                        self.status = engine._dispatch(
+                            self.request, self.context, self.run, self.lease,
+                            self.authorization, self.counters,
+                            only_fresh=True, max_items=1, item_ids={item_id},
+                        )
+                    finally:
+                        self.queue.task_done()
+                    if self.status != "completed" or self.counters.applied >= self.context.settings.limits.per_run_success:
+                        self.stop.set()
+                        break
+        except Exception as exc:
+            frames = [f"{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)]
+            logging.getLogger(__name__).error("Sender failed error_type=%s frames=%s", type(exc).__name__, "/".join(frames))
+            self.status = "failed"
+            self.error = _hh_access_reason(exc) or f"dispatch_worker_failed:{type(exc).__name__}"
+            self.stop.set()
 
 
 class HHAutopilot:
@@ -105,6 +304,11 @@ class HHAutopilot:
         sleeper: Callable[[float], None] = lambda _seconds: None,
         delay_source: Callable[[float, float], float] = lambda low, _high: low,
         retry_random_source: Callable[[], float] = random.random,
+        ranking_workers: int = 1,
+        flush_ranking_usage: Callable[[], None] = lambda: None,
+        sender_factory: Callable[..., Any] | None = None,
+        letter_preparer: Callable[..., None] | None = None,
+        captcha_solver: Callable[[HHTransportError], bool] | None = None,
     ) -> None:
         callables = {
             "context_provider": context_provider,
@@ -133,6 +337,16 @@ class HHAutopilot:
         self.sleeper = sleeper
         self.delay_source = delay_source
         self.retry_random_source = retry_random_source
+        if type(ranking_workers) is not int or not 1 <= ranking_workers <= 10:
+            raise ValueError("ranking_workers must be between 1 and 10")
+        self.ranking_workers = ranking_workers
+        self.flush_ranking_usage = flush_ranking_usage
+        self._ranking_events: SimpleQueue[tuple[int, int, int, str]] = SimpleQueue()
+        self.sender_factory = sender_factory
+        self.letter_preparer = letter_preparer
+        self.captcha_solver = captcha_solver
+        self._ai_pool: ThreadPoolExecutor | None = None
+        self._pipeline_stop: Event | None = None
 
     def run(self, request: RunRequest) -> RunReport:
         if not isinstance(request, RunRequest):
@@ -140,6 +354,11 @@ class HHAutopilot:
         context = self.context_provider(request.account_id)
         if not isinstance(context, EngineRunContext):
             raise TypeError("context_provider returned an invalid context")
+        if request.success_limit is not None:
+            context = replace(context, settings=replace(context.settings, limits=replace(
+                context.settings.limits,
+                per_run_success=min(context.settings.limits.per_run_success, request.success_limit),
+            )))
         now = self._now()
         lease = self.repository.acquire_lease(
             request.account_id,
@@ -157,6 +376,7 @@ class HHAutopilot:
         lease_keeper = None
         provider = self.search_provider
         previous_keeper = getattr(provider, "lease_keeper", None)
+        pipeline = None
         try:
             grant_id = self._run_grant_id(request)
             run = self.repository.create_run(
@@ -191,28 +411,109 @@ class HHAutopilot:
             if request.trigger == "shadow":
                 self._discover(request, context, run, lease, counters, shadow=True)
             else:
-                if isinstance(authorization, LiveAuthorization):
-                    self._recover_and_retry(context, run, lease, counters)
-                if request.trigger == "schedule":
-                    self._discover(request, context, run, lease, counters, shadow=False)
-                elif request.trigger in {"manual", "canary"}:
-                    self._prepare_exact(request, context, run, lease, counters)
-                assert authorization is not None
-                status = self._dispatch(
-                    request,
-                    context,
-                    run,
-                    lease,
-                    authorization,
-                    counters,
-                )
+                if self.sender_factory is not None and isinstance(authorization, LiveAuthorization):
+                    self._ai_pool = ThreadPoolExecutor(max_workers=self.ranking_workers, thread_name_prefix="muse")
+                    pipeline = _DispatchPipeline(self.sender_factory, request, context, run, lease, authorization,
+                                                 producer=self, pool=self._ai_pool)
+                    self._pipeline_stop = pipeline.stop
+                    pipeline.start()
+
+                def dispatch_pending(*, drain: bool = False) -> bool:
+                    nonlocal status
+                    if pipeline is not None:
+                        self._touch_lease(lease)
+                        while True:
+                            ready_items = self.repository.ready_items(
+                                run.account_id, limit=context.settings.limits.per_run_success,
+                                resume_ids=(mapping.resume_id for mapping in context.mappings),
+                                vacancy_ids=_active_vacancy_ids(context),
+                            )
+                            waiting = any(item.id in counters.fresh_ranked and item.id not in pipeline.queued for item in ready_items)
+                            pipeline.enqueue(ready_items, counters.fresh_ranked)
+                            if not drain or pipeline.stop.is_set():
+                                break
+                            pipeline.drain()
+                            if not waiting:
+                                break
+                        status = pipeline.status
+                        return not pipeline.stop.is_set()
+                    status = self._dispatch(
+                        request, context, run, lease, authorization, counters,
+                        max_items=None if drain else 1,
+                        only_fresh=self.ranking_workers > 1 and not drain,
+                    )
+                    return (
+                        status == "completed"
+                        and counters.applied < context.settings.limits.per_run_success
+                    )
+
+                while True:
+                    if isinstance(authorization, LiveAuthorization):
+                        self._recover_and_retry(
+                            context, run, lease, counters, on_ready=dispatch_pending,
+                        )
+                    if status == "completed" and not self._stop_requested(run, authorization) and request.trigger == "schedule":
+                        self._discover(
+                            request, context, run, lease, counters, shadow=False,
+                            on_ready=dispatch_pending,
+                        )
+                    elif request.trigger in {"manual", "canary"}:
+                        self._prepare_exact(request, context, run, lease, counters)
+                    assert authorization is not None
+                    if status == "completed":
+                        dispatch_pending(drain=True)
+                    applied = pipeline.counters.applied if pipeline is not None else counters.applied
+                    if (not request.continuous or request.trigger != "schedule"
+                            or status != "completed" or self._stop_requested(run, authorization)
+                            or applied >= context.settings.limits.per_run_success):
+                        break
+                    cycle = self.repository.get_owned_search_cycle(run.id)
+                    if cycle is not None:
+                        self.repository.complete_search_cycle(cycle.id, lease.fencing_token)
+                    # One process/run keeps its total cap. No new daily budget,
+                    # no duplicate worker, and stop/lease checks during idle time.
+                    for _ in range(30):
+                        if self._stop_requested(run, authorization):
+                            status = "interrupted"
+                            break
+                        self.sleeper(1)
+                        self._touch_lease(lease)
+                    if status != "completed":
+                        break
+                    counters.dispatch_seen.clear()
+                    counters.fresh_ranked.clear()
+                    if pipeline is not None:
+                        pipeline.queued.clear()
+                        pipeline.counters.dispatch_seen.clear()
+                        pipeline.counters.fresh_ranked.clear()
         except LostLease:
             status = "interrupted"
             error = "lease_lost"
         except Exception as exc:
             status = "failed"
-            error = f"{type(exc).__name__}: {exc}"[:500]
+            error = _hh_access_reason(exc) or f"{type(exc).__name__}: {exc}"[:500]
         finally:
+            if pipeline is not None:
+                assert run is not None
+                try:
+                    pipeline.finish(cancel=status != "completed" or self.repository.run_stop_requested(run.id))
+                except Exception as exc:
+                    status, error = "failed", _hh_access_reason(exc) or type(exc).__name__
+                    pipeline.finish(cancel=True)
+                while pipeline.thread.is_alive():
+                    pipeline.thread.join(timeout=0.2)
+                    self._touch_lease(lease)
+                for name in ("applied", "manual", "retry_wait", "skipped", "internal_errors"):
+                    setattr(counters, name, getattr(counters, name) + getattr(pipeline.counters, name))
+                if pipeline.error:
+                    status, error = "failed", pipeline.error
+                elif status == "completed":
+                    status = pipeline.status
+                self._pipeline_stop = None
+            if self._ai_pool is not None:
+                self._ai_pool.shutdown(wait=True, cancel_futures=True)
+                self._ai_pool = None
+            self.flush_ranking_usage()
             if lease_keeper is not None:
                 provider.lease_keeper = previous_keeper
             if run is not None:
@@ -290,7 +591,10 @@ class HHAutopilot:
             fencing_token=lease.fencing_token,
         )
 
-    def _recover_and_retry(self, context, run, lease, counters: _Counters) -> None:
+    def _recover_and_retry(
+        self, context, run, lease, counters: _Counters,
+        *, on_ready: Callable[[], bool] | None = None,
+    ) -> None:
         now = self._now()
         self.repository.recover_stale_applying(
             run.account_id,
@@ -310,11 +614,22 @@ class HHAutopilot:
                 self.reconciler.reconcile(item.id, provenance, lease, now=now)
             except Exception:
                 counters.internal_errors += 1
+        if self.ranking_workers > 1:
+            self._refresh_ready(context, run, lease, counters, on_ready=on_ready)
+        if on_ready is not None and not on_ready():
+            return
+        if not self._recover_unfinished_selection(
+            context, run, lease, counters, on_ready=on_ready,
+        ):
+            return
+        now = self._now()
         due = self.repository.list_due_items(
             run.account_id,
             states=(AutopilotState.RETRY_WAIT,),
             now=now,
             limit=context.settings.limits.per_run_success,
+            resume_ids=(mapping.resume_id for mapping in context.mappings),
+            vacancy_ids=_active_vacancy_ids(context),
         )
         eligibility_items = []
         previous_eligibility_decisions = {}
@@ -366,7 +681,112 @@ class HHAutopilot:
                 counters,
                 now=now,
                 previous_decisions=previous_eligibility_decisions,
+                on_ready=on_ready,
             )
+        if on_ready is not None:
+            on_ready()
+
+    def _recover_unfinished_selection(
+        self, context, run, lease, counters,
+        *, on_ready: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Re-evaluate selection left by an exited run, even outside search pages."""
+        grouped: dict[str, list[Any]] = {}
+        items = self.repository.list_due_items(
+            run.account_id,
+            states=(AutopilotState.DISCOVERED, AutopilotState.ELIGIBLE, AutopilotState.RANKED),
+            now=self._now(),
+            # Restore a small batch before fresh search, not an entire run's
+            # quota of stale candidates requiring individual HH requests.
+            limit=min(context.settings.limits.per_run_success, self.ranking_workers),
+            resume_ids=(mapping.resume_id for mapping in context.mappings),
+            vacancy_ids=_active_vacancy_ids(context),
+        )
+        for item in items:
+            if getattr(item, "last_run_id", run.id) == run.id:
+                continue
+            grouped.setdefault(item.vacancy_id, []).append(item)
+        if self.ranking_workers > 1:
+            matches = {}
+            mappings = {mapping.resume_id: mapping for mapping in context.mappings}
+            for vacancy_id, competing_items in grouped.items():
+                if self.repository.run_stop_requested(run.id):
+                    return False
+                matches[vacancy_id] = [(vacancy_id, mappings[item.resume_id])
+                                      for item in competing_items if item.resume_id in mappings]
+            self._evaluate_parallel(
+                matches, RunRequest(run.account_id, "retry"), context, run, lease, counters,
+                on_ready=on_ready, load_vacancies=True,
+            )
+            return not self.repository.run_stop_requested(run.id)
+        for vacancy_id, competing_items in grouped.items():
+            if self.repository.run_stop_requested(run.id):
+                return False
+            for item in competing_items:
+                mapping = next((value for value in context.mappings
+                                if value.resume_id.strip().casefold() == item.resume_id), None)
+                if mapping is None:
+                    continue
+                lease = self._touch_lease(lease)
+                vacancy = self._captcha_read(self.vacancy_loader, item.vacancy_id)
+                if not isinstance(vacancy, NormalizedVacancy) or vacancy.id != item.vacancy_id:
+                    raise ValueError("vacancy loader returned a different vacancy")
+                self._evaluate(
+                    vacancy, mapping, context, run, lease, counters, shadow=False,
+                )
+                if self.repository.run_stop_requested(run.id):
+                    return False
+            lease = self._touch_lease(lease)
+            candidates = self.repository.adopt_ranked_candidates_for_retry(
+                run.account_id, vacancy_id, run_id=run.id,
+                fencing_token=lease.fencing_token, now=self._now(),
+                active_resume_ids=[mapping.resume_id for mapping in context.mappings],
+            )
+            if candidates:
+                self._finalize_ranked(
+                    {vacancy_id: list(candidates)}, set(), context, run, lease,
+                )
+            if on_ready is not None and not on_ready():
+                return False
+        return True
+
+    def _captcha_read(self, operation, *args, **kwargs):
+        return read_with_captcha(operation, self.captcha_solver, *args, **kwargs)
+
+    def _stop_on_hh_access_error(self, error, item, run, lease) -> None:
+        reason = _hh_access_reason(error)
+        if reason is None:
+            return
+        if self._pipeline_stop is not None:
+            self._pipeline_stop.set()
+        lease = self._touch_lease(lease)
+        self.repository.append_event(
+            item.id, reason, _hh_access_event_metadata(error, reason),
+            run_id=run.id, fencing_token=lease.fencing_token,
+        )
+        raise error
+
+    @staticmethod
+    def _basic_requirements_mode(context: EngineRunContext) -> bool:
+        """Return whether only hard requirements should admit a candidate."""
+        return str(context.settings.ranking.get("mode", "ranked")).strip().casefold() == "basic_requirements"
+
+    def _selection_read_failure(self, item, error, run, lease, counters) -> None:
+        """An unavailable/removed vacancy must not abort unrelated selection."""
+        self._stop_on_hh_access_error(error, item, run, lease)
+        lease = self._touch_lease(lease)
+        if getattr(error, "status_code", None) == 404:
+            self.repository.transition_item(
+                item.id, item.version, AutopilotState.SKIPPED, "vacancy_not_found",
+                {"status_code": 404}, run_id=run.id, fencing_token=lease.fencing_token,
+            )
+            counters.skipped += 1
+        else:
+            self.repository.append_event(
+                item.id, "vacancy_read_retry", {"error_type": type(error).__name__},
+                run_id=run.id, fencing_token=lease.fencing_token,
+            )
+            counters.retry_wait += 1
 
     def _retry_eligibility(
         self,
@@ -378,9 +798,19 @@ class HHAutopilot:
         *,
         now: datetime,
         previous_decisions,
+        on_ready: Callable[[], bool] | None = None,
     ) -> None:
         touched: set[str] = set()
-        for item in items:
+        evaluations = (
+            self._parallel_eligibility_decisions(items, context, run, lease)
+            if self.ranking_workers > 1
+            else ((item, None) for item in items)
+        )
+        for item, prepared in evaluations:
+            if self.repository.run_stop_requested(run.id):
+                evaluations.close()
+                return
+            lease = self._touch_lease(lease)
             touched.add(item.vacancy_id)
             mapping = next(
                 (
@@ -402,31 +832,43 @@ class HHAutopilot:
                 counters.skipped += 1
                 continue
             try:
-                vacancy = self.vacancy_loader(item.vacancy_id)
-                if (
-                    not isinstance(vacancy, NormalizedVacancy)
-                    or vacancy.id != item.vacancy_id
-                ):
-                    raise ValueError("vacancy loader returned a different vacancy")
-                filter_decision = FilterDecision(
-                    passed=item.filter_data["passed"],
-                    reason=item.filter_data["reason"],
-                    evidence=item.filter_data["evidence"],
-                )
-                score = self.deterministic_ranker.score(
-                    vacancy,
-                    mapping.resume,
-                    context.candidate_profile,
-                    context.settings.ranking["weights"],
-                )
-                decision = self.ranking_policy.decide(
-                    filter_decision,
-                    score,
-                    vacancy,
-                    mapping.resume,
-                    context.candidate_profile,
-                )
-            except Exception:
+                if isinstance(prepared, Exception):
+                    raise prepared
+                if prepared is not None:
+                    decision = prepared
+                else:
+                    vacancy = self._captcha_read(self.vacancy_loader, item.vacancy_id)
+                    if (
+                        not isinstance(vacancy, NormalizedVacancy)
+                        or vacancy.id != item.vacancy_id
+                    ):
+                        raise ValueError("vacancy loader returned a different vacancy")
+                    filter_decision = FilterDecision(
+                        passed=item.filter_data["passed"],
+                        reason=item.filter_data["reason"],
+                        evidence=item.filter_data["evidence"],
+                    )
+                    if self._basic_requirements_mode(context):
+                        decision = basic_requirements_decision(filter_decision)
+                    else:
+                        score = self.deterministic_ranker.score(
+                            vacancy,
+                            mapping.resume,
+                            context.candidate_profile,
+                            context.settings.ranking["weights"],
+                        )
+                        decision = self.ranking_policy.decide(
+                            filter_decision,
+                            score,
+                            vacancy,
+                            mapping.resume,
+                            context.candidate_profile,
+                        )
+            except Exception as exc:
+                self._stop_on_hh_access_error(exc, item, run, lease)
+                if self.repository.run_stop_requested(run.id):
+                    return
+                lease = self._touch_lease(lease)
                 decision = previous_decisions.get(item.id)
                 if decision is None or not decision.retry:
                     self.repository.transition_item(
@@ -439,6 +881,10 @@ class HHAutopilot:
                     )
                     counters.skipped += 1
                     continue
+            if self.repository.run_stop_requested(run.id):
+                return
+            lease = self._touch_lease(lease)
+            now = self._now()
             if decision.retry:
                 self._schedule_eligibility_retry(
                     item,
@@ -467,23 +913,190 @@ class HHAutopilot:
                     fencing_token=lease.fencing_token,
                 )
                 counters.skipped += 1
+            else:
+                counters.fresh_ranked.add(item.id)
 
+            self._finalize_retry_vacancy(item.vacancy_id, context, run, lease)
+            if on_ready is not None and not on_ready():
+                evaluations.close()
+                return
+
+        if self.repository.run_stop_requested(run.id):
+            return
         for vacancy_id in sorted(touched):
-            candidates = self.repository.adopt_ranked_candidates_for_retry(
-                run.account_id,
-                vacancy_id,
-                run_id=run.id,
-                fencing_token=lease.fencing_token,
-                now=now,
+            self._finalize_retry_vacancy(vacancy_id, context, run, lease)
+
+    def _finalize_retry_vacancy(self, vacancy_id, context, run, lease) -> None:
+        lease = self._touch_lease(lease)
+        candidates = self.repository.adopt_ranked_candidates_for_retry(
+            run.account_id, vacancy_id, run_id=run.id,
+            fencing_token=lease.fencing_token,
+            active_resume_ids=[mapping.resume_id for mapping in context.mappings],
+            now=self._now(),
+        )
+        if candidates:
+            self._finalize_ranked({vacancy_id: list(candidates)}, set(), context, run, lease)
+
+    def _parallel_eligibility_decisions(self, items, context, run, lease):
+        """Share ten workers across resumes; all repository I/O stays on the owner."""
+        mappings = {value.resume_id.strip().casefold(): value for value in context.mappings}
+        def jobs():
+            for item in self._fair_order(items, lambda value: value.resume_id):
+                mapping = mappings.get(item.resume_id)
+                if mapping is None:
+                    yield item, item.id, None
+                    continue
+                try:
+                    vacancy = self._captcha_read(self.vacancy_loader, item.vacancy_id)
+                    if not isinstance(vacancy, NormalizedVacancy) or vacancy.id != item.vacancy_id:
+                        raise ValueError("vacancy loader returned a different vacancy")
+                    filtered = self.hard_filter.evaluate(
+                        vacancy, mapping.resume, context.candidate_profile, context.filter_context,
+                    )
+                    if self._basic_requirements_mode(context):
+                        args = basic_requirements_decision(filtered)
+                    else:
+                        score = self.deterministic_ranker.score(
+                            vacancy, mapping.resume, context.candidate_profile, context.settings.ranking["weights"],
+                        )
+                        args = (filtered, score, vacancy, mapping.resume, context.candidate_profile)
+                except Exception as exc:
+                    self._stop_on_hh_access_error(exc, item, run, lease)
+                    args = exc
+                yield item, item.id, args
+        yield from self._ranking_results(jobs(), context, run, lease)
+
+    @staticmethod
+    def _fair_order(values, key):
+        """Round-robin admission, without reserving idle workers for a resume."""
+        queues = {}
+        for value in values:
+            queues.setdefault(key(value), deque()).append(value)
+        while any(queues.values()):
+            for queue in queues.values():
+                if queue:
+                    yield queue.popleft()
+
+    def _ranking_results(self, jobs, context, run, lease):
+        """Workers only call AI; the owner persists results and sends serially.
+
+        Admit a bounded look-ahead and persist completed results while loading
+        subsequent vacancies. Closing cancels unstarted work and drains active
+        calls before releasing the lease.
+        """
+        pending = {}
+        immediate = []
+        pool_context = nullcontext(self._ai_pool) if self._ai_pool is not None else ThreadPoolExecutor(max_workers=self.ranking_workers, thread_name_prefix="muse-ranking")
+        with pool_context as pool:
+            try:
+                for token, item_id, args in jobs:
+                    lease = self._touch_lease(lease)
+                    if self._stop_requested(run, None):
+                        break
+                    if isinstance(args, RankingDecision):
+                        # Basic-requirements decisions are already complete;
+                        # stream them to the owner so hard-filtered vacancies
+                        # can start letter preparation before discovery ends.
+                        yield token, args
+                    elif args is None or isinstance(args, Exception):
+                        immediate.append((token, args))
+                    elif context.settings.ranking["ai_mode"] == "off":
+                        try:
+                            decision = self.ranking_policy.decide(*args)
+                        except Exception as exc:
+                            decision = exc
+                        yield token, decision
+                    else:
+                        future = pool.submit(self._rank_in_worker, item_id, run.id, lease.fencing_token, args)
+                        pending[future] = token
+                    while len(pending) >= self.ranking_workers * 2:
+                        lease = self._touch_lease(lease)
+                        if self._stop_requested(run, None):
+                            return
+                        completed, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                        for future in completed:
+                            token = pending.pop(future)
+                            try:
+                                decision = future.result()
+                            except Exception as exc:
+                                decision = exc
+                            yield token, decision
+                for result in immediate:
+                    if self._stop_requested(run, None):
+                        break
+                    yield result
+                while pending:
+                    lease = self._touch_lease(lease)
+                    if self._stop_requested(run, None):
+                        break
+                    completed, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        token = pending.pop(future)
+                        try:
+                            decision = future.result()
+                        except Exception as exc:
+                            decision = exc
+                        yield token, decision
+            finally:
+                for future in pending:
+                    future.cancel()
+                while pending:
+                    lease = self._touch_lease(lease)
+                    completed, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        pending.pop(future)
+                self._touch_lease(lease)
+
+    def _rank_in_worker(self, item_id, run_id, fencing_token, args):
+        self._ranking_events.put((item_id, run_id, fencing_token, "ai_evaluation_started"))
+        try:
+            return self.ranking_policy.decide(*args)
+        finally:
+            self._ranking_events.put((item_id, run_id, fencing_token, "ai_evaluation_finished"))
+
+    def _refresh_ready(self, context, run, lease, counters, *, on_ready=None) -> None:
+        """Revalidate a previous run's selected queue in the shared AI pool."""
+        if hasattr(self.repository, "adopt_ready_items"):
+            self.repository.adopt_ready_items(
+                run.account_id, run_id=run.id, fencing_token=lease.fencing_token,
+                limit=context.settings.limits.per_run_success,
+                resume_ids=(mapping.resume_id for mapping in context.mappings),
+                vacancy_ids=_active_vacancy_ids(context),
             )
-            if candidates:
-                self._finalize_ranked(
-                    {vacancy_id: list(candidates)},
-                    set(),
-                    context,
-                    run,
-                    lease,
-                )
+        items = [item for item in self.repository.ready_items(
+            run.account_id, limit=context.settings.limits.per_run_success,
+            resume_ids=(mapping.resume_id for mapping in context.mappings),
+            vacancy_ids=_active_vacancy_ids(context),
+        ) if item.id not in counters.dispatch_seen]
+        evaluations = self._parallel_eligibility_decisions(items, context, run, lease)
+        try:
+            for item, decision in evaluations:
+                if self._stop_requested(run, None):
+                    return
+                lease = self._touch_lease(lease)
+                item = self.repository.get_item(item.id)
+                if isinstance(decision, HHTransportError) and decision.status_code == 404:
+                    self._selection_read_failure(item, decision, run, lease, counters)
+                elif decision is None or isinstance(decision, Exception) or decision.retry:
+                    counters.dispatch_seen.add(item.id)
+                    counters.retry_wait += 1
+                    self.repository.append_event(
+                        item.id, "ready_revalidation_retry", {},
+                        run_id=run.id, fencing_token=lease.fencing_token,
+                    )
+                elif decision.ready:
+                    counters.fresh_ranked.add(item.id)
+                else:
+                    self.repository.transition_item(
+                        item.id, item.version, AutopilotState.SKIPPED,
+                        decision.reason, decision.to_dict(), run_id=run.id,
+                        fencing_token=lease.fencing_token,
+                    )
+                    counters.skipped += 1
+                if on_ready is not None and not on_ready():
+                    return
+        finally:
+            evaluations.close()
 
     def _schedule_eligibility_retry(
         self,
@@ -524,12 +1137,29 @@ class HHAutopilot:
             counters.skipped += 1
         return updated
 
-    def _discover(self, request, context, run, lease, counters, *, shadow: bool) -> None:
+    def _discover(
+        self, request, context, run, lease, counters, *, shadow: bool,
+        on_ready: Callable[[], bool] | None = None,
+    ) -> None:
+        allowed = _active_vacancy_ids(context)
+        if allowed is not None and not shadow:
+            # A reviewed batch is an explicit worklist: search ranking/paging
+            # must not decide which of its IDs reach the preparation workers.
+            curated_grouped = {
+                vacancy_id: [(vacancy_id, mapping) for mapping in context.mappings]
+                for vacancy_id in allowed
+            }
+            self._evaluate_parallel(
+                curated_grouped, request, context, run, lease, counters,
+                on_ready=on_ready, load_vacancies=True,
+            )
+            return
         remaining = context.settings.search.max_results_per_run
-        ranked: dict[str, list[RankedCandidate]] = {}
-        blocked: set[str] = set()
+        grouped: dict[str, list[tuple[NormalizedVacancy, EngineSearchMapping]]] = {}
         seen: set[tuple[str, str]] = set()
         for mapping in context.mappings:
+            if self._stop_requested(run, request.authorization):
+                return
             if remaining <= 0:
                 break
             result = self.search_provider.collect(
@@ -549,10 +1179,27 @@ class HHAutopilot:
             )
             remaining = max(0, remaining - result.new_distinct_count)
             for vacancy in result.vacancies:
+                if self._stop_requested(run, request.authorization):
+                    return
+                allowed = _active_vacancy_ids(context)
+                if allowed is not None and vacancy.id not in allowed:
+                    continue
                 identity = (mapping.resume_id, vacancy.id)
                 if identity in seen:
                     continue
                 seen.add(identity)
+                grouped.setdefault(vacancy.id, []).append((vacancy, mapping))
+        if not shadow and self.ranking_workers > 1:
+            self._evaluate_parallel(grouped, request, context, run, lease, counters, on_ready=on_ready)
+            return
+        # Compare every discovered resume for one vacancy, then dispatch it.
+        # Slow AI decisions for unrelated vacancies no longer hold ready sends.
+        for vacancy_id, matches in grouped.items():
+            ranked: dict[str, list[RankedCandidate]] = {}
+            blocked: set[str] = set()
+            for vacancy, mapping in matches:
+                if self._stop_requested(run, request.authorization):
+                    return
                 candidate, retry = self._evaluate(
                     vacancy,
                     mapping,
@@ -566,8 +1213,83 @@ class HHAutopilot:
                     blocked.add(vacancy.id)
                 if candidate is not None:
                     ranked.setdefault(vacancy.id, []).append(candidate)
-        if not shadow:
-            self._finalize_ranked(ranked, blocked, context, run, lease)
+            if not shadow:
+                self._finalize_ranked(ranked, blocked, context, run, lease)
+                if on_ready is not None and not on_ready():
+                    return
+
+    def _evaluate_parallel(self, grouped, request, context, run, lease, counters, *, on_ready=None, load_vacancies=False) -> None:
+        """Finalize each vacancy after its competing resumes, not the whole batch."""
+        matches = [match for values in grouped.values() for match in values]
+        items = {}
+        # Register every competitor before an early result can seal a vacancy.
+        # This is local DB work only; full HH reads happen lazily below.
+        for vacancy, mapping in matches:
+            if self._stop_requested(run, request.authorization):
+                return
+            vacancy_id = vacancy if load_vacancies else vacancy.id
+            items[(vacancy_id, mapping.resume_id)] = self.repository.create_item(
+                run.id, run.account_id, vacancy_id, mapping.resume_id, mapping.query_key,
+            )
+        def jobs():
+            loaded = {}
+            for vacancy, mapping in self._fair_order(matches, lambda value: value[1].resume_id):
+                if self._stop_requested(run, request.authorization):
+                    return
+                vacancy_id = vacancy if load_vacancies else vacancy.id
+                item = items[(vacancy_id, mapping.resume_id)]
+                if item.state is not AutopilotState.DISCOVERED:
+                    continue
+                if load_vacancies:
+                    if vacancy_id not in loaded:
+                        try:
+                            current = self._captcha_read(self.vacancy_loader, vacancy_id)
+                            if not isinstance(current, NormalizedVacancy) or current.id != vacancy_id:
+                                raise ValueError("vacancy loader returned a different vacancy")
+                            loaded[vacancy_id] = current
+                        except (HHTransportError, ValueError) as exc:
+                            loaded[vacancy_id] = exc
+                    vacancy = loaded[vacancy_id]
+                    if isinstance(vacancy, Exception):
+                        self._selection_read_failure(item, vacancy, run, lease, counters)
+                        continue
+                decision = self.hard_filter.evaluate(
+                    vacancy, mapping.resume, context.candidate_profile, context.filter_context,
+                )
+                if not decision.passed:
+                    self._evaluate(vacancy, mapping, context, run, lease, counters, shadow=False)
+                    continue
+                if self._basic_requirements_mode(context):
+                    prepared = basic_requirements_decision(decision)
+                else:
+                    score = self.deterministic_ranker.score(
+                        vacancy, mapping.resume, context.candidate_profile, context.settings.ranking["weights"],
+                    )
+                    prepared = (
+                        decision, score, vacancy, mapping.resume, context.candidate_profile,
+                    )
+                yield (vacancy, mapping), item.id, prepared
+        evaluations = self._ranking_results(jobs(), context, run, lease)
+        try:
+            for (vacancy, mapping), decision in evaluations:
+                if self._stop_requested(run, request.authorization):
+                    return
+                if isinstance(decision, Exception):
+                    raise decision
+                self._evaluate(
+                    vacancy, mapping, context, run, lease, counters,
+                    shadow=False, prepared_decision=decision,
+                )
+                self._finalize_retry_vacancy(vacancy.id, context, run, lease)
+                if on_ready is not None and not on_ready():
+                    return
+            # Includes previously ranked candidates and vacancies filtered without AI.
+            for vacancy_id in grouped:
+                if self._stop_requested(run, request.authorization):
+                    return
+                self._finalize_retry_vacancy(vacancy_id, context, run, lease)
+        finally:
+            evaluations.close()
 
     def _prepare_exact(self, request, context, run, lease, counters) -> None:
         if request.resume_id is None or request.vacancy_id is None:
@@ -582,7 +1304,7 @@ class HHAutopilot:
         )
         if mapping is None:
             raise ValueError("literal resume is not published for this account")
-        vacancy = self.vacancy_loader(request.vacancy_id)
+        vacancy = self._captcha_read(self.vacancy_loader, request.vacancy_id)
         if not isinstance(vacancy, NormalizedVacancy) or vacancy.id != request.vacancy_id:
             raise ValueError("vacancy loader returned a different vacancy")
         candidate, retry = self._evaluate(
@@ -613,6 +1335,7 @@ class HHAutopilot:
         counters,
         *,
         shadow,
+        prepared_decision=None,
     ) -> tuple[RankedCandidate | None, bool]:
         if not shadow:
             # Сначала занимаем item: терминальные (skipped/dead/applied)
@@ -637,19 +1360,29 @@ class HHAutopilot:
         score = None
         ranking_decision = None
         if filter_decision.passed:
-            score = self.deterministic_ranker.score(
-                vacancy,
-                mapping.resume,
-                context.candidate_profile,
-                context.settings.ranking["weights"],
-            )
-            ranking_decision = self.ranking_policy.decide(
-                filter_decision,
-                score,
-                vacancy,
-                mapping.resume,
-                context.candidate_profile,
-            )
+            if prepared_decision is not None:
+                score = prepared_decision.rank_score
+                ranking_decision = prepared_decision
+            elif self._basic_requirements_mode(context):
+                ranking_decision = basic_requirements_decision(filter_decision)
+                score = ranking_decision.rank_score
+            else:
+                score = self.deterministic_ranker.score(
+                    vacancy,
+                    mapping.resume,
+                    context.candidate_profile,
+                    context.settings.ranking["weights"],
+                )
+                ranking_decision = self.ranking_policy.decide(
+                    filter_decision,
+                    score,
+                    vacancy,
+                    mapping.resume,
+                    context.candidate_profile,
+                )
+        # Stop may arrive during a slow model call, before the next loop check.
+        if self.repository.run_stop_requested(run.id):
+            return None, False
         lease = self._touch_lease(lease)
         if shadow:
             self.repository.save_shadow_result(
@@ -706,6 +1439,7 @@ class HHAutopilot:
             )
             counters.skipped += 1
             return None, False
+        counters.fresh_ranked.add(item.id)
         return (
             RankedCandidate(
                 account_id=run.account_id,
@@ -749,7 +1483,12 @@ class HHAutopilot:
                 fencing_token=lease.fencing_token,
             )
 
-    def _dispatch(self, request, context, run, lease, authorization, counters) -> str:
+    def _dispatch(self, request, context, run, lease, authorization, counters, *, max_items=None, only_fresh=False, item_ids=None) -> str:
+        if self._stop_requested(run, authorization):
+            return "interrupted"
+        if counters.applied >= context.settings.limits.per_run_success:
+            return "completed"
+        queue_limit = context.settings.limits.per_run_success + len(counters.dispatch_seen)
         if hasattr(self.repository, "adopt_ready_items"):
             # ready-элементы прерванного прогона принадлежат старому run;
             # prepare_dispatch их отвергнет, пока не передадим текущему.
@@ -757,11 +1496,15 @@ class HHAutopilot:
                 run.account_id,
                 run_id=run.id,
                 fencing_token=lease.fencing_token,
-                limit=context.settings.limits.per_run_success,
+                limit=queue_limit,
+                resume_ids=(mapping.resume_id for mapping in context.mappings),
+                vacancy_ids=_active_vacancy_ids(context),
             )
         ready = self.repository.ready_items(
             run.account_id,
-            limit=context.settings.limits.per_run_success,
+            limit=queue_limit,
+            resume_ids=(mapping.resume_id for mapping in context.mappings),
+            vacancy_ids=_active_vacancy_ids(context),
         )
         if isinstance(authorization, LiteralConfirmation):
             ready = [
@@ -770,26 +1513,96 @@ class HHAutopilot:
                 if item.resume_id == request.resume_id
                 and item.vacancy_id == request.vacancy_id
             ][:1 if request.trigger == "canary" else len(ready)]
-        delay_due = False
+        handled = 0
         for item in ready:
+            if item_ids is not None and item.id not in item_ids:
+                continue
+            if item.id in counters.dispatch_seen:
+                continue
+            if only_fresh and item.id not in counters.fresh_ranked:
+                continue
+            if max_items is not None and handled >= max_items:
+                break
+            handled += 1
+            if counters.applied >= context.settings.limits.per_run_success:
+                break
             if self._stop_requested(run, authorization):
                 return "interrupted"
-            if delay_due:
+            if counters.delay_due:
                 self.sleeper(
                     self.delay_source(
                         context.settings.limits.send_delay_min_seconds,
                         context.settings.limits.send_delay_max_seconds,
                     )
                 )
-                delay_due = False
+                counters.delay_due = False
                 if self._stop_requested(run, authorization):
                     return "interrupted"
+            counters.dispatch_seen.add(item.id)
+            dispatch_stage = "vacancy_preflight"
             try:
                 mapping = next(value for value in context.mappings if value.resume_id.strip().casefold() == item.resume_id)
                 lease = self._touch_lease(lease)
+                # Search snippets can omit pay and other mandatory conditions.
+                # Refresh hard facts for every send, without repeating fresh AI ranking.
+                vacancy = self._captcha_read(self.vacancy_loader, item.vacancy_id)
+                decision = self.hard_filter.evaluate(
+                    vacancy, mapping.resume, context.candidate_profile, context.filter_context,
+                )
+                if not decision.passed:
+                    self.repository.transition_item(
+                        item.id, item.version, AutopilotState.SKIPPED,
+                        decision.reason, decision.to_dict(),
+                        run_id=run.id, fencing_token=lease.fencing_token,
+                    )
+                    counters.skipped += 1
+                    continue
+                duplicate = self.repository.matching_application(item.account_id, vacancy)
+                if duplicate is not None:
+                    self.repository.transition_item(
+                        item.id, item.version, AutopilotState.SKIPPED,
+                        "duplicate_vacancy", {"applied_vacancy_id": duplicate},
+                        run_id=run.id, fencing_token=lease.fencing_token,
+                    )
+                    counters.skipped += 1
+                    continue
+                if getattr(item, "origin_run_id", run.id) != run.id and item.id not in counters.fresh_ranked:
+                    dispatch_stage = "ranking_revalidation"
+                    # A previous run's ready queue was selected under older
+                    # filters/ranking. Never dispatch it using a new grant alone.
+                    accepted = decision.passed
+                    if accepted:
+                        if self._basic_requirements_mode(context):
+                            decision = basic_requirements_decision(decision)
+                        else:
+                            score = self.deterministic_ranker.score(
+                                vacancy, mapping.resume, context.candidate_profile,
+                                context.settings.ranking["weights"],
+                            )
+                            decision = self.ranking_policy.decide(
+                                decision, score, vacancy, mapping.resume, context.candidate_profile,
+                            )
+                            if decision.retry:
+                                counters.retry_wait += 1
+                                continue
+                        accepted = decision.ready
+                    if not accepted:
+                        self.repository.transition_item(
+                            item.id, item.version, AutopilotState.SKIPPED,
+                            decision.reason, decision.to_dict(),
+                            run_id=run.id, fencing_token=lease.fencing_token,
+                        )
+                        counters.skipped += 1
+                        continue
+                dispatch_stage = "resume_snapshot"
                 self.repository.save_dispatch_resume_snapshot(
                     item.id, resume={**mapping.resume, "id": mapping.resume_id}, candidate=context.candidate_profile,
                     expected_version=item.version, fencing_token=lease.fencing_token,
+                )
+                dispatch_stage = "execute"
+                self.repository.append_event(
+                    item.id, "cover_letter_preparing", {},
+                    run_id=run.id, fencing_token=lease.fencing_token,
                 )
                 result = self.executor.execute(
                     item.id,
@@ -801,13 +1614,32 @@ class HHAutopilot:
                 return "interrupted"
             except LostLease:
                 raise
-            except Exception:
+            except Exception as exc:
+                self._stop_on_hh_access_error(exc, item, run, lease)
+                if dispatch_stage == "vacancy_preflight" and isinstance(exc, HHTransportError) and exc.status_code == 404:
+                    self._selection_read_failure(item, exc, run, lease, counters)
+                    continue
+                # Do not log exception text/locals: HTTP errors may contain credentials.
+                frames = [f"{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)]
+                logging.getLogger(__name__).error(
+                    "Dispatch failed item=%s stage=%s error_type=%s frames=%s",
+                    item.id, dispatch_stage, type(exc).__name__, "/".join(frames),
+                )
+                self.repository.append_event(
+                    item.id, "dispatch_internal_error",
+                    {"stage": dispatch_stage, "error_type": type(exc).__name__, "frames": frames},
+                    run_id=run.id, fencing_token=lease.fencing_token,
+                )
                 counters.internal_errors += 1
                 continue
             if not isinstance(result, ExecutionResult):
                 counters.internal_errors += 1
                 continue
-            delay_due = result.remote_post_dispatched
+            self.repository.append_event(
+                item.id, "dispatch_finished", {"outcome": result.outcome_code},
+                run_id=run.id, fencing_token=lease.fencing_token,
+            )
+            counters.delay_due = result.remote_post_dispatched
             if result.state is AutopilotState.APPLIED:
                 counters.applied += 1
             elif result.state is AutopilotState.MANUAL_CHALLENGE:
@@ -821,6 +1653,8 @@ class HHAutopilot:
         return "completed"
 
     def _stop_requested(self, run, authorization) -> bool:
+        if self._pipeline_stop is not None and self._pipeline_stop.is_set():
+            return True
         if self.repository.run_stop_requested(run.id):
             return True
         if isinstance(authorization, LiveAuthorization):
@@ -836,10 +1670,17 @@ class HHAutopilot:
         по умолчанию 120с. Без явного продления первая же запись после
         такой паузы падает с LostLease и live-прогон обрывается.
         """
+        self.flush_ranking_usage()
         keeper = getattr(self.search_provider, "lease_keeper", None)
-        if keeper is None:
-            return lease
-        return keeper.ensure_current()
+        if keeper is not None:
+            lease = keeper.ensure_current()
+        while not self._ranking_events.empty():
+            item_id, run_id, fence, reason = self._ranking_events.get_nowait()
+            self.repository.append_event(
+                item_id, reason, {"workers_total": self.ranking_workers},
+                run_id=run_id, fencing_token=fence,
+            )
+        return lease
 
     def _now(self) -> datetime:
         value = self.clock()

@@ -8,6 +8,7 @@ from typing import Any, Mapping, Protocol
 
 from work_hunter.models import Job
 
+from .policy import _description_salary_ceiling
 from .repository import AutopilotRepository, LeaseKeeper
 from .types import NormalizedVacancy, SearchPage, SearchRequest, SearchResult
 
@@ -203,7 +204,7 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
             for part in (
                 _clean(_decode_snippet_text(snippet.get("requirement"))),
                 _clean(_decode_snippet_text(snippet.get("responsibility"))),
-                _clean(raw.get("description")),
+                _decode_snippet_text(_clean(raw.get("description"))),
             )
             if part
         )
@@ -214,6 +215,12 @@ def normalize_vacancy(raw: Mapping[str, Any]) -> NormalizedVacancy:
     salary_from = _optional_amount(salary, "from")
     salary_to = _optional_amount(salary, "to")
     currency = _clean(salary.get("currency"), limit=32)
+    if salary_from is None and salary_to is None:
+        # Extract pay before PII sanitization can redact a numeric range.
+        described_salary = _description_salary_ceiling(raw)
+        if described_salary is not None:
+            salary_to = described_salary
+            currency = "RUR"
     schedule_id = _clean(schedule.get("id"), limit=128)
     published_at = _clean(raw.get("published_at"), limit=128)
     alternate_url = _optional_text_fact(raw, "alternate_url", limit=2_000)

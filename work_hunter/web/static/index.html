@@ -1187,24 +1187,24 @@
         <button role="tab" data-analytics-tab="trends"><i class="ph ph-trend-up" aria-hidden="true"></i>Тренды</button>
       </div>
       <div class="topbar" style="padding:0;margin-bottom:12px;">
-        <div><h1>Результаты за 30 дней</h1><p>Что помогает получать ответы и где теряются отклики.</p></div>
-        <div class="actions"><button type="button"><i class="ph ph-calendar-blank" aria-hidden="true"></i>Последние 30 дней</button><button id="refresh-stats-button" data-action-id="stats.refresh"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Обновить</button></div>
+        <div><h1>Сквозная аналитика</h1><p>Отправки по журналу и состояние базы вакансий.</p></div>
+        <div class="actions"><label>Период откликов <select id="stats-period"><option value="7">7 дней</option><option value="30" selected>30 дней</option><option value="90">90 дней</option></select></label><button id="refresh-stats-button" data-action-id="stats.refresh"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i>Обновить</button></div>
       </div>
       <div class="stats-grid">
         <div class="stat-card">
           <span class="metric-icon blue"><i class="ph ph-eye" aria-hidden="true"></i></span><h3>Найдено</h3>
           <div class="stat-number" id="stat-total">—</div>
-          <p>вакансий загружено</p>
+          <p>в базе за всё время</p>
         </div>
         <div class="stat-card">
           <span class="metric-icon green"><i class="ph ph-target" aria-hidden="true"></i></span><h3>Новых</h3>
           <div class="stat-number" id="stat-new">—</div>
-          <p>за выбранный период</p>
+          <p>текущий статус в базе</p>
         </div>
         <div class="stat-card">
           <span class="metric-icon orange"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></span><h3>Откликов</h3>
           <div class="stat-number" id="stat-applied">—</div>
-          <p>отправлено агентом и вручную</p>
+          <p>подтверждено за выбранный период</p>
         </div>
         <div class="stat-card">
           <span class="metric-icon purple"><i class="ph ph-bookmark-simple" aria-hidden="true"></i></span><h3>Сохранено</h3>
@@ -1213,8 +1213,17 @@
         </div>
       </div>
       <div class="analytics-grid">
+        <div class="stats-section analytics-cross-source">
+          <div class="panel-head"><div><span class="eyebrow">Журнал отправок · МСК</span><h3>Отклики по дням</h3></div><span id="stats-period-summary" aria-live="polite"></span></div>
+          <div id="stats-daily" class="analytics-daily" aria-label="Количество подтверждённых откликов по дням"></div>
+          <h3>Результаты по площадкам</h3>
+          <p class="meta">Текущий статус откликов, отправленных за выбранный период. Длина полос — число откликов, масштаб общий.</p>
+          <div id="stats-outcomes" class="analytics-outcomes" aria-label="Результаты подтверждённых откликов по площадкам"></div>
+          <div id="stats-ledger-sources" class="analytics-table-wrap"></div>
+          <p id="stats-ledger-note" class="meta"></p>
+        </div>
         <div class="stats-section analytics-sources">
-          <div class="panel-head"><div><span class="eyebrow">Площадки</span><h3>Лучшие источники</h3></div></div>
+          <div class="panel-head"><div><span class="eyebrow">База · всё время</span><h3>Вакансии по источникам</h3></div></div>
           <div id="stats-by-source" class="stats-bars"></div>
         </div>
         <div class="stats-section analytics-score">
@@ -1222,7 +1231,7 @@
           <div id="stats-score-dist" class="stats-bars"></div>
         </div>
         <div class="stats-section analytics-funnel">
-          <div class="panel-head"><div><span class="eyebrow">Конверсия</span><h3>Воронка откликов</h3></div></div>
+          <div class="panel-head"><div><span class="eyebrow">Ручные отметки · всё время</span><h3>Текущие статусы вакансий</h3></div></div>
           <div id="stats-funnel" class="stats-funnel"></div>
         </div>
         <div class="stats-section analytics-insights">

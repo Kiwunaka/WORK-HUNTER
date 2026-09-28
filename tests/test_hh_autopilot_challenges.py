@@ -134,12 +134,18 @@ def test_captcha_handoff_is_idempotent_releases_quota_and_resumes_with_cookies(
     try:
         first = handler.handle_captcha(
             item,
-            url="https://hh.ru/captcha?token=secret",
+            url=(
+                "https://hh.ru/account/captcha?state=opaque-state"
+                "&token=secret"
+            ),
             lease=lease,
         )
         second = handler.handle_captcha(
             item,
-            url="https://hh.ru/captcha?token=secret",
+            url=(
+                "https://hh.ru/account/captcha?state=opaque-state"
+                "&token=secret"
+            ),
             lease=lease,
         )
 
@@ -148,6 +154,10 @@ def test_captcha_handoff_is_idempotent_releases_quota_and_resumes_with_cookies(
         assert challenge is not None
         assert challenge.challenge_type == "manual_captcha"
         assert "secret" not in challenge.sanitized_url
+        assert challenge.sanitized_url == (
+            "https://hh.ru/account/captcha?state=opaque-state"
+            "&backurl=https%3A%2F%2Fhh.ru%2F"
+        )
         assert repo.dispatch_reservation(item.id).state.value == "released"
         assert repo.get_item(item.id).state is AutopilotState.MANUAL_CHALLENGE
 

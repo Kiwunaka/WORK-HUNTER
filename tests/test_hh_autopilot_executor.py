@@ -425,6 +425,29 @@ def test_possibly_sent_never_becomes_retry_ready(executor_case) -> None:
     assert attempt.delivery_certainty is DeliveryCertainty.POSSIBLY_SENT
 
 
+@pytest.mark.parametrize("message,expected", [
+    ("response parser failed", "response parser failed"),
+    ("access_token=do-not-store", "redacted"),
+])
+def test_unexpected_transport_error_is_diagnostic_and_never_retried(executor_case, message, expected):
+    def fail():
+        raise ValueError(message)
+    executor_case.transport.on_call = fail
+    result = executor_case.executor.execute(
+        executor_case.item.id, executor_case.authorization,
+        executor_case.lease, now=executor_case.now,
+    )
+    assert result.state is AutopilotState.RECONCILING
+    assert result.outcome_code == "post_dispatch_internal_error"
+    attempt = executor_case.repo.conn.execute(
+        "SELECT raw_result_json FROM hh_application_attempts WHERE id=?", (result.attempt_id,)
+    ).fetchone()
+    import json
+    payload = json.loads(attempt[0])["payload"]
+    assert payload == {"exception_type": "ValueError", "error_message": expected}
+    assert executor_case.repo.active_reservation_for_attempt(result.attempt_id).state.value == "held"
+
+
 def test_duplicate_definite_response_is_held_for_reconciliation(
     executor_case,
 ) -> None:

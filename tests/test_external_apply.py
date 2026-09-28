@@ -11,6 +11,9 @@ from work_hunter.external_apply import (
     _application_scope,
     _application_success,
     _apply_with_session,
+    _authenticated_browser_session,
+    _find_start_action,
+    _submit_habr_start,
     resolve_form_answer,
 )
 from work_hunter.models import Job
@@ -162,11 +165,59 @@ class FakePage:
         )
 
 
+def test_browser_login_needs_positive_account_evidence() -> None:
+    page = FakePage(set(), url="https://getmatch.ru/")
+    assert not _authenticated_browser_session(page, "getmatch")
+    signed_in = FakePage({'button:text-is("Выйти")'}, url="https://jabka.work/profile")
+    assert _authenticated_browser_session(signed_in, "jabka")
+    assert not _authenticated_browser_session(signed_in, "getmatch")
+    signed_in.url = "https://jabka.work/auth"
+    assert not _authenticated_browser_session(signed_in, "jabka")
+
+
 def test_linkedin_form_discovery_is_scoped_to_easy_apply_modal() -> None:
     page = FakePage({".jobs-easy-apply-modal"})
 
     assert _application_scope(page, "linkedin") is not page
     assert _application_scope(page, "indeed") is None
+
+
+def test_habr_start_uses_submit_in_response_section_not_header_navigation():
+    assert _find_start_action(FakePage({'button:has-text("Откликнуться")'}), "habr", {}) is None
+    assert _find_start_action(FakePage({'#create-vacancy-response button[type="submit"]'}), "habr", {}) is not None
+
+
+def test_habr_receipt_requires_dated_response_on_same_vacancy():
+    receipt = "#create-vacancy-response .vacancy-response .resume-card time[datetime]"
+    page = FakePage({receipt}, url="https://career.habr.com/vacancies/123")
+    assert _already_applied(page, "habr")
+    assert _application_success(page, "habr", page.url)
+    assert not _application_success(page, "habr", "https://career.habr.com/vacancies/456")
+    assert not _already_applied(FakePage({'text="Ваш отклик"'}, url=page.url), "habr")
+    assert not _already_applied(FakePage({receipt}, url="https://other.test/vacancies/123"), "habr")
+
+
+@pytest.mark.parametrize("receipt,timeout,expected", [(True, False, "applied"), (False, False, "submission_unknown"), (False, True, "submission_unknown")])
+def test_habr_first_apply_click_is_final_and_never_repeated(tmp_path, receipt, timeout, expected):
+    selector = "#create-vacancy-response .vacancy-response .resume-card time[datetime]"
+    page = FakePage({selector} if receipt else set(), url="https://career.habr.com/vacancies/123")
+    page.wait_for_timeout = lambda _: None
+    steps = []
+    class Button:
+        calls = 0
+        def click(self):
+            assert "final_submit_started" in steps
+            self.calls += 1
+            if timeout:
+                raise TimeoutError()
+    button = Button()
+    result = _submit_habr_start(page, button, request(tmp_path), steps)
+    assert result.status == expected
+    assert button.calls == 1
+    if receipt:
+        assert result.raw_result["cover_letter_submitted"] is False
+    else:
+        assert "reconciliation_required" in result.blockers
 
 
 def test_linkedin_already_applied_and_success_markers_are_detected() -> None:

@@ -60,7 +60,8 @@ def launch_readiness(app: WorkHunter) -> dict[str, Any]:
         check("autopilot_config", True, "Конфигурация автопилота корректна")
         start = settings.schedule["start"]
         end = settings.schedule["end"]
-        minutes = lambda value: int(value[:2]) * 60 + int(value[3:])
+        def minutes(value: str) -> int:
+            return int(value[:2]) * 60 + int(value[3:])
         window_minutes = minutes(end) - minutes(start)
         runs = window_minutes // settings.schedule["interval_minutes"] + 1
         capacity = min(settings.limits.daily_success, runs * settings.limits.per_run_success)

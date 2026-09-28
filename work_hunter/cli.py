@@ -123,6 +123,7 @@ def main(argv: list[str] | None = None) -> None:
     apply_job.add_argument("--confirm", action="store_true")
 
     browser_login = sub.add_parser("browser-login")
+    browser_login.add_argument("--keep-open", action="store_true", help="Keep the source window open for account switching/profile editing until closed or --wait expires")
     browser_login.add_argument("source", choices=LIST_SOURCE_CHOICES)
     browser_login.add_argument("--url", default="")
     browser_login.add_argument("--wait", type=_positive_int, default=300)
@@ -453,6 +454,9 @@ def main(argv: list[str] | None = None) -> None:
     hh_autopilot_retry = hh_autopilot_sub.add_parser("retry")
     hh_autopilot_retry.add_argument("--account", required=True)
     hh_autopilot_retry.add_argument("--item-id", type=_positive_int, required=True)
+    hh_autopilot_requeue = hh_autopilot_sub.add_parser("requeue-curated-skip")
+    hh_autopilot_requeue.add_argument("--account", required=True)
+    hh_autopilot_requeue.add_argument("--item-id", type=_positive_int, required=True)
     hh_autopilot_challenges = hh_autopilot_sub.add_parser("challenges")
     hh_autopilot_challenges.add_argument("--account")
     hh_autopilot_resolve = hh_autopilot_sub.add_parser("resolve-challenge")
@@ -734,6 +738,7 @@ def main(argv: list[str] | None = None) -> None:
                 source_config=(app.config.get("sources") or {}).get(args.source) or {},
                 url=args.url,
                 wait_seconds=args.wait,
+                keep_open=args.keep_open,
             )
         )
         return
@@ -885,6 +890,10 @@ def main(argv: list[str] | None = None) -> None:
                 )
             elif command == "retry":
                 result = app.retry_hh_autopilot(
+                    account=args.account, item_id=args.item_id
+                )
+            elif command == "requeue-curated-skip":
+                result = app.requeue_curated_hh_autopilot_skip(
                     account=args.account, item_id=args.item_id
                 )
             elif command == "challenges":

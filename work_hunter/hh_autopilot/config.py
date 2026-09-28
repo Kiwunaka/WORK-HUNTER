@@ -136,7 +136,9 @@ def default_autopilot_config() -> dict[str, Any]:
         },
         "filters": {
             "excluded_keywords": [],
+            "excluded_title_keywords": [],
             "required_keywords": [],
+            "required_title_keywords": [],
             "allowed_role_families": [],
             "areas": [],
             "remote": "any",
@@ -146,8 +148,10 @@ def default_autopilot_config() -> dict[str, Any]:
             "languages": [],
             "citizenships": [],
             "required_application_capabilities": [],
+            "allowed_vacancy_ids": [],
             "minimum_salary": 0,
             "salary_currency": "RUR",
+            "minimum_salary_by_currency": {},
             "unknown_salary": "allow",
             "use_employer_blacklist": True,
         },
@@ -159,6 +163,7 @@ def default_autopilot_config() -> dict[str, Any]:
             "send_delay_max_seconds": 120,
         },
         "ranking": {
+            "mode": "ranked",
             "minimum_score": 60,
             "ai_mode": "borderline",
             "borderline_low": 50,
@@ -196,8 +201,8 @@ def default_autopilot_config() -> dict[str, Any]:
             "cover_letter_template": (
                 "{Здравствуйте|Добрый день}! Меня зовут {candidate_name}. "
                 "Хочу откликнуться на вакансию «{vacancy_name}» в "
-                "{employer_name}. Мой опыт и навыки ({candidate_skills}) "
-                "соответствуют задачам позиции. Буду рад обсудить детали."
+                "{employer_name}. Мой опыт соответствует задачам позиции. "
+                "Буду рад обсудить детали."
             ),
             "cover_letter_max_characters": 10_000,
             "cover_letter_spintax": True,
@@ -244,6 +249,7 @@ _RETENTION_KEYS = frozenset(default_autopilot_config()["retention"])
 _REMOTE_MODES = frozenset({"any", "only", "exclude"})
 _UNKNOWN_SALARY_MODES = frozenset({"allow", "reject"})
 _AI_MODES = frozenset({"off", "borderline", "all"})
+_RANKING_MODES = frozenset({"ranked", "basic_requirements"})
 _AI_DETAILS = frozenset({"light", "heavy"})
 _AI_FAILURE_POLICIES = frozenset({"retry", "deterministic", "skip"})
 _RESUME_POLICIES = frozenset({"best_resume_only", "per_resume"})
@@ -705,6 +711,31 @@ def _parse_filters(raw: Any) -> dict[str, Any]:
         raise AutopilotConfigError(
             "filters.salary_currency must be a three-letter currency code"
         )
+    raw_currency_floors = value["minimum_salary_by_currency"]
+    if not isinstance(raw_currency_floors, dict):
+        raise AutopilotConfigError(
+            "filters.minimum_salary_by_currency must be an object"
+        )
+    currency_floors: dict[str, int] = {}
+    for raw_currency, raw_floor in raw_currency_floors.items():
+        if not isinstance(raw_currency, str) or not re.fullmatch(
+            r"[A-Za-z]{3}", raw_currency.strip()
+        ):
+            raise AutopilotConfigError(
+                "filters.minimum_salary_by_currency keys must be three-letter "
+                "currency codes"
+            )
+        currency = raw_currency.strip().upper()
+        if currency in currency_floors:
+            raise AutopilotConfigError(
+                "filters.minimum_salary_by_currency contains a duplicate currency"
+            )
+        currency_floors[currency] = _bounded(
+            f"filters.minimum_salary_by_currency.{currency}",
+            raw_floor,
+            0,
+            1_000_000_000,
+        )
     return {
         "excluded_keywords": _normalized_array(
             "filters.excluded_keywords",
@@ -713,9 +744,23 @@ def _parse_filters(raw: Any) -> dict[str, Any]:
             high=1000,
             normalize=casefolded_text,
         ),
+        "excluded_title_keywords": _normalized_array(
+            "filters.excluded_title_keywords",
+            value["excluded_title_keywords"],
+            low=0,
+            high=1000,
+            normalize=casefolded_text,
+        ),
         "required_keywords": _normalized_array(
             "filters.required_keywords",
             value["required_keywords"],
+            low=0,
+            high=1000,
+            normalize=casefolded_text,
+        ),
+        "required_title_keywords": _normalized_array(
+            "filters.required_title_keywords",
+            value["required_title_keywords"],
             low=0,
             high=1000,
             normalize=casefolded_text,
@@ -775,10 +820,15 @@ def _parse_filters(raw: Any) -> dict[str, Any]:
                 name, item, _APPLICATION_CAPABILITIES
             ),
         ),
+        "allowed_vacancy_ids": _normalized_array(
+            "filters.allowed_vacancy_ids", value["allowed_vacancy_ids"],
+            low=0, high=500, normalize=_hh_id,
+        ),
         "minimum_salary": _bounded(
             "filters.minimum_salary", value["minimum_salary"], 0, 1_000_000_000
         ),
         "salary_currency": salary_currency.upper(),
+        "minimum_salary_by_currency": currency_floors,
         "unknown_salary": _enum(
             "filters.unknown_salary", value["unknown_salary"], _UNKNOWN_SALARY_MODES
         ),
@@ -794,7 +844,7 @@ def _parse_limits(raw: Any) -> LimitSettings:
         "limits.administrative_max_daily_success",
         value["administrative_max_daily_success"],
         1,
-        200,
+        500,
     )
     daily = _bounded("limits.daily_success", value["daily_success"], 1, administrative)
     per_run = _bounded(
@@ -846,6 +896,7 @@ def _parse_ranking(raw: Any) -> dict[str, Any]:
             "ranking requires borderline_low <= minimum_score <= borderline_high"
         )
     return {
+        "mode": _enum("ranking.mode", value["mode"], _RANKING_MODES),
         "minimum_score": minimum_score,
         "ai_mode": _enum("ranking.ai_mode", value["ai_mode"], _AI_MODES),
         "borderline_low": borderline_low,
@@ -1497,7 +1548,9 @@ _UNORDERED_ARRAY_KEYS = frozenset(
         "preset_names",
         "resumes",
         "excluded_keywords",
+        "excluded_title_keywords",
         "required_keywords",
+        "required_title_keywords",
         "allowed_role_families",
         "areas",
         "schedules",
@@ -1529,7 +1582,9 @@ _UNORDERED_ARRAY_KEYS = frozenset(
 _CASEFOLD_ARRAY_KEYS = frozenset(
     {
         "excluded_keywords",
+        "excluded_title_keywords",
         "required_keywords",
+        "required_title_keywords",
         "allowed_role_families",
         "schedules",
         "employment_types",

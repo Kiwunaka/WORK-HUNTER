@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import subprocess
@@ -14,6 +15,25 @@ from .config import MASK
 
 
 def chat_completion(
+    messages: list[dict[str, Any]],
+    ai_config: dict[str, Any],
+) -> str:
+    """Retry a broken AI response twice; never retry HH application requests."""
+    if str(ai_config.get("backend") or "direct").lower() != "direct":
+        return _chat_completion_once(messages, ai_config)
+    for attempt, delay in enumerate((2, 4), start=1):
+        try:
+            return _chat_completion_once(messages, ai_config)
+        except requests.exceptions.ChunkedEncodingError:
+            logging.getLogger(__name__).warning(
+                "AI response interrupted; retry %s/2 in %ss (ChunkedEncodingError)",
+                attempt, delay,
+            )
+            time.sleep(delay)
+    return _chat_completion_once(messages, ai_config)
+
+
+def _chat_completion_once(
     messages: list[dict[str, Any]],
     ai_config: dict[str, Any],
 ) -> str:

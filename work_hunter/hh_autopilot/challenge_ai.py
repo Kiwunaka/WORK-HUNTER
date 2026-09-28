@@ -68,7 +68,7 @@ class HHChallengeAI:
                 },
             ],
         )
-        token = re.sub(r"[^0-9A-Za-zА-Яа-яЁё]", "", raw)
+        token = " ".join(re.sub(r"[^0-9A-Za-zА-Яа-яЁё\s]", "", raw).split())
         if not token:
             raise ChallengeAIError("Vision model returned no CAPTCHA text")
         return token[:100]

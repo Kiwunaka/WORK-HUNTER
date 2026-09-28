@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from playwright.sync_api import sync_playwright
 
-from work_hunter.external_apply import ExternalApplyRequest, _complete_browser_form
+from work_hunter.external_apply import ExternalApplyRequest, _complete_browser_form, _save_habr_cover_letter
 from work_hunter.models import Job
 
 
@@ -112,3 +112,34 @@ def test_required_checkboxes_are_not_automatically_confirmed(form_page, tmp_path
     assert result.status == "needs_answers"
     assert len(result.blockers) == 3
     assert form_page.locator('input:checked').count() == 1
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_habr_letter_requires_matching_saved_text_without_resending_resume(form_page, accepted):
+    form_page.set_content('''<div id="create-vacancy-response">
+      <div class="vacancy-response"><article class="resume-card"><time datetime="2026-09-21">Today</time></article>
+        <div id="editor"><button type="button" id="edit">Редактировать</button></div>
+      </div></div>
+      <script>
+      window.saves = 0;
+      document.querySelector('#edit').onclick = () => {
+        document.querySelector('#editor').innerHTML = '<textarea name="body"></textarea><button id="save">Сохранить</button>';
+        document.querySelector('#save').onclick = () => {
+          window.saves++;
+          const value = document.querySelector('textarea').value;
+          const message = document.createElement('div');
+          message.className = 'vacancy-response__message';
+          message.textContent = window.accepted ? value : 'Previous letter';
+          document.querySelector('#editor').replaceChildren(message);
+        };
+      };
+      </script>''')
+    form_page.evaluate('(accepted) => { window.accepted = accepted; }', accepted)
+    steps = []
+    assert _save_habr_cover_letter(form_page, 'Здравствуйте!\nPython и SQL.', steps) is accepted
+    assert form_page.evaluate('window.saves') == 1
+    assert ('cover_letter_confirmed' in steps) is accepted
+    assert form_page.locator('.resume-card time').count() == 1
+    if accepted:
+        assert _save_habr_cover_letter(form_page, 'Здравствуйте!\nPython и SQL.', steps)
+        assert form_page.evaluate('window.saves') == 1

@@ -271,6 +271,15 @@ def test_recommendations_use_resume_page_adapter_and_control_params(
     assert transport.requested == []
 
 
+def test_full_description_preserves_comparisons_after_removing_html() -> None:
+    vacancy = normalize_vacancy(_vacancy(
+        "comparisons", snippet={},
+        description="<p>Kafka &gt; 3 years</p><p>SQL > 2 years</p>",
+    ))
+
+    assert vacancy.description == "Kafka › 3 years SQL › 2 years"
+
+
 def test_normalization_sanitizes_and_detaches_upstream_data() -> None:
     raw = _vacancy("1")
 

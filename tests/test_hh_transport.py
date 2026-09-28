@@ -372,6 +372,92 @@ def test_api_session_raises_typed_errors(monkeypatch):
     assert exc.value.code == "too_many_requests"
 
 
+def test_api_session_preserves_safe_captcha_challenge_metadata(monkeypatch):
+    class Response:
+        status_code = 403
+        headers = {
+            "Location": (
+                "https://hh.ru/account/captcha?state=header-state"
+                "&token=header-secret&access_token=header-secret"
+            ),
+            "X-Request-ID": "req-146",
+        }
+
+        def json(self):
+            return {
+                "errors": [{"value": "captcha_required"}],
+                "captcha_url": (
+                    "https://hh.ru/account/captcha?state=body-state"
+                    "&token=body-secret&access_token=body-secret"
+                ),
+            }
+
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: Response(),
+    )
+
+    with pytest.raises(HHTransportError) as exc:
+        HHApiSession({"access_token": "token"}).request_json("GET", "/me")
+
+    assert exc.value.status_code == 403
+    assert exc.value.code == "captcha_required"
+    assert exc.value.payload["challenge_metadata"] == {
+        "captcha_url": (
+            "https://hh.ru/account/captcha?state=body-state"
+            "&backurl=https%3A%2F%2Fhh.ru%2F"
+        ),
+        "location": (
+            "https://hh.ru/account/captcha?state=header-state"
+            "&backurl=https%3A%2F%2Fhh.ru%2F"
+        ),
+        "request_id": "req-146",
+    }
+    assert "secret" not in json.dumps(exc.value.payload["challenge_metadata"])
+
+
+def test_application_api_captcha_preserves_state_for_vision_retry(monkeypatch) -> None:
+    client = HHApplyClient({"access_token": "token"})
+
+    def blocked(*_args, **_kwargs):
+        raise HHTransportError(
+            "captcha required", status_code=403, code="captcha_required",
+            payload={"challenge_metadata": {"captcha_url":
+                "https://hh.ru/account/captcha?state=opaque&token=secret"}},
+        )
+
+    monkeypatch.setattr(client.session, "apply", blocked)
+    outcome, runtime_url = client.apply_outcome_with_runtime_location(
+        "vacancy", "resume", "letter", timeout_seconds=30,
+    )
+
+    assert outcome.code == "manual_captcha"
+    assert outcome.certainty is DeliveryCertainty.DEFINITE_RESPONSE
+    assert runtime_url == outcome.location == (
+        "https://hh.ru/account/captcha?state=opaque&backurl=https%3A%2F%2Fhh.ru%2F"
+    )
+
+
+def test_hh_captcha_sanitizers_round_trip_state_and_required_backurl() -> None:
+    from work_hunter.hh_autopilot.challenges import sanitize_hh_url
+    from work_hunter.hh_autopilot.engine import _safe_hh_challenge_url as engine_url
+    from work_hunter.hh_transport.api_session import _safe_hh_challenge_url as api_url
+
+    source = (
+        "https://hh.ru/account/captcha?state=opaque%2Bstate"
+        "&token=unrelated&auth=unrelated&access_token=unrelated"
+        "&backurl=https%3A%2F%2Fevil.example%2F"
+    )
+    expected = (
+        "https://hh.ru/account/captcha?state=opaque%2Bstate"
+        "&backurl=https%3A%2F%2Fhh.ru%2F"
+    )
+
+    assert api_url(source) == expected
+    assert engine_url(source) == expected
+    assert sanitize_hh_url(source) == expected
+
+
 def test_api_session_requires_access_token():
     with pytest.raises(HHAuthError) as exc:
         HHApiSession({}).request_json("GET", "/me")
@@ -776,6 +862,21 @@ def test_apply_outcome_maps_every_supported_response(
     assert outcome.retry_after_seconds == retry_after
     assert "secret" not in outcome.location
     assert "secret" not in json.dumps(outcome.payload)
+
+
+@pytest.mark.parametrize("location", [
+    "https://api.hh.ru/negotiations/5639253186",
+    "https://hh.ru:invalid/negotiations/1",
+])
+def test_success_survives_unpersistable_location(monkeypatch, location):
+    client = HHApplyClient({"access_token": "token"})
+    monkeypatch.setattr(client.session, "apply", lambda *a, **kw: _DispatchResponse(
+        201, {}, location=location,
+    ))
+    outcome = client.apply_outcome("v-1", "r-1", "")
+    assert outcome.code == "applied"
+    assert outcome.certainty is DeliveryCertainty.DEFINITE_RESPONSE
+    assert outcome.location == ""
 
 
 def test_apply_outcome_maps_typed_transport_errors_without_string_matching(

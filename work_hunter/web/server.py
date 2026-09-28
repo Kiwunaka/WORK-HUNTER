@@ -20,6 +20,7 @@ from ..models import CalendarEvent, Resume, SavedSearch
 from ..safety import is_literal_confirmation
 from ..services import WorkHunter
 from .security import SECURITY_HEADERS, ensure_loopback_listener, request_boundary_error
+from .analytics import application_analytics
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -726,6 +727,11 @@ def make_handler(root: Path):
                 app = WorkHunter(root)
                 jobs = app.list_jobs(limit=1000000)
                 stats = _compute_stats(jobs, app.storage)
+                period = parse_qs(parsed.query).get("days", ["30"])[0]
+                if period not in {"7", "30", "90"}:
+                    self._send_json({"error": "days must be 7, 30 or 90"}, HTTPStatus.BAD_REQUEST)
+                    return
+                stats["cross_source"] = application_analytics(app.storage, int(period))
                 self._send_json(stats)
                 return
             if path.startswith("/"):

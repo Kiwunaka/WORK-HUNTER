@@ -7,7 +7,6 @@ access/refresh через POST https://api.hh.ru/token.
 """
 from __future__ import annotations
 
-import time
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any

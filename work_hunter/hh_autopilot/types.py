@@ -58,6 +58,7 @@ STABLE_OUTCOME_CODES = frozenset(
         "vacancy_closed",
         "forbidden",
         "missing_required_data",
+        "role_not_allowed",
         "screening_disabled",
         "form_disabled",
         "ai_unavailable",
@@ -72,6 +73,7 @@ STABLE_OUTCOME_CODES = frozenset(
         "challenge_dismissed",
         "pre_dispatch_network_error",
         "post_dispatch_network_error",
+        "post_dispatch_internal_error",
         "server_error",
         "read_parse_error",
         "post_dispatch_parse_error",
@@ -114,8 +116,14 @@ class RunRequest:
     resume_id: str | None = None
     vacancy_id: str | None = None
     preset_name: str | None = None
+    continuous: bool = False
+    success_limit: int | None = None
 
     def __post_init__(self) -> None:
+        if type(self.continuous) is not bool:
+            raise TypeError("continuous must be a boolean")
+        if self.success_limit is not None:
+            _int(self.success_limit, field_name="success_limit", minimum=1)
         account_id = _text(
             self.account_id,
             field_name="run request account_id",
@@ -593,6 +601,7 @@ _HARD_FILTER_REASONS = frozenset(
         "hard_filter:excluded_keywords",
         "hard_filter:required_keywords",
         "hard_filter:allowed_role_families",
+        "hard_filter:allowed_vacancy_ids",
         "hard_filter:area",
         "hard_filter:remote",
         "hard_filter:schedule",
@@ -614,6 +623,7 @@ _RANKING_REASONS = frozenset(
         "deterministic_fallback",
         "ai_suitable",
         "ai_unsuitable",
+        "ai_low_confidence",
         "ai_unavailable",
         "missing_required_data",
         *_HARD_FILTER_REASONS,
@@ -701,6 +711,7 @@ def _filter_evidence(
         "hard_filter:active_history",
         "hard_filter:permanently_skipped",
         "hard_filter:vacancy_blacklist",
+        "hard_filter:allowed_vacancy_ids",
     }:
         shape = (frozenset({"vacancy_id"}),)
     elif reason == "hard_filter:employer_blacklist":
@@ -1241,6 +1252,11 @@ class RankingDecision:
             ):
                 raise ValueError(
                     "ai_unsuitable requires an available unsuitable AI result"
+                )
+        elif reason == "ai_low_confidence":
+            if self.ready or ai is None or not ai.available:
+                raise ValueError(
+                    "ai_low_confidence requires an available non-ready AI outcome"
                 )
         elif reason == "ai_unavailable":
             if self.ready or ai is None or ai.available:

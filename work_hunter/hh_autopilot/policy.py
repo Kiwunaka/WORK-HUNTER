@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import html
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 from .sanitization import phrase_matches_fact, sanitize_text
@@ -15,6 +17,30 @@ _EVIDENCE_LIMIT = 20
 _FACT_LIMIT = 500
 _TEXT_LIMIT = 20_000
 _ABSENT = object()
+_SALARY_NUMBER = r"(?:\d{1,3}(?:\s\d{3})+|\d+)"
+_DESCRIPTION_RUB_SALARY = re.compile(
+    r"\b(?:заработная\s+плата|зарплата|оклад)\s*[:—–-]?\s*"
+    r"(?:от\s+|до\s+)?"
+    rf"(?P<low>{_SALARY_NUMBER})\s*(?P<low_unit>тыс\.?|[кk])?\s*"
+    rf"(?:(?:[-–—]|до)\s*(?P<high>{_SALARY_NUMBER})\s*"
+    r"(?P<high_unit>тыс\.?|[кk])?\s*)?"
+    r"(?:₽|руб(?:\.|лей|ля|ль)?\b|rub\b|rur\b)",
+    re.IGNORECASE,
+)
+
+
+def _description_salary_ceiling(vacancy: Mapping[str, Any]) -> int | None:
+    """Read explicitly labelled RUB pay, not unrelated benefit prices."""
+    description = vacancy.get("description")
+    if not isinstance(description, str):
+        return None
+    text = re.sub(r"<[^>]*>", " ", html.unescape(description))
+    match = _DESCRIPTION_RUB_SALARY.search(text)
+    if match is None:
+        return None
+    amount = match.group("high") or match.group("low")
+    unit = match.group("high_unit") or match.group("low_unit")
+    return int(re.sub(r"\s", "", amount)) * (1000 if unit else 1)
 
 
 class _MissingFact(ValueError):
@@ -323,6 +349,10 @@ class HardFilter:
             self._application_capabilities,
         )
         try:
+            allowed = _configured_list(self._filters, "allowed_vacancy_ids", maximum=500)
+            vacancy_id = _normalized_text(vacancy_data.get("id"), field="vacancy.id")
+            if allowed and vacancy_id not in allowed:
+                return _reject("hard_filter:allowed_vacancy_ids", vacancy_id=vacancy_id)
             for check in checks:
                 decision = check(
                     vacancy_data,
@@ -515,6 +545,9 @@ class HardFilter:
         candidate: Mapping[str, Any],
         _context: Mapping[str, Any],
     ) -> FilterDecision | None:
+        if _configured_list(self._filters, "allowed_vacancy_ids", maximum=500):
+            # The reviewed worklist replaces broad search terms and HH role tags.
+            return None
         skills = _string_set_from_keys(
             vacancy,
             ("key_skills", "skills"),
@@ -545,10 +578,11 @@ class HardFilter:
             nested_employer_name,
             field="vacancy.employer_name",
         )
+        title = _first_text(vacancy, ("title", "name"), field="vacancy.title")
         facts = tuple(
             part
             for part in (
-                _first_text(vacancy, ("title", "name"), field="vacancy.title"),
+                title,
                 _first_text(
                     vacancy,
                     ("description",),
@@ -577,6 +611,23 @@ class HardFilter:
             return _reject(
                 "hard_filter:excluded_keywords",
                 matched=_safe_terms(matched),
+            )
+        excluded_title = _configured_list(self._filters, "excluded_title_keywords")
+        matched_title = tuple(
+            term for term in excluded_title if term and _matches_any_fact(term, (title,))
+        )
+        if matched_title:
+            return _reject(
+                "hard_filter:excluded_keywords",
+                matched=_safe_terms(matched_title),
+            )
+        required_title = _configured_list(self._filters, "required_title_keywords")
+        if required_title and not any(
+            _matches_any_fact(term, (title,)) for term in required_title
+        ):
+            return _reject(
+                "hard_filter:required_keywords",
+                missing=_safe_terms(required_title),
             )
         required = _configured_list(self._filters, "required_keywords")
         # «Хотя бы одно»: список ролей/навыков из правил поиска — это
@@ -864,6 +915,21 @@ class HardFilter:
         floor = self._filters.get("minimum_salary", 0)
         if type(floor) is not int or floor < 0:
             raise _MalformedFact("filters.minimum_salary")
+        raw_currency_floors = self._filters.get(
+            "minimum_salary_by_currency", {}
+        )
+        if not isinstance(raw_currency_floors, Mapping):
+            raise _MalformedFact("filters.minimum_salary_by_currency")
+        currency_floors: dict[str, int] = {}
+        for raw_currency, raw_floor in raw_currency_floors.items():
+            if (
+                not isinstance(raw_currency, str)
+                or not re.fullmatch(r"[A-Za-z]{3}", raw_currency.strip())
+                or type(raw_floor) is not int
+                or raw_floor < 0
+            ):
+                raise _MalformedFact("filters.minimum_salary_by_currency")
+            currency_floors[raw_currency.strip().casefold()] = raw_floor
         top_salary_from = self._salary_amount_fact(
             vacancy,
             "salary_from",
@@ -932,8 +998,13 @@ class HardFilter:
             nested_currency,
             field="vacancy.salary_currency",
         )
-        if floor == 0:
+        if floor == 0 and not currency_floors:
             return None
+        if salary_from is None and salary_to is None:
+            described_salary = _description_salary_ceiling(vacancy)
+            if described_salary is not None:
+                salary_to = described_salary
+                currency = "rur"
         if salary_from is None and salary_to is None:
             unknown = self._filters.get("unknown_salary", "allow")
             if unknown == "allow":
@@ -951,6 +1022,10 @@ class HardFilter:
             self._filters.get("salary_currency", ""),
             field="filters.salary_currency",
         )
+        currency_floor = currency_floors.get(currency)
+        if currency_floor is not None:
+            floor = currency_floor
+            expected_currency = currency
         if currency != expected_currency:
             return _reject(
                 "hard_filter:minimum_salary",

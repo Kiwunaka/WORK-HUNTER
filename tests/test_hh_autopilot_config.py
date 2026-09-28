@@ -77,6 +77,7 @@ def test_autopilot_defaults_are_disabled_and_bounded() -> None:
     settings = parse_autopilot_settings(default_config())
     account = settings.accounts[0]
     assert account.enabled is False
+    assert settings.ranking["mode"] == "ranked"
     assert settings.limits.daily_success == 50
     assert settings.search.per_page == 100
     assert settings.search.max_pages == 20
@@ -94,6 +95,60 @@ def test_invalid_lease_window_is_rejected() -> None:
         "renewal_margin_seconds": 45,
     }
     with pytest.raises(AutopilotConfigError, match="lease"):
+        parse_autopilot_settings(config)
+
+
+def test_explicit_500_application_limit_preserves_lower_defaults() -> None:
+    config = default_config()
+    assert parse_autopilot_settings(config).limits.administrative_max_daily_success == 200
+    _autopilot(config)["limits"].update(
+        administrative_max_daily_success=500,
+        daily_success=500,
+        per_run_success=465,
+    )
+    limits = parse_autopilot_settings(config).limits
+    assert limits.daily_success == 500
+    assert limits.per_run_success == 465
+
+
+@pytest.mark.parametrize("mode", ["ranked", "basic_requirements"])
+def test_ranking_mode_is_an_explicit_policy_contract(mode: str) -> None:
+    config = default_config()
+    _autopilot(config)["ranking"]["mode"] = mode
+
+    settings = parse_autopilot_settings(config)
+
+    assert settings.ranking["mode"] == mode
+
+
+def test_ranking_mode_rejects_unknown_values() -> None:
+    config = default_config()
+    _autopilot(config)["ranking"]["mode"] = "no_score"
+
+    with pytest.raises(AutopilotConfigError, match=r"ranking\.mode"):
+        parse_autopilot_settings(config)
+
+
+def test_currency_specific_salary_floors_are_normalized_and_bounded() -> None:
+    config = default_config()
+    _autopilot(config)["filters"]["minimum_salary_by_currency"] = {
+        " usd ": 2_000,
+    }
+
+    settings = parse_autopilot_settings(config)
+
+    assert settings.filters["minimum_salary_by_currency"] == {"USD": 2_000}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, [], {"US": 2_000}, {"USD": -1}, {"USD": True}],
+)
+def test_currency_specific_salary_floors_reject_malformed_values(value: object) -> None:
+    config = default_config()
+    _autopilot(config)["filters"]["minimum_salary_by_currency"] = value
+
+    with pytest.raises(AutopilotConfigError, match=r"filters\.minimum_salary_by_currency"):
         parse_autopilot_settings(config)
 
 
@@ -126,7 +181,7 @@ def test_filter_change_invalidates_policy_hash() -> None:
         (("search", "max_results_per_run"), 10001),
         (("schedule", "interval_minutes"), 0),
         (("filters", "minimum_salary"), 1_000_000_001),
-        (("limits", "administrative_max_daily_success"), 201),
+        (("limits", "administrative_max_daily_success"), 501),
         (("limits", "send_delay_min_seconds"), -1),
         (("retry", "max_attempts"), 21),
         (("retry", "base_delay_seconds"), 0),

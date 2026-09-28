@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from work_hunter.storage import Storage, redact_for_storage
 
+from work_hunter.hh_transport.challenge_urls import sanitize_hh_challenge_url
+
 from .sanitization import sanitize_text
 from .state_machine import assert_transition
 from .types import (
@@ -866,6 +868,8 @@ def _dispatch_event_metadata(outcome: DispatchOutcome) -> dict[str, Any]:
         "certainty": outcome.certainty.value,
         "status_code": outcome.status_code,
         "retry_after_seconds": outcome.retry_after_seconds,
+        **{key: outcome.payload[key] for key in ("exception_type", "error_message")
+           if key in outcome.payload},
     }
 
 
@@ -1361,9 +1365,17 @@ class AutopilotRepository:
             if claimed.last_run_id != origin_run_id:
                 raise StaleWrite("item could not be claimed by the current run")
             return claimed
-        if item.state is AutopilotState.RANKED and item.last_run_id != origin_run_id:
-            # Прерванный run остановился между ranking и finalize: сбрасываем
-            # в discovered, иначе item навсегда застрянет в ranked.
+        if (
+            item.state in {AutopilotState.ELIGIBLE, AutopilotState.RANKED}
+            and item.last_run_id != origin_run_id
+            and item.application_attempt_count == 0
+            and item.active_attempt_id is None
+            and self._run_for_update(item.last_run_id).status in TERMINAL_RUN_STATUSES
+        ):
+            # Re-evaluate unfinished selection under the new run's live policy.
+            self._assert_fence(account_id, origin_run.fencing_token, _instant(None, field="now"))
+            if origin_run.status != "running":
+                raise StaleWrite("selection recovery requires a running owner")
             self.conn.execute(
                 """
                 UPDATE hh_autopilot_items
@@ -1379,7 +1391,7 @@ class AutopilotRepository:
                     RetryStage.ELIGIBILITY.value,
                     now,
                     item.id,
-                    AutopilotState.RANKED.value,
+                    item.state.value,
                     item.version,
                 ),
             )
@@ -1388,13 +1400,13 @@ class AutopilotRepository:
                 reset.state is not AutopilotState.DISCOVERED
                 or reset.last_run_id != origin_run_id
             ):
-                raise StaleWrite("ranked item could not be recovered")
+                raise StaleWrite("unfinished selection could not be recovered")
             self._insert_event(
                 item_id=item.id,
                 run_id=origin_run_id,
-                previous=AutopilotState.RANKED,
+                previous=item.state,
                 target=AutopilotState.DISCOVERED,
-                reason="recovered_ranked",
+                reason=f"recovered_{item.state.value}",
                 metadata={},
             )
             return reset
@@ -1714,10 +1726,18 @@ class AutopilotRepository:
         *,
         run_id: int,
         fencing_token: int,
+        active_resume_ids: Sequence[str],
         now: datetime | str | None = None,
     ) -> tuple[RankedCandidate, ...]:
         account_id = _canonical_identifier(account_id, field="account_id")
         vacancy_id = _required_text(vacancy_id, field="vacancy_id")
+        active_resumes = tuple(
+            _canonical_identifier(value, field="resume_id")
+            for value in active_resume_ids
+        )
+        if not active_resumes:
+            return ()
+        resume_placeholders = ",".join("?" for _ in active_resumes)
         run_id = _integer(run_id, field="run_id", minimum=1)
         fencing_token = _integer(
             fencing_token,
@@ -1734,28 +1754,43 @@ class AutopilotRepository:
             ):
                 raise LostLease("retry candidate run is not current")
             self._assert_fence(account_id, fencing_token, instant)
-            pending = self.conn.execute(
+            dispatched = self.conn.execute(
                 """
                 SELECT 1 FROM hh_autopilot_items
                 WHERE account_profile_id = ? AND vacancy_id = ?
+                  AND (state IN ('ready','applying','reconciling','manual_challenge','applied')
+                       OR (state = 'skipped' AND last_outcome_code = 'duplicate_vacancy')
+                       OR application_attempt_count > 0 OR active_attempt_id IS NOT NULL)
+                LIMIT 1
+                """,
+                (account_id, vacancy_id),
+            ).fetchone()
+            if dispatched is not None:
+                return ()
+            pending = self.conn.execute(
+                f"""
+                SELECT 1 FROM hh_autopilot_items
+                WHERE account_profile_id = ? AND vacancy_id = ?
+                  AND resume_id IN ({resume_placeholders})
                   AND application_attempt_count = 0
                   AND active_attempt_id IS NULL
                   AND state IN ('discovered','eligible','retry_wait')
                 LIMIT 1
                 """,
-                (account_id, vacancy_id),
+                (account_id, vacancy_id, *active_resumes),
             ).fetchone()
             if pending is not None:
                 return ()
             rows = self.conn.execute(
-                """
+                f"""
                 SELECT * FROM hh_autopilot_items
                 WHERE account_profile_id = ? AND vacancy_id = ?
+                  AND resume_id IN ({resume_placeholders})
                   AND state = 'ranked' AND application_attempt_count = 0
                   AND active_attempt_id IS NULL
                 ORDER BY id ASC
                 """,
-                (account_id, vacancy_id),
+                (account_id, vacancy_id, *active_resumes),
             ).fetchall()
             candidates: list[RankedCandidate] = []
             for row in rows:
@@ -1940,6 +1975,16 @@ class AutopilotRepository:
                         raise StaleWrite(
                             "candidate set contains a nonterminal skipped item"
                         )
+                    continue
+                if (
+                    candidate.state is AutopilotState.DEAD
+                    and candidate.retry_stage is RetryStage.ELIGIBILITY
+                    and candidate.last_outcome_code == "retry_exhausted"
+                    and candidate.application_attempt_count == 0
+                    and candidate.active_attempt_id is None
+                ):
+                    # Exhausted selection is terminal; it cannot compete with
+                    # a qualifying sibling. Sent/uncertain attempts stay blocked.
                     continue
                 if candidate.state is not AutopilotState.RANKED:
                     raise StaleWrite(
@@ -2891,6 +2936,23 @@ class AutopilotRepository:
         ).fetchone()
         return _persisted_integer(row["total"], field="application count")
 
+    def matching_application(self, account_id: str, vacancy: NormalizedVacancy) -> str | None:
+        """Find an already-sent copy advertised under another HH ID/city."""
+        if not vacancy.employer_name or not vacancy.description:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT job.source_id FROM applications AS application
+            JOIN jobs AS job ON job.id = application.job_id
+            WHERE application.account_profile_id = ? AND job.source = 'hh'
+              AND job.source_id != ? AND job.company = ? AND job.title = ?
+              AND job.description = ?
+            LIMIT 1
+            """,
+            (account_id, vacancy.id, vacancy.employer_name, vacancy.title, vacancy.description),
+        ).fetchone()
+        return str(row["source_id"]) if row is not None else None
+
     def get_guard(
         self,
         account_id: str,
@@ -3089,6 +3151,8 @@ class AutopilotRepository:
         states: Iterable[AutopilotState],
         now: datetime | str,
         limit: int,
+        resume_ids: Iterable[str] | None = None,
+        vacancy_ids: Iterable[str] | None = None,
     ) -> list[ItemRecord]:
         account_id = _canonical_identifier(account_id, field="account_id")
         if isinstance(states, (str, bytes)):
@@ -3109,16 +3173,24 @@ class AutopilotRepository:
         now_value = _timestamp(now, field="now")
         limit = _integer(limit, field="limit")
         placeholders = ",".join("?" for _ in state_values)
+        resumes = tuple(sorted({_canonical_identifier(value, field="resume_id") for value in resume_ids})) if resume_ids is not None else None
+        vacancies = tuple(sorted({_canonical_identifier(value, field="vacancy_id") for value in vacancy_ids})) if vacancy_ids is not None else None
+        if resumes == () or vacancies == ():
+            return []
+        resume_clause = f" AND resume_id IN ({','.join('?' for _ in resumes)})" if resumes is not None else ""
+        vacancy_clause = f" AND vacancy_id IN ({','.join('?' for _ in vacancies)})" if vacancies is not None else ""
         rows = self.conn.execute(
             f"""
             SELECT * FROM hh_autopilot_items
             WHERE account_profile_id = ?
               AND state IN ({placeholders})
               AND next_attempt_at <= ?
+              {resume_clause}
+              {vacancy_clause}
             ORDER BY next_attempt_at ASC, id ASC
             LIMIT ?
             """,
-            (account_id, *state_values, now_value, limit),
+            (account_id, *state_values, now_value, *(resumes or ()), *(vacancies or ()), limit),
         ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
@@ -3144,7 +3216,7 @@ class AutopilotRepository:
         ).fetchone()
         return row is not None
 
-    def ready_items(self, account_id: str, *, limit: int) -> list[ItemRecord]:
+    def ready_items(self, account_id: str, *, limit: int, resume_ids: Iterable[str] | None = None, vacancy_ids: Iterable[str] | None = None) -> list[ItemRecord]:
         """Return dispatchable work in the same stable order used by ranking."""
         account_id = _canonical_identifier(account_id, field="account_id")
         limit = _integer(limit, field="limit", minimum=1)
@@ -3157,6 +3229,12 @@ class AutopilotRepository:
             (account_id,),
         ).fetchall()
         items = [self._item_from_row(row) for row in rows]
+        if resume_ids is not None:
+            allowed = {_canonical_identifier(value, field="resume_id") for value in resume_ids}
+            items = [item for item in items if item.resume_id in allowed]
+        if vacancy_ids is not None:
+            allowed = {_canonical_identifier(value, field="vacancy_id") for value in vacancy_ids}
+            items = [item for item in items if item.vacancy_id in allowed]
         items.sort(key=_ranked_item_sort_key)
         return items[:limit]
 
@@ -3167,6 +3245,8 @@ class AutopilotRepository:
         run_id: int,
         fencing_token: int,
         limit: int,
+        resume_ids: Iterable[str] | None = None,
+        vacancy_ids: Iterable[str] | None = None,
     ) -> list[ItemRecord]:
         """Перевести orphaned ready items прошлых прогонов в текущий run.
 
@@ -3187,16 +3267,13 @@ class AutopilotRepository:
                 or run.fencing_token != fencing_token
             ):
                 raise RepositoryAuthorizationDenied("run_not_active")
-            rows = self.conn.execute(
-                """
-                SELECT id FROM hh_autopilot_items
-                WHERE account_profile_id = ? AND state = 'ready' AND last_run_id != ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (account_id, run_id, limit),
-            ).fetchall()
-            ids = [int(row["id"]) for row in rows]
+            # Claim the same ranked batch that dispatch will read, not an
+            # unrelated ID-ordered subset of orphaned items.
+            ids = [
+                item.id
+                for item in self.ready_items(account_id, limit=limit, resume_ids=resume_ids, vacancy_ids=vacancy_ids)
+                if item.last_run_id != run_id
+            ]
             if ids:
                 placeholders = ",".join("?" for _ in ids)
                 self.conn.execute(
@@ -3207,7 +3284,7 @@ class AutopilotRepository:
                     """,
                     (run_id, _utc_now(), *ids),
                 )
-        return self.ready_items(account_id, limit=limit)
+        return self.ready_items(account_id, limit=limit, resume_ids=resume_ids, vacancy_ids=vacancy_ids)
 
     def activate_due_retry(
         self,
@@ -7275,8 +7352,8 @@ class AutopilotRepository:
             field="sanitized_url",
             maximum=2_000,
         )
-        if "?" in sanitized_url or "#" in sanitized_url:
-            raise ValueError("challenge URL must not contain query or fragment data")
+        if "#" in sanitized_url or sanitized_url != sanitize_hh_challenge_url(sanitized_url):
+            raise ValueError("challenge URL contains unsafe query or fragment data")
         fencing_token = _integer(
             fencing_token,
             field="fencing_token",
@@ -7842,6 +7919,209 @@ class AutopilotRepository:
             if cursor.rowcount != 1:
                 raise StaleWrite("challenge resolution compare-and-swap failed")
             return item
+
+    def requeue_verified_preflight_skip(
+        self, item_id: int, *, actor: str, fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        """Reopen a curated preflight skip only when no POST was dispatched."""
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        actor = _required_text(actor, field="actor")
+        instant = _instant(now, field="now")
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            self._assert_fence(current.account_id, fencing_token, instant)
+            row = self.conn.execute(
+                "SELECT * FROM hh_application_attempts WHERE id = ?",
+                (current.active_attempt_id,),
+            ).fetchone()
+            raw = {} if row is None else _json_loads(row["raw_result_json"], field="raw_result")
+            payload = raw.get("payload", {})
+            code = current.last_outcome_code
+            verified_reason = (
+                code == "missing_required_data"
+                and payload.get("professional_role_ids") == []
+            ) or (
+                code == "role_not_allowed"
+                and payload.get("field") == "professional_roles"
+                and bool(payload.get("professional_role_ids"))
+            )
+            if not (
+                current.state is AutopilotState.SKIPPED
+                and verified_reason
+                and row is not None and row["autopilot_item_id"] == current.id
+                and raw.get("certainty") == "definitely_not_sent"
+                and raw.get("code") == code
+                and payload.get("stage") == "preflight"
+            ):
+                raise StaleWrite("item is not a verified preflight skip")
+            try:
+                filter_decision = FilterDecision(**current.filter_data)
+            except (TypeError, ValueError) as exc:
+                raise StaleWrite("preflight item has no valid filter decision") from exc
+            if not filter_decision.passed:
+                raise StaleWrite("preflight item failed a hard filter")
+            owner = self.conn.execute(
+                "SELECT status FROM hh_autopilot_runs WHERE id = ?", (current.last_run_id,),
+            ).fetchone()
+            if owner is None or owner["status"] not in TERMINAL_RUN_STATUSES:
+                raise StaleWrite("previous owner is not terminal")
+            occupied = self.conn.execute(
+                """SELECT 1 FROM hh_autopilot_quota_reservations q
+                JOIN hh_application_attempts a ON a.id = q.attempt_id
+                WHERE q.account_profile_id = ? AND a.vacancy_id = ?
+                AND q.state IN ('held', 'reserved', 'consumed') LIMIT 1""",
+                (current.account_id, current.vacancy_id),
+            ).fetchone()
+            if occupied is not None:
+                raise StaleWrite("vacancy already has a pending or consumed reservation")
+            if self.conn.execute(
+                "SELECT 1 FROM hh_negotiations WHERE vacancy_id = ? LIMIT 1",
+                (current.vacancy_id,),
+            ).fetchone() is not None:
+                raise StaleWrite("vacancy already has a negotiation")
+            self.conn.execute(
+                """UPDATE hh_autopilot_items SET state = 'ready', version = version + 1,
+                next_attempt_at = '', last_outcome_code = 'preflight_requeued', updated_at = ?
+                WHERE id = ? AND version = ?""",
+                (instant.isoformat(), current.id, current.version),
+            )
+            self._insert_event(
+                item_id=current.id, run_id=None, previous=current.state,
+                target=AutopilotState.READY, reason="preflight_requeued",
+                metadata={"actor": actor, "attempt_id": current.active_attempt_id,
+                          "previous_reason": code},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
+
+    def requeue_curated_skipped(
+        self, item_id: int, *, actor: str, fencing_token: int,
+        now: datetime | str | None = None,
+    ) -> ItemRecord:
+        """Reopen an old ranking skip after an operator reviews the full vacancy."""
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        actor = _required_text(actor, field="actor")
+        instant = _instant(now, field="now")
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            self._assert_fence(current.account_id, fencing_token, instant)
+            if current.state is not AutopilotState.SKIPPED or current.last_outcome_code not in {
+                "deterministic_below_minimum", "ai_unsuitable", "not_best_resume",
+            }:
+                raise StaleWrite("only old ranking skips can be curated for requeue")
+            try:
+                filter_decision = FilterDecision(**current.filter_data)
+            except (TypeError, ValueError) as exc:
+                raise StaleWrite("curated item has no valid filter decision") from exc
+            if not filter_decision.passed:
+                raise StaleWrite("curated item failed a hard filter")
+            vacancy_id = current.vacancy_id
+            if any((
+                self.conn.execute(
+                    "SELECT 1 FROM hh_application_attempts WHERE vacancy_id = ? LIMIT 1",
+                    (vacancy_id,),
+                ).fetchone(),
+                self.conn.execute(
+                    "SELECT 1 FROM hh_negotiations WHERE vacancy_id = ? LIMIT 1",
+                    (vacancy_id,),
+                ).fetchone(),
+                self.conn.execute(
+                    "SELECT 1 FROM hh_vacancy_response_dedup WHERE vacancy_id = ? LIMIT 1",
+                    (vacancy_id,),
+                ).fetchone(),
+            )):
+                raise StaleWrite("vacancy has an application, negotiation, or response record")
+            from .ranking import basic_requirements_decision
+
+            decision = basic_requirements_decision(filter_decision)
+            cursor = self.conn.execute(
+                """UPDATE hh_autopilot_items SET state = 'ready', version = version + 1,
+                   deterministic_score = ?, ai_json = ?, next_attempt_at = '',
+                   last_outcome_code = 'curated_requeued', updated_at = ?
+                   WHERE id = ? AND version = ? AND state = 'skipped'""",
+                (decision.rank_score.score, _json_dumps(decision.to_dict(), field="curated decision"),
+                 instant.isoformat(), current.id, current.version),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("curated requeue compare-and-swap failed")
+            self._insert_event(
+                item_id=current.id, run_id=None, previous=current.state,
+                target=AutopilotState.READY, reason="curated_requeued",
+                metadata={"actor": actor, "previous_reason": current.last_outcome_code,
+                          "previous_score": current.deterministic_score},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
+
+    def requeue_curated_filter_skip(
+        self, item_id: int, *, decision: FilterDecision, actor: str,
+        fencing_token: int, now: datetime | str | None = None,
+    ) -> ItemRecord:
+        """Recheck an unattempted filter skip under the current curated policy."""
+        item_id = _integer(item_id, field="item_id", minimum=1)
+        actor = _required_text(actor, field="actor")
+        instant = _instant(now, field="now")
+        if not isinstance(decision, FilterDecision) or not decision.passed:
+            raise StaleWrite("current hard filter did not pass")
+        with self.immediate():
+            current = self._item_for_update(item_id)
+            self._assert_fence(current.account_id, fencing_token, instant)
+            if (
+                current.state is not AutopilotState.SKIPPED
+                or not (
+                    current.last_outcome_code.startswith("hard_filter:")
+                    or current.last_outcome_code == "missing_required_data"
+                )
+                or current.active_attempt_id is not None
+            ):
+                raise StaleWrite("item is not an unattempted filter skip")
+            owner = self.conn.execute(
+                "SELECT status FROM hh_autopilot_runs WHERE id = ?",
+                (current.last_run_id,),
+            ).fetchone()
+            if owner is None or owner["status"] not in TERMINAL_RUN_STATUSES:
+                raise StaleWrite("previous owner is not terminal")
+            vacancy_id = current.vacancy_id
+            if any((
+                self.conn.execute(
+                    "SELECT 1 FROM hh_application_attempts WHERE vacancy_id = ? LIMIT 1",
+                    (vacancy_id,),
+                ).fetchone(),
+                self.conn.execute(
+                    "SELECT 1 FROM hh_negotiations WHERE vacancy_id = ? LIMIT 1",
+                    (vacancy_id,),
+                ).fetchone(),
+                self.conn.execute(
+                    "SELECT 1 FROM hh_vacancy_response_dedup WHERE vacancy_id = ? LIMIT 1",
+                    (vacancy_id,),
+                ).fetchone(),
+            )):
+                raise StaleWrite("vacancy has an attempt, negotiation, or response record")
+            from .ranking import basic_requirements_decision
+
+            ranking = basic_requirements_decision(decision)
+            cursor = self.conn.execute(
+                """UPDATE hh_autopilot_items SET state = 'ready', version = version + 1,
+                   filter_json = ?, deterministic_score = ?, ai_json = ?,
+                   next_attempt_at = '', last_outcome_code = 'curated_requeued', updated_at = ?
+                   WHERE id = ? AND version = ? AND state = 'skipped'""",
+                (
+                    _json_dumps(decision.to_dict(), field="curated filter decision"),
+                    ranking.rank_score.score,
+                    _json_dumps(ranking.to_dict(), field="curated ranking decision"),
+                    instant.isoformat(), current.id, current.version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleWrite("curated filter-skip requeue compare-and-swap failed")
+            self._insert_event(
+                item_id=current.id, run_id=None, previous=current.state,
+                target=AutopilotState.READY, reason="curated_requeued",
+                metadata={"actor": actor, "previous_reason": current.last_outcome_code},
+                created_at=instant,
+            )
+            return self._item_for_update(current.id)
 
     def requeue_dead(
         self,

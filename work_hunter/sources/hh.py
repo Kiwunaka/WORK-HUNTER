@@ -20,6 +20,7 @@ from ..hh_transport.errors import (
     HHParseError,
     HHTransportError,
 )
+from ..hh_transport.challenge_urls import sanitize_hh_challenge_url
 from ..hh_autopilot.sanitization import sanitize_text
 from ..hh_autopilot.reconcile import NegotiationSnapshot
 from ..hh_autopilot.types import (
@@ -579,15 +580,22 @@ class HHApplyClient:
             )
             raw = _response_json_for_dispatch(response)
         except HHTransportError as exc:
+            challenge = exc.payload.get("challenge_metadata") if isinstance(exc.payload, dict) else None
+            captcha_url = (
+                sanitize_hh_challenge_url(challenge.get("captcha_url"))
+                if exc.code == "captcha_required" and isinstance(challenge, dict)
+                else ""
+            )
             return (
                 DispatchOutcome(
                     code=_dispatch_error_code(exc),
                     certainty=exc.delivery_certainty,
                     status_code=exc.status_code,
                     retry_after_seconds=_retry_after_seconds(exc.payload),
+                    location=captcha_url,
                     payload=_sanitized_dispatch_payload(exc.payload),
                 ),
-                "",
+                captcha_url,
             )
         runtime_location = str(
             getattr(response, "headers", {}).get("Location", "") or ""
@@ -672,6 +680,8 @@ def _response_json_for_dispatch(response: Any) -> dict[str, Any]:
 
 
 def _dispatch_error_code(exc: HHTransportError) -> str:
+    if exc.status_code == 403 and exc.code == "captcha_required":
+        return "manual_captcha"
     if exc.code in {
         "post_dispatch_parse_error",
         "read_parse_error",
@@ -708,7 +718,13 @@ def _dispatch_outcome_from_response(
     raw_location = str(
         getattr(response, "headers", {}).get("Location", "") or ""
     )
-    location = _sanitize_dispatch_location(raw_location)
+    try:
+        location = _sanitize_dispatch_location(raw_location)
+    except ValueError:
+        # Location is optional metadata. A numeric negotiation ID can look
+        # like a phone number to the privacy filter; never lose a definite
+        # response just because its URL cannot safely be persisted.
+        location = ""
     payload = _sanitized_dispatch_payload(raw)
     error_tokens = _dispatch_error_tokens(raw)
     location_kind = _dispatch_location_kind(raw_location)
