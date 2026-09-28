@@ -18,13 +18,14 @@ import re
 from typing import Any
 from urllib.parse import unquote, urljoin
 
-from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 import requests
 
 from .ai_backends import chat_completion
 
 
 def fetch_page(url: str) -> dict[str, Any]:
+    from bs4 import BeautifulSoup  # type: ignore[import-not-found,import-untyped]
+
     response = requests.get(url, timeout=35, headers={"User-Agent": "Mozilla/5.0"})
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
